@@ -251,26 +251,12 @@ class FlowsAccumulator:
             ),
         )
 
-    def _segment_meta(
-        self,
-        *,
-        e2e_latency=None,
-        interrupted=False,
-        llm_node_ttft=None,
-        tts_node_ttfb=None,
-        transcript_confidence=None,
-        **extra,
-    ) -> dict:
+    def _segment_meta(self, *, interrupted: bool = False, **extra) -> dict:
         import uuid as _uuid
         return {
-            "id":                    str(_uuid.uuid4()),
-            "e2e_latency":           e2e_latency,
-            "interrupted":           interrupted,
-            "llm_node_ttft":         llm_node_ttft,
-            "tts_node_ttfb":         tts_node_ttfb,
-            "transcript_confidence": transcript_confidence,
-            "asr_node_ttft":         None,
-            **extra,
+            "id": str(_uuid.uuid4()),
+            "interrupted": interrupted,
+            **{k: v for k, v in extra.items() if v is not None},
         }
 
     def _enrich_transcript(self, messages: list) -> list:

@@ -1,64 +1,59 @@
 """Data models for pipecat_flows_tuner."""
 
-from dataclasses import dataclass, field, asdict
 from typing import Any, Optional
+
+from pydantic import BaseModel, Field
 
 
 # ── Internal / accumulator models ─────────────────────────────────────────────
 
-@dataclass
-class PendingTransition:
+class PendingTransition(BaseModel):
     function_name: str
     arguments: Any
     timestamp_ms: int
 
 
-@dataclass
-class NodeTransitionRecord:
-    from_node: Optional[str]
+class NodeTransitionRecord(BaseModel):
+    from_node: Optional[str] = None
     to_node: str
-    trigger_function: Optional[str]
-    trigger_args: Optional[Any]
+    trigger_function: Optional[str] = None
+    trigger_args: Optional[Any] = None
     state_snapshot: dict
     task_messages: list
-    functions_available: list
+    functions_available: list[str]
     timestamp_ms: int
 
 
-@dataclass
-class LatencyTurn:
+class LatencyTurn(BaseModel):
     turn_index: int
-    node: Optional[str]
-    ttfb_ms: Optional[int]
-    llm_ms: Optional[int]
-    tts_ms: Optional[int]
+    node: Optional[str] = None
+    ttfb_ms: Optional[int] = None
+    llm_ms: Optional[int] = None
+    tts_ms: Optional[int] = None
     bot_started_ms: int
     user_stopped_ms: int
     user_started_ms: int
-    user_confidence: Optional[float]
+    user_confidence: Optional[float] = None
     bot_stopped_ms: Optional[int] = None  # filled in later by on_bot_stopped
 
 
 # ── Transcript segment models ──────────────────────────────────────────────────
 
-@dataclass
-class ToolInfo:
-    name: Optional[str]
-    request_id: Optional[str]
+class ToolInfo(BaseModel):
+    name: Optional[str] = None
+    request_id: Optional[str] = None
     params: Optional[dict] = None    # agent_function segments
     result: Optional[Any] = None     # agent_result segments
 
 
-@dataclass
-class NodeInfo:
-    # "from" is a keyword; serialized as "from" in to_dict()
-    from_node: Optional[str]
+class NodeInfo(BaseModel):
+    # "from" is a reserved keyword; serialized as "from" via alias
+    from_node: Optional[str] = Field(None, serialization_alias="from")
     to: str
-    reason: Optional[str]
+    reason: Optional[str] = None
 
 
-@dataclass
-class TranscriptSegment:
+class TranscriptSegment(BaseModel):
     role: str          # "user" | "agent" | "agent_function" | "agent_result" | "node_transition"
     text: str
     start_ms: int
@@ -70,51 +65,34 @@ class TranscriptSegment:
 
 # ── Payload models ─────────────────────────────────────────────────────────────
 
-@dataclass
-class AiModels:
+class AiModels(BaseModel):
     asr_model: str
     llm_model: str
     tts_model: str
 
 
-@dataclass
-class UsageToken:
+class UsageToken(BaseModel):
     asr_duration: int
-    llm_token: Optional[int]
-    tts_character_count: Optional[int]
+    llm_token: Optional[int] = None
+    tts_character_count: Optional[int] = None
 
 
-@dataclass
-class GeneralMetaData:
+class GeneralMetaData(BaseModel):
     ai_models: AiModels
     usage_token: UsageToken
 
 
-@dataclass
-class CallPayload:
+class CallPayload(BaseModel):
     call_id: str
     call_type: str
     start_timestamp: int
     end_timestamp: int
     recording_url: str
-    transcript_with_tool_calls: list
+    transcript_with_tool_calls: list[TranscriptSegment]
     call_status: str
     duration_ms: int
     general_meta_data_raw: GeneralMetaData
 
     def to_dict(self) -> dict:
-        """Serialize to JSON-ready dict for the Tuner API, omitting None values."""
-        d = asdict(self)
-        # Rename from_node → from in NodeInfo before stripping None
-        for seg in d.get("transcript_with_tool_calls", []):
-            if seg.get("node") and "from_node" in seg["node"]:
-                seg["node"]["from"] = seg["node"].pop("from_node")
-        return _strip_none(d)
-
-
-def _strip_none(obj):
-    if isinstance(obj, dict):
-        return {k: _strip_none(v) for k, v in obj.items() if v is not None}
-    if isinstance(obj, list):
-        return [_strip_none(item) for item in obj]
-    return obj
+        """Serialize to JSON-ready dict for the Tuner API."""
+        return self.model_dump(exclude_none=True, by_alias=True)
