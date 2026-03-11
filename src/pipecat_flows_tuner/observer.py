@@ -96,7 +96,7 @@ class FlowsObserver(FrameProcessor):
                     "[flows-tuner] node entered: {} → {}  trigger={}",
                     from_node,
                     node_id,
-                    pending.get("function_name") if pending else None,
+                    pending.function_name if pending else None,
                 )
 
         flow_manager._set_node = _patched_set_node

@@ -1,47 +1,117 @@
-"""Data models for pipecat_flows_tuner.
+"""Data models for pipecat_flows_tuner."""
 
-These are plain dicts in the payload, but typed aliases are provided here for documentation.
-The actual runtime representation is always dict so it is JSON-serializable without extra work.
-"""
-
-from typing import Any
+from dataclasses import dataclass, field, asdict
+from typing import Any, Optional
 
 
-# ── type aliases (documentation only) ────────────────────────────────────────
+# ── Internal / accumulator models ─────────────────────────────────────────────
 
-# NodeTransition: one entry in payload["flow_transitions"]
-# {
-#   "from_node": str | None,
-#   "to_node": str,
-#   "trigger_function": str | None,
-#   "trigger_args": dict | None,
-#   "state_snapshot": dict,
-#   "task_messages": list,
-#   "functions_available": list[str],
-#   "timestamp_ms": int,
-# }
-NodeTransition = dict[str, Any]
+@dataclass
+class PendingTransition:
+    function_name: str
+    arguments: Any
+    timestamp_ms: int
 
-# FlowSegment: one entry in payload["transcript_with_tool_calls"]
-# {
-#   "role": str,            # "user" | "agent" | "function_call" | "function_result"
-#   "text": str,
-#   "start_ms": int,
-#   "end_ms": int,
-#   "node": str | None,
-#   ... (role-specific keys)
-# }
-FlowSegment = dict[str, Any]
 
-# LatencyTurn: one entry in payload["latency_turns"]
-# {
-#   "turn_index": int,
-#   "node": str | None,
-#   "ttfb_ms": int | None,
-#   "llm_ms": int | None,
-#   "tts_ms": int | None,
-# }
-LatencyTurn = dict[str, Any]
+@dataclass
+class NodeTransitionRecord:
+    from_node: Optional[str]
+    to_node: str
+    trigger_function: Optional[str]
+    trigger_args: Optional[Any]
+    state_snapshot: dict
+    task_messages: list
+    functions_available: list
+    timestamp_ms: int
 
-# CallData: the top-level payload sent to the API
-CallData = dict[str, Any]
+
+@dataclass
+class LatencyTurn:
+    turn_index: int
+    node: Optional[str]
+    ttfb_ms: Optional[int]
+    llm_ms: Optional[int]
+    tts_ms: Optional[int]
+    bot_started_ms: int
+    user_stopped_ms: int
+    user_started_ms: int
+    user_confidence: Optional[float]
+    bot_stopped_ms: Optional[int] = None  # filled in later by on_bot_stopped
+
+
+# ── Transcript segment models ──────────────────────────────────────────────────
+
+@dataclass
+class ToolInfo:
+    name: Optional[str]
+    request_id: Optional[str]
+    params: Optional[dict] = None    # agent_function segments
+    result: Optional[Any] = None     # agent_result segments
+
+
+@dataclass
+class NodeInfo:
+    # "from" is a keyword; serialized as "from" in to_dict()
+    from_node: Optional[str]
+    to: str
+    reason: Optional[str]
+
+
+@dataclass
+class TranscriptSegment:
+    role: str          # "user" | "agent" | "agent_function" | "agent_result" | "node_transition"
+    text: str
+    start_ms: int
+    end_ms: int
+    metadata: dict
+    tool: Optional[ToolInfo] = None     # agent_function, agent_result
+    node: Optional[NodeInfo] = None     # node_transition
+
+
+# ── Payload models ─────────────────────────────────────────────────────────────
+
+@dataclass
+class AiModels:
+    asr_model: str
+    llm_model: str
+    tts_model: str
+
+
+@dataclass
+class UsageToken:
+    asr_duration: int
+    llm_token: Optional[int]
+    tts_character_count: Optional[int]
+
+
+@dataclass
+class GeneralMetaData:
+    ai_models: AiModels
+    usage_token: UsageToken
+
+
+@dataclass
+class CallPayload:
+    call_id: str
+    call_type: str
+    start_timestamp: int
+    end_timestamp: int
+    recording_url: str
+    transcript_with_tool_calls: list
+    call_status: str
+    duration_ms: int
+    general_meta_data_raw: GeneralMetaData
+
+    def to_dict(self) -> dict:
+        """Serialize to JSON-ready dict for the Tuner API."""
+        d = asdict(self)
+        for seg in d.get("transcript_with_tool_calls", []):
+            # Strip optional None fields that API doesn't expect when absent
+            if seg.get("tool") is None:
+                del seg["tool"]
+            if seg.get("node") is None:
+                del seg["node"]
+            # Rename from_node → from in NodeInfo (reserved Python keyword)
+            elif seg["node"] is not None and "from_node" in seg["node"]:
+                seg["node"]["from"] = seg["node"].pop("from_node")
+        return d

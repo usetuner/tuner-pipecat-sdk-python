@@ -10,9 +10,10 @@ import httpx
 from loguru import logger
 
 from .config import TunerConfig
+from .models import CallPayload
 
 
-async def post_call(config: TunerConfig, payload: dict) -> None:
+async def post_call(config: TunerConfig, payload: CallPayload) -> None:
     url = (
         f"{config.base_url}/api/v1/public/call"
         f"?workspace_id={config.workspace_id}"
@@ -20,24 +21,23 @@ async def post_call(config: TunerConfig, payload: dict) -> None:
     )
     headers = {"Authorization": f"Bearer {config.api_key}"}
 
-    transcript = payload.get("transcript", [])
-    transitions = payload.get("flow_transitions", [])
     logger.info(
-        "[flows-tuner] sending call  call_id={}  transcript_messages={}  transitions={}  url={}",
-        payload.get("call_id"),
-        len(transcript),
-        len(transitions),
+        "[flows-tuner] sending call  call_id={}  transcript_messages={}  url={}",
+        payload.call_id,
+        len(payload.transcript_with_tool_calls),
         url,
     )
 
+    payload_dict = payload.to_dict()
+
     if config.debug:
         print("[flows-tuner] --- request payload ---")
-        print(json.dumps(payload, indent=2, default=str))
+        print(json.dumps(payload_dict, indent=2, default=str))
         print("[flows-tuner] --- end payload ---")
 
     try:
         async with httpx.AsyncClient(timeout=10) as client:
-            response = await client.post(url, json=payload, headers=headers)
+            response = await client.post(url, json=payload_dict, headers=headers)
 
         if response.status_code == 409:
             logger.info(
