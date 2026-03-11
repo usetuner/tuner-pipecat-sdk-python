@@ -103,15 +103,18 @@ class CallPayload:
     general_meta_data_raw: GeneralMetaData
 
     def to_dict(self) -> dict:
-        """Serialize to JSON-ready dict for the Tuner API."""
+        """Serialize to JSON-ready dict for the Tuner API, omitting None values."""
         d = asdict(self)
+        # Rename from_node → from in NodeInfo before stripping None
         for seg in d.get("transcript_with_tool_calls", []):
-            # Strip optional None fields that API doesn't expect when absent
-            if seg.get("tool") is None:
-                del seg["tool"]
-            if seg.get("node") is None:
-                del seg["node"]
-            # Rename from_node → from in NodeInfo (reserved Python keyword)
-            elif seg["node"] is not None and "from_node" in seg["node"]:
+            if seg.get("node") and "from_node" in seg["node"]:
                 seg["node"]["from"] = seg["node"].pop("from_node")
-        return d
+        return _strip_none(d)
+
+
+def _strip_none(obj):
+    if isinstance(obj, dict):
+        return {k: _strip_none(v) for k, v in obj.items() if v is not None}
+    if isinstance(obj, list):
+        return [_strip_none(item) for item in obj]
+    return obj
