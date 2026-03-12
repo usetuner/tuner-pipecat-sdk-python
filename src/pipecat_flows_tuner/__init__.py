@@ -1,31 +1,20 @@
-"""pipecat_flows_tuner — Tuner SDK for pipecat-flows.
+"""Public package interface for `pipecat_flows_tuner`."""
 
-Tracks node transitions, flow state, latency metrics, and the full
-conversation transcript (via flow_manager.get_current_context()), then
-ships the data to the Tuner API.
+from __future__ import annotations
 
-Usage::
+from typing import TYPE_CHECKING, Any
 
-    from pipecat_flows_tuner import FlowsObserver
+from .config import TunerConfig
 
-    observer = FlowsObserver(
-        api_key="...",
-        workspace_id=42,
-        agent_id="my-agent",
-        call_id=str(uuid.uuid4()),
-        debug=True,
-    )
+__all__ = ["FlowsObserver", "TunerConfig"]
 
-    # Wire up before running the pipeline
-    observer.attach_flow_manager(flow_manager)
+if TYPE_CHECKING:
+    from .observer import FlowsObserver
 
-    pipeline = Pipeline([
-        transport.input(), stt, user_agg, llm, tts,
-        observer,
-        transport.output(), assistant_agg,
-    ])
-"""
 
-from .observer import FlowsObserver
+def __getattr__(name: str) -> Any:
+    if name == "FlowsObserver":
+        from .observer import FlowsObserver
 
-__all__ = ["FlowsObserver"]
+        return FlowsObserver
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

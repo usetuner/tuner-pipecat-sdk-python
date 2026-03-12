@@ -1,4 +1,4 @@
-"""Async fire-and-forget HTTP client for the Tuner API.
+"""Transport concern: async fire-and-forget HTTP client for Tuner API.
 
 Posts a completed call payload to POST /api/v1/public/call.
 Never blocks or raises — all failures are logged and swallowed.

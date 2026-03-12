@@ -1,4 +1,4 @@
-"""FlowsObserver: pipecat FrameProcessor that tracks pipecat-flows call data.
+"""Integration concern: Pipecat FrameProcessor that orchestrates collection + delivery.
 
 Place once in the pipeline after TTS:
     transport.input() → stt → user_agg → llm → tts → FlowsObserver → transport.output()
@@ -11,6 +11,7 @@ Transcript is read from flow_manager.get_current_context() at call end.
 
 import asyncio
 import time
+from typing import Any
 
 from loguru import logger
 from pipecat.frames.frames import (
@@ -23,7 +24,6 @@ from pipecat.frames.frames import (
     StartFrame,
     TTSStartedFrame,
     TTSTextFrame,
-    TranscriptionFrame,
     VADUserStartedSpeakingFrame,
     VADUserStoppedSpeakingFrame,
 )
@@ -32,6 +32,7 @@ from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from .accumulator import FlowsAccumulator
 from .client import post_call
 from .config import TunerConfig
+from .flow_manager_integration import attach_flow_manager_patch
 
 
 class FlowsObserver(FrameProcessor):
@@ -68,41 +69,11 @@ class FlowsObserver(FrameProcessor):
         )
         self._acc = FlowsAccumulator()
         self._flushed = False
-        self._flow_manager = None
+        self._flow_manager: Any | None = None
 
-    # ── flow manager integration ───────────────────────────────────────────────
-
-    def attach_flow_manager(self, flow_manager) -> None:
+    def attach_flow_manager(self, flow_manager: Any) -> None:
         self._flow_manager = flow_manager
-        original_set_node = flow_manager._set_node
-
-        acc = self._acc
-
-        async def _patched_set_node(node_id, node_config):
-            from_node = flow_manager._current_node
-            pending = acc.get_pending_transition()
-            await original_set_node(node_id, node_config)
-            state = dict(flow_manager.state)
-            acc.on_node_entered(
-                from_node=from_node,
-                to_node=node_id,
-                node_config=node_config,
-                trigger=pending,
-                state_snapshot=state,
-                timestamp_ns=time.time_ns(),
-            )
-            if self._config.debug:
-                logger.debug(
-                    "[flows-tuner] node entered: {} → {}  trigger={}",
-                    from_node,
-                    node_id,
-                    pending.function_name if pending else None,
-                )
-
-        flow_manager._set_node = _patched_set_node
-        logger.info("[flows-tuner] attached to FlowManager (patched _set_node)")
-
-    # ── frame processing ───────────────────────────────────────────────────────
+        attach_flow_manager_patch(flow_manager, self._acc, self._config)
 
     async def process_frame(self, frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
@@ -119,9 +90,6 @@ class FlowsObserver(FrameProcessor):
 
         elif isinstance(frame, VADUserStoppedSpeakingFrame):
             self._acc.on_user_stopped(frame, timestamp_ns)
-
-        elif isinstance(frame, TranscriptionFrame):
-            self._acc.on_transcription(frame)
 
         elif isinstance(frame, LLMFullResponseStartFrame):
             self._acc.on_llm_started(timestamp_ns)
@@ -144,7 +112,7 @@ class FlowsObserver(FrameProcessor):
         elif isinstance(frame, BotStoppedSpeakingFrame):
             self._acc.on_bot_stopped(timestamp_ns)
 
-        elif isinstance(frame, (CancelFrame, EndFrame)):
+        elif isinstance(frame, CancelFrame | EndFrame):
             self._acc.on_call_end(timestamp_ns)
             if not self._flushed:
                 self._flushed = True
