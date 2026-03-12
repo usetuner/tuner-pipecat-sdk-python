@@ -9,6 +9,7 @@ pytest.importorskip("pipecat", reason="pipecat not installed")
 
 from pipecat.frames.frames import (
     EndFrame,
+    MetricsFrame,
     StartFrame,
     VADUserStartedSpeakingFrame,
     VADUserStoppedSpeakingFrame,
@@ -105,6 +106,46 @@ async def test_handle_end_frame_triggers_flush(observer, mock_flow_manager):
         post_mock.assert_called_once()
         payload = post_mock.call_args[0][1]
         assert payload.call_id == "call-1"
+
+
+def test_handle_start_frame_warns_when_metrics_disabled(observer):
+    from loguru import logger
+
+    messages = []
+    sink_id = logger.add(lambda msg: messages.append(msg), level="WARNING")
+    try:
+        frame = StartFrame(enable_metrics=False, enable_usage_metrics=False)
+        observer._handle(frame, 1_000_000_000)
+    finally:
+        logger.remove(sink_id)
+    combined = "".join(messages)
+    assert "enable_metrics=False" in combined
+    assert "enable_usage_metrics=False" in combined
+
+
+def test_handle_start_frame_no_warning_when_metrics_enabled(observer):
+    from loguru import logger
+
+    messages = []
+    sink_id = logger.add(lambda msg: messages.append(msg), level="WARNING")
+    try:
+        frame = StartFrame(enable_metrics=True, enable_usage_metrics=True)
+        observer._handle(frame, 1_000_000_000)
+    finally:
+        logger.remove(sink_id)
+    combined = "".join(messages)
+    assert "enable_metrics=False" not in combined
+    assert "enable_usage_metrics=False" not in combined
+
+
+def test_handle_metrics_frame_routes_to_accumulator(observer):
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    frame = MetricsFrame(data=[])
+    with patch.object(observer._acc, "on_metrics_frame") as mock_on_metrics:
+        observer._handle(frame, 500)
+        mock_on_metrics.assert_called_once_with(frame)
 
 
 @pytest.mark.asyncio

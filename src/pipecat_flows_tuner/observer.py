@@ -21,9 +21,9 @@ from pipecat.frames.frames import (
     EndFrame,
     FunctionCallInProgressFrame,
     LLMFullResponseStartFrame,
+    MetricsFrame,
     StartFrame,
     TTSStartedFrame,
-    TTSTextFrame,
     VADUserStartedSpeakingFrame,
     VADUserStoppedSpeakingFrame,
 )
@@ -84,6 +84,16 @@ class FlowsObserver(FrameProcessor):
     def _handle(self, frame, timestamp_ns: int) -> None:
         if isinstance(frame, StartFrame):
             self._acc.on_start(timestamp_ns)
+            if not getattr(frame, "enable_metrics", False):
+                logger.warning(
+                    "[flows-tuner] StartFrame.enable_metrics=False — latency metrics (TTFB, "
+                    "LLM ms, TTS ms) will be absent. Pass enable_metrics=True to StartFrame."
+                )
+            if not getattr(frame, "enable_usage_metrics", False):
+                logger.warning(
+                    "[flows-tuner] StartFrame.enable_usage_metrics=False — token and TTS "
+                    "character metrics will be absent. Pass enable_usage_metrics=True to StartFrame."
+                )
 
         elif isinstance(frame, VADUserStartedSpeakingFrame):
             self._acc.on_user_started(timestamp_ns)
@@ -99,12 +109,11 @@ class FlowsObserver(FrameProcessor):
             # arrives before BotStartedSpeakingFrame which travels upstream).
             self._acc.on_tts_started(timestamp_ns)
 
-        elif isinstance(frame, TTSTextFrame):
-            # Count chars for call-level billing metadata.
-            self._acc.on_tts_text_chars(frame)
-
         elif isinstance(frame, FunctionCallInProgressFrame):
             self._acc.on_function_call_in_progress(frame, timestamp_ns)
+
+        elif isinstance(frame, MetricsFrame):
+            self._acc.on_metrics_frame(frame)
 
         elif isinstance(frame, BotStartedSpeakingFrame):
             self._acc.on_bot_started_speaking(timestamp_ns)

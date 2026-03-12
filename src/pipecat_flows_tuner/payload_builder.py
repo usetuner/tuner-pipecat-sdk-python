@@ -20,11 +20,6 @@ def build_payload(
     enriched = enrich_transcript(acc, transcript)
     start_ts = acc.call_start_abs_ns // 1_000_000_000
     end_ts = acc.call_end_abs_ns // 1_000_000_000
-    total_chars = sum(
-        len(message.get("content", "") or "")
-        for message in transcript
-        if isinstance(message.get("content"), str)
-    )
 
     return CallPayload(
         call_id=config.call_id,
@@ -43,8 +38,8 @@ def build_payload(
             ),
             usage_token=UsageToken(
                 asr_duration=max(0, end_ts - start_ts),
-                llm_token=round(total_chars / 4) if total_chars else None,
-                tts_character_count=acc._tts_chars or None,
+                llm_token=acc._pipecat_llm_total_tokens or None,
+                tts_character_count=acc._pipecat_tts_chars or None,
             ),
         ),
     )

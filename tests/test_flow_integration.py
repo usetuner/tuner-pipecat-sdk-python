@@ -48,12 +48,15 @@ def test_full_call_flow_single_turn(config):
     assert acc._current_node == "greeting"
     assert len(acc.node_transitions) == 1
 
-    # User speaks
+    # User speaks; simulate MetricsFrame so latency comes from Pipecat
     acc.on_user_started(base_ns + 50_000_000)
     acc.on_user_stopped(MagicMock(stop_secs=0), base_ns + 100_000_000)
     acc.on_llm_started(base_ns + 150_000_000)
     acc.on_tts_started(base_ns + 200_000_000)
-    acc.on_tts_text_chars(MagicMock(text="Hello there"))
+    acc._pipecat_tts_chars = 11
+    acc._pending_pipecat_tts_ttfb_s = 0.1
+    acc._pending_pipecat_llm_processing_s = 0.05
+    acc._pending_pipecat_tts_processing_s = 0.05
     acc.on_bot_started_speaking(base_ns + 250_000_000)
     acc.on_bot_stopped(base_ns + 400_000_000)
 
@@ -65,7 +68,6 @@ def test_full_call_flow_single_turn(config):
     assert turn.bot_started_ms == 250
     assert turn.bot_stopped_ms == 400
     assert turn.ttfb_ms == 100
-    assert acc._tts_chars == 11
 
     # End
     acc.on_call_end(base_ns + 500_000_000)

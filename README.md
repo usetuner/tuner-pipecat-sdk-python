@@ -8,7 +8,7 @@ then sends a structured `CallPayload` to the Tuner API when a call ends.
 
 - Small integration surface: one `FlowsObserver` in the pipeline.
 - Flow-aware analytics: node transitions and state snapshots from `FlowManager`.
-- Robust timing metrics: VAD, LLM-start, TTS-start, bot-start, bot-stop.
+- Exact metrics from Pipecat: TTFB, processing latency, LLM token counts, TTS character counts via `MetricsFrame`.
 - Typed payload models for downstream tooling.
 
 ## Installation
@@ -42,6 +42,15 @@ observer = FlowsObserver(
 
 # Required: attach the flow manager before running the pipeline
 observer.attach_flow_manager(flow_manager)
+```
+
+**Required:** pass `enable_metrics=True` and `enable_usage_metrics=True` in your `StartFrame`. Without these flags the observer will log warnings and LLM/TTS metric fields will be absent from the payload.
+
+```python
+await pipeline.queue_frame(StartFrame(
+    enable_metrics=True,
+    enable_usage_metrics=True,
+))
 ```
 
 Place the observer after TTS in your pipeline:

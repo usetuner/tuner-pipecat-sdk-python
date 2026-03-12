@@ -16,11 +16,19 @@ def test_on_user_started_sets_once():
 def test_on_user_stopped_sets_anchor_and_clears_llm_tts_bot():
     acc = FlowsAccumulator()
     acc._current_node = "greeting"
+    acc._pending_pipecat_llm_ttfb_s = 0.3
+    acc._pending_pipecat_tts_ttfb_s = 0.1
+    acc._pending_pipecat_llm_processing_s = 1.0
+    acc._pending_pipecat_tts_processing_s = 0.5
     acc.on_user_stopped(MagicMock(stop_secs=0), 200)
     assert acc._user_stopped_ns == 200
     assert acc._llm_started_ns == 0
     assert acc._tts_started_ns == 0
     assert acc._latency_node == "greeting"
+    assert acc._pending_pipecat_llm_ttfb_s == 0.0
+    assert acc._pending_pipecat_tts_ttfb_s == 0.0
+    assert acc._pending_pipecat_llm_processing_s == 0.0
+    assert acc._pending_pipecat_tts_processing_s == 0.0
 
 
 def test_on_user_stopped_applies_stop_correction():
@@ -52,27 +60,14 @@ def test_on_tts_started_sets_once_after_user_stopped():
     assert acc._tts_started_ns == 200
 
 
-def test_on_tts_text_chars_accumulates():
-    acc = FlowsAccumulator()
-    acc.on_tts_text_chars(MagicMock(text="Hello"))
-    acc.on_tts_text_chars(MagicMock(text=" world"))
-    assert acc._tts_chars == 11
-
-
-def test_on_tts_text_chars_handles_empty():
-    acc = FlowsAccumulator()
-    acc.on_tts_text_chars(MagicMock(text=""))
-    assert acc._tts_chars == 0
-
 
 def test_on_bot_started_speaking_flushes_latency_turn():
+    """Without MetricsFrame data, latency fields from Pipecat are None."""
     base_ns = 1_000_000_000
     acc = FlowsAccumulator()
     acc.call_start_abs_ns = base_ns
     acc._user_started_ns = base_ns + 50_000_000
     acc._user_stopped_ns = base_ns + 100_000_000
-    acc._llm_started_ns = base_ns + 150_000_000
-    acc._tts_started_ns = base_ns + 200_000_000
     acc._latency_node = "greeting"
 
     acc.on_bot_started_speaking(base_ns + 250_000_000)
@@ -84,10 +79,31 @@ def test_on_bot_started_speaking_flushes_latency_turn():
     assert turn.bot_started_ms == 250
     assert turn.user_stopped_ms == 100
     assert turn.user_started_ms == 50
+    assert turn.ttfb_ms is None
+    assert turn.llm_ms is None
+    assert turn.tts_ms is None
+    assert acc._user_stopped_ns == 0
+
+
+def test_on_bot_started_speaking_flushes_latency_turn_with_pipecat_metrics():
+    """With MetricsFrame data, latency fields are from Pipecat only."""
+    base_ns = 1_000_000_000
+    acc = FlowsAccumulator()
+    acc.call_start_abs_ns = base_ns
+    acc._user_started_ns = base_ns + 50_000_000
+    acc._user_stopped_ns = base_ns + 100_000_000
+    acc._latency_node = "greeting"
+    acc._pending_pipecat_tts_ttfb_s = 0.1
+    acc._pending_pipecat_llm_processing_s = 0.05
+    acc._pending_pipecat_tts_processing_s = 0.05
+
+    acc.on_bot_started_speaking(base_ns + 250_000_000)
+
+    assert len(acc.latency_turns) == 1
+    turn = acc.latency_turns[0]
+    assert turn.ttfb_ms == 100
     assert turn.llm_ms == 50
     assert turn.tts_ms == 50
-    assert turn.ttfb_ms == 100
-    assert acc._user_stopped_ns == 0
 
 
 def test_on_bot_stopped_updates_last_turn():

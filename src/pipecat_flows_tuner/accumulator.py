@@ -35,8 +35,15 @@ class FlowsAccumulator:
     _user_started_ns: int = field(default=0, repr=False)
     _latency_node: str | None = field(default=None, repr=False)
 
-    # call-level usage counters
-    _tts_chars: int = field(default=0, repr=False)
+    # call-level pipecat-sourced counters (summed across all MetricsFrames)
+    _pipecat_llm_total_tokens: int = field(default=0, repr=False)
+    _pipecat_tts_chars: int = field(default=0, repr=False)
+
+    # per-turn pending pipecat metrics (reset on each on_user_stopped)
+    _pending_pipecat_llm_ttfb_s: float = field(default=0.0, repr=False)
+    _pending_pipecat_tts_ttfb_s: float = field(default=0.0, repr=False)
+    _pending_pipecat_llm_processing_s: float = field(default=0.0, repr=False)
+    _pending_pipecat_tts_processing_s: float = field(default=0.0, repr=False)
 
     # misc
     done: bool = False
@@ -100,6 +107,10 @@ class FlowsAccumulator:
         self._tts_started_ns = 0
         self._bot_started_ns = 0
         self._latency_node = self._current_node
+        self._pending_pipecat_llm_ttfb_s = 0.0
+        self._pending_pipecat_tts_ttfb_s = 0.0
+        self._pending_pipecat_llm_processing_s = 0.0
+        self._pending_pipecat_tts_processing_s = 0.0
 
     def on_llm_started(self, timestamp_ns: int) -> None:
         if self._user_stopped_ns and self._llm_started_ns == 0:
@@ -108,10 +119,6 @@ class FlowsAccumulator:
     def on_tts_started(self, timestamp_ns: int) -> None:
         if self._user_stopped_ns and self._tts_started_ns == 0:
             self._tts_started_ns = timestamp_ns
-
-    def on_tts_text_chars(self, frame: Any) -> None:
-        text = getattr(frame, "text", "") or ""
-        self._tts_chars += len(text)
 
     def on_bot_started_speaking(self, timestamp_ns: int) -> None:
         if self._user_stopped_ns and self._bot_started_ns == 0:
@@ -140,6 +147,28 @@ class FlowsAccumulator:
             return
         self.done = True
         self.call_end_abs_ns = timestamp_ns
+
+    def on_metrics_frame(self, frame: Any) -> None:
+        for d in getattr(frame, "data", []):
+            cls_name = type(d).__name__
+            if cls_name == "LLMUsageMetricsData":
+                self._pipecat_llm_total_tokens += getattr(getattr(d, "value", None), "total_tokens", 0) or 0
+            elif cls_name == "TTSUsageMetricsData":
+                self._pipecat_tts_chars += getattr(d, "value", 0) or 0
+            elif cls_name == "TTFBMetricsData":
+                processor = str(getattr(d, "processor", "")).lower()
+                val = getattr(d, "value", 0) or 0
+                if "tts" in processor:
+                    self._pending_pipecat_tts_ttfb_s = val
+                else:
+                    self._pending_pipecat_llm_ttfb_s = val
+            elif cls_name == "ProcessingMetricsData":
+                processor = str(getattr(d, "processor", "")).lower()
+                val = getattr(d, "value", 0) or 0
+                if "tts" in processor:
+                    self._pending_pipecat_tts_processing_s = val
+                else:
+                    self._pending_pipecat_llm_processing_s = val
 
     def _flush_latency_turn(self) -> None:
         flush_latency_turn(self)

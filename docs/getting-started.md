@@ -6,6 +6,21 @@
 - A `pipecat` bot that uses `pipecat-flows`
 - Tuner API credentials (`api_key`, `workspace_id`, `agent_id`)
 
+## Pipecat app working directory
+
+Run the pipeline from your **Pipecat application project root** (the app that creates the pipeline, adds `FlowsObserver`, and calls `PipelineTask`). That is the working directory (`pwd`) for the process that runs this SDK.
+
+Example: if your app is at `/path/to/pipecat-app`, start your server or script from there:
+
+```bash
+cd /path/to/pipecat-app
+python -m your_app.main
+# or
+uv run your_app
+```
+
+Relative imports, config paths, and pipeline setup all resolve from this directory. The observer runs inside the pipeline process; it does not need a separate working directory.
+
 ## Install
 
 ```bash
@@ -45,6 +60,25 @@ Pipeline([
     context_aggregator.assistant(),
 ])
 ```
+
+## Metrics from Pipecat (required for full payload)
+
+The SDK reads **usage and latency from Pipecat only** (no fallback). Ensure the task is created with metrics enabled:
+
+```python
+from pipecat.pipeline import PipelineTask
+from pipecat.pipeline.pipeline_params import PipelineParams
+
+task = PipelineTask(
+    pipeline,
+    params=PipelineParams(
+        enable_metrics=True,
+        enable_usage_metrics=True,
+    ),
+)
+```
+
+Without these, `llm_token`, `tts_character_count`, and per-turn `ttfb_ms` / `llm_ms` / `tts_ms` will be absent (null/zero) in the payload.
 
 ## What Happens at Call End
 

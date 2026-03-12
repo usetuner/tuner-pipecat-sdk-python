@@ -9,7 +9,7 @@ def test_build_payload_basic(tuner_config):
     acc.call_start_abs_ns = 1_000_000_000
     acc.call_end_abs_ns = 2_000_000_000
     acc.done = True
-    acc._tts_chars = 50
+    acc._pipecat_tts_chars = 50
     transcript = [
         {"role": "user", "content": "Hi"},
         {"role": "assistant", "content": "Hello!"},
@@ -24,6 +24,46 @@ def test_build_payload_basic(tuner_config):
     assert payload.general_meta_data_raw.usage_token.tts_character_count == 50
     assert payload.general_meta_data_raw.ai_models.asr_model == tuner_config.asr_model
     assert len(payload.transcript_with_tool_calls) >= 2
+
+
+def test_llm_token_uses_pipecat_value(tuner_config):
+    acc = FlowsAccumulator()
+    acc.call_start_abs_ns = 0
+    acc.call_end_abs_ns = 1_000_000_000
+    acc.done = True
+    acc._pipecat_llm_total_tokens = 500
+    payload = acc.build_payload(tuner_config, [])
+    assert payload.general_meta_data_raw.usage_token.llm_token == 500
+
+
+def test_llm_token_is_none_when_pipecat_zero(tuner_config):
+    acc = FlowsAccumulator()
+    acc.call_start_abs_ns = 0
+    acc.call_end_abs_ns = 1_000_000_000
+    acc.done = True
+    acc._pipecat_llm_total_tokens = 0
+    payload = acc.build_payload(tuner_config, [{"role": "user", "content": "A" * 400}])
+    assert payload.general_meta_data_raw.usage_token.llm_token is None
+
+
+def test_tts_char_count_uses_pipecat_value(tuner_config):
+    acc = FlowsAccumulator()
+    acc.call_start_abs_ns = 0
+    acc.call_end_abs_ns = 1_000_000_000
+    acc.done = True
+    acc._pipecat_tts_chars = 999
+    payload = acc.build_payload(tuner_config, [])
+    assert payload.general_meta_data_raw.usage_token.tts_character_count == 999
+
+
+def test_tts_char_count_is_none_when_pipecat_zero(tuner_config):
+    acc = FlowsAccumulator()
+    acc.call_start_abs_ns = 0
+    acc.call_end_abs_ns = 1_000_000_000
+    acc.done = True
+    acc._pipecat_tts_chars = 0
+    payload = acc.build_payload(tuner_config, [])
+    assert payload.general_meta_data_raw.usage_token.tts_character_count is None
 
 
 def test_enrich_transcript_user_and_assistant(tuner_config):
