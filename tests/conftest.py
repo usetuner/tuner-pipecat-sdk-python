@@ -5,7 +5,6 @@ from unittest.mock import MagicMock
 import pytest
 
 from pipecat_flows_tuner.config import TunerConfig
-from pipecat_flows_tuner.models import CallPayload
 
 
 @pytest.fixture

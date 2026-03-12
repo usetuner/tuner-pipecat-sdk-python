@@ -48,7 +48,6 @@ def test_latency_turn():
         bot_started_ms=300,
         user_stopped_ms=100,
         user_started_ms=50,
-        user_confidence=0.95,
         bot_stopped_ms=500,
     )
     assert t.turn_index == 0

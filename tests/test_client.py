@@ -6,7 +6,6 @@ import httpx
 import pytest
 
 from pipecat_flows_tuner.client import post_call
-from pipecat_flows_tuner.config import TunerConfig
 from pipecat_flows_tuner.models import (
     AiModels,
     CallPayload,

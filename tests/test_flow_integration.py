@@ -5,14 +5,12 @@ transitions → end) and assert the resulting payload and transcript enrichment.
 No pipecat runtime required.
 """
 
-import time
 from unittest.mock import MagicMock
 
 import pytest
 
 from pipecat_flows_tuner.accumulator import FlowsAccumulator
 from pipecat_flows_tuner.config import TunerConfig
-from pipecat_flows_tuner.models import NodeTransitionRecord
 
 
 @pytest.fixture

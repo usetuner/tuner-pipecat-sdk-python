@@ -13,7 +13,6 @@ from pipecat.frames.frames import (
     VADUserStartedSpeakingFrame,
     VADUserStoppedSpeakingFrame,
 )
-from pipecat.processors.frame_processor import FrameDirection
 
 from pipecat_flows_tuner.observer import FlowsObserver
 
