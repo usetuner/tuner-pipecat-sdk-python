@@ -152,13 +152,14 @@ class FlowsAccumulator:
         for d in getattr(frame, "data", []):
             cls_name = type(d).__name__
             if cls_name == "LLMUsageMetricsData":
-                self._pipecat_llm_total_tokens += getattr(getattr(d, "value", None), "total_tokens", 0) or 0
+                total_tokens = getattr(getattr(d, "value", None), "total_tokens", 0) or 0
+                self._pipecat_llm_total_tokens += total_tokens
             elif cls_name == "TTSUsageMetricsData":
                 self._pipecat_tts_chars += getattr(d, "value", 0) or 0
             elif cls_name == "TTFBMetricsData":
                 processor = str(getattr(d, "processor", "")).lower()
                 val = getattr(d, "value", 0) or 0
-                if "tts" in processor:
+                if "ttsservice" in processor:
                     self._pending_pipecat_tts_ttfb_s = val
                 else:
                     self._pending_pipecat_llm_ttfb_s = val

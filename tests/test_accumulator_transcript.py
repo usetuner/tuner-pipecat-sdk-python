@@ -64,6 +64,14 @@ def test_enrich_transcript_tool_call_and_result_and_node_transition(tuner_config
     assert "agent_function" in roles
     assert "agent_result" in roles
     assert "node_transition" in roles
+    user_segments = [
+        segment for segment in payload.transcript_with_tool_calls if segment.role == "user"
+    ]
+    agent_segments = [
+        segment for segment in payload.transcript_with_tool_calls if segment.role == "agent"
+    ]
+    assert "asr_node_ttft" not in user_segments[0].metadata
+    assert agent_segments[0].metadata["tts_node_ttfb"] == 50
 
 
 def test_enrich_transcript_initial_node_transition(tuner_config):

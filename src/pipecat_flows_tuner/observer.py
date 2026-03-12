@@ -92,7 +92,8 @@ class FlowsObserver(FrameProcessor):
             if not getattr(frame, "enable_usage_metrics", False):
                 logger.warning(
                     "[flows-tuner] StartFrame.enable_usage_metrics=False — token and TTS "
-                    "character metrics will be absent. Pass enable_usage_metrics=True to StartFrame."
+                    "character metrics will be absent. Pass "
+                    "enable_usage_metrics=True to StartFrame."
                 )
 
         elif isinstance(frame, VADUserStartedSpeakingFrame):

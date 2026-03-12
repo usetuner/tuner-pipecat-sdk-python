@@ -212,7 +212,7 @@ def build_agent_text_segment(
             ),
             interrupted=agent_interrupted.get(assistant_index, False),
             llm_node_ttft=turn.llm_ms if turn else None,
-            tts_node_ttfb=turn.tts_ms if turn else None,
+            tts_node_ttfb=turn.ttfb_ms if turn else None,
             node=turn.node if turn else None,
             turn_index=turn.turn_index if turn else None,
         ),

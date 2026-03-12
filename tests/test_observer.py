@@ -139,7 +139,6 @@ def test_handle_start_frame_no_warning_when_metrics_enabled(observer):
 
 
 def test_handle_metrics_frame_routes_to_accumulator(observer):
-    from types import SimpleNamespace
     from unittest.mock import patch
 
     frame = MetricsFrame(data=[])
