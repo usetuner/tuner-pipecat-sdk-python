@@ -39,10 +39,16 @@ observer = FlowsObserver(
     agent_id="support-agent",
     call_id=str(uuid.uuid4()),
     base_url="https://your-tuner-api.example.com",
+    asr_model="deepgram/nova-3",
+    llm_model="gpt-4o-mini",
+    tts_model="cartesia/sonic",
 )
 
 observer.attach_flow_manager(flow_manager)
 ```
+
+Set `asr_model`, `llm_model`, and `tts_model` to populate
+`general_meta_data_raw.ai_models` in the payload.
 
 ## Pipeline Placement
 
