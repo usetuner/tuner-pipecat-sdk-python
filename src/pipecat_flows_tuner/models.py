@@ -1,11 +1,11 @@
 """Data models for pipecat_flows_tuner."""
 
-from typing import Any, Optional
+from __future__ import annotations
+
+from typing import Any
 
 from pydantic import BaseModel, Field
 
-
-# ── Internal / accumulator models ─────────────────────────────────────────────
 
 class PendingTransition(BaseModel):
     function_name: str
@@ -14,56 +14,50 @@ class PendingTransition(BaseModel):
 
 
 class NodeTransitionRecord(BaseModel):
-    from_node: Optional[str] = None
+    from_node: str | None = None
     to_node: str
-    trigger_function: Optional[str] = None
-    trigger_args: Optional[Any] = None
-    state_snapshot: dict
-    task_messages: list
+    trigger_function: str | None = None
+    trigger_args: Any | None = None
+    state_snapshot: dict[str, Any]
+    task_messages: list[dict[str, Any]]
     functions_available: list[str]
     timestamp_ms: int
 
 
 class LatencyTurn(BaseModel):
     turn_index: int
-    node: Optional[str] = None
-    ttfb_ms: Optional[int] = None
-    llm_ms: Optional[int] = None
-    tts_ms: Optional[int] = None
+    node: str | None = None
+    ttfb_ms: int | None = None
+    llm_ms: int | None = None
+    tts_ms: int | None = None
     bot_started_ms: int
     user_stopped_ms: int
     user_started_ms: int
-    user_confidence: Optional[float] = None
-    bot_stopped_ms: Optional[int] = None  # filled in later by on_bot_stopped
+    bot_stopped_ms: int | None = None
 
-
-# ── Transcript segment models ──────────────────────────────────────────────────
 
 class ToolInfo(BaseModel):
-    name: Optional[str] = None
-    request_id: Optional[str] = None
-    params: Optional[dict] = None    # agent_function segments
-    result: Optional[Any] = None     # agent_result segments
+    name: str | None = None
+    request_id: str | None = None
+    params: dict[str, Any] | None = None
+    result: Any | None = None
 
 
 class NodeInfo(BaseModel):
-    # "from" is a reserved keyword; serialized as "from" via alias
-    from_node: Optional[str] = Field(None, serialization_alias="from")
+    from_node: str | None = Field(None, serialization_alias="from")
     to: str
-    reason: Optional[str] = None
+    reason: str | None = None
 
 
 class TranscriptSegment(BaseModel):
-    role: str          # "user" | "agent" | "agent_function" | "agent_result" | "node_transition"
+    role: str
     text: str
     start_ms: int
     end_ms: int
-    metadata: dict
-    tool: Optional[ToolInfo] = None     # agent_function, agent_result
-    node: Optional[NodeInfo] = None     # node_transition
+    metadata: dict[str, Any]
+    tool: ToolInfo | None = None
+    node: NodeInfo | None = None
 
-
-# ── Payload models ─────────────────────────────────────────────────────────────
 
 class AiModels(BaseModel):
     asr_model: str
@@ -73,8 +67,8 @@ class AiModels(BaseModel):
 
 class UsageToken(BaseModel):
     asr_duration: int
-    llm_token: Optional[int] = None
-    tts_character_count: Optional[int] = None
+    llm_token: int | None = None
+    tts_character_count: int | None = None
 
 
 class GeneralMetaData(BaseModel):
@@ -93,6 +87,19 @@ class CallPayload(BaseModel):
     duration_ms: int
     general_meta_data_raw: GeneralMetaData
 
-    def to_dict(self) -> dict:
-        """Serialize to JSON-ready dict for the Tuner API."""
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize payload to a JSON-ready dict."""
         return self.model_dump(exclude_none=True, by_alias=True)
+
+__all__ = [
+    "PendingTransition",
+    "NodeTransitionRecord",
+    "LatencyTurn",
+    "ToolInfo",
+    "NodeInfo",
+    "TranscriptSegment",
+    "AiModels",
+    "UsageToken",
+    "GeneralMetaData",
+    "CallPayload",
+]
