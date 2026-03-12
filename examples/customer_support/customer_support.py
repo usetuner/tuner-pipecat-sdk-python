@@ -1,9 +1,15 @@
 #
-# Copyright (c) 2024-2026, Daily
+# Copyright (c) 2024-2026, Tuner Team
 #
 # SPDX-License-Identifier: BSD 2-Clause License
 
-"""Pizzeria ordering bot built with Pipecat Flows.
+"""Customer support bot built with Pipecat Flows + pipecat-flows-tuner.
+
+This example demonstrates:
+- Multi-node support flow with category branching
+- State accumulation across nodes (name, category, description)
+- Conditional farewell (resolved vs. escalated to human agent)
+- Full call observability via FlowsObserver
 
 Requirements:
 - CARTESIA_API_KEY
@@ -11,7 +17,7 @@ Requirements:
 - OPENAI_API_KEY
 
 Run the example:
-uv run pizza_order.py
+    uv run customer_support.py
 """
 
 import json
@@ -63,7 +69,7 @@ transport_params = {
 
 
 # ---------------------------------------------------------------------------
-# Debug logging processor — sits in the pipeline to intercept live frames
+# Debug logging processor
 # ---------------------------------------------------------------------------
 
 
@@ -99,11 +105,23 @@ class DebugLogProcessor(FrameProcessor):
 # Helpers
 # ---------------------------------------------------------------------------
 
-MENU = {
-    "margherita": 10.99,
-    "pepperoni": 12.99,
-    "veggie": 11.99,
-    "bbq chicken": 13.99,
+ISSUE_CATEGORIES = ["billing", "technical", "account"]
+
+RESOLUTION_SCRIPTS = {
+    "billing": (
+        "For billing issues, explain that all charges are reviewed within 3-5 business days. "
+        "Offer to waive any late fees if applicable. Ask if this resolves their concern."
+    ),
+    "technical": (
+        "For technical issues, walk the customer through these steps: "
+        "1) Clear cache and restart the app, 2) Check internet connection, 3) Reinstall if needed. "
+        "Ask if any of these steps resolved the problem."
+    ),
+    "account": (
+        "For account issues, guide the customer to Settings > Account > Manage Profile. "
+        "Remind them that password resets are sent to their registered email. "
+        "Ask if this resolves their issue."
+    ),
 }
 
 
@@ -117,127 +135,163 @@ def log_node(node: dict, label: str) -> None:
 
 
 def create_greeting_node() -> NodeConfig:
-    choose_pizza_func = FlowsFunctionSchema(
-        name="choose_pizza",
-        description="Record which pizza the customer wants to order.",
-        required=["pizza"],
-        properties={"pizza": {"type": "string", "enum": list(MENU.keys())}},
-        handler=handle_choose_pizza,
+    provide_name_func = FlowsFunctionSchema(
+        name="provide_name",
+        description="Record the customer's name to personalise the interaction.",
+        required=["name"],
+        properties={"name": {"type": "string"}},
+        handler=handle_provide_name,
     )
 
-    node = {
-        "name": "greeting",
-        "role_messages": [
+    node = NodeConfig(
+        name="greeting",
+        role_messages=[
             {
                 "role": "system",
                 "content": (
-                    "You are a friendly pizzeria cashier at 'Pipecat Pizza'. "
-                    "Keep responses short and conversational. "
+                    "You are a professional customer support agent at Acme Corp. "
+                    "Keep responses concise and empathetic. "
                     "Your responses will be converted to audio — no emojis or special characters."
                 ),
             }
         ],
-        "task_messages": [
-            {
-                "role": "system",
-                "content": (
-                    f"Greet the customer warmly and present today's menu: "
-                    f"{', '.join(f'{k} (${v:.2f})' for k, v in MENU.items())}. "
-                    "Ask them which pizza they'd like."
-                ),
-            }
-        ],
-        "functions": [choose_pizza_func],
-    }
-    log_node(node, "greeting")
-    return node
-
-
-async def handle_choose_pizza(args: FlowArgs, flow_manager: FlowManager) -> tuple:
-    pizza = args["pizza"].lower()
-    price = MENU.get(pizza, 0.0)
-    logger.info(f"[ORDER] Pizza chosen: {pizza} (${price:.2f})")
-    flow_manager.state["pizza"] = pizza
-    flow_manager.state["price"] = price
-    return {"pizza": pizza, "price": price}, create_size_node()
-
-
-def create_size_node() -> NodeConfig:
-    choose_size_func = FlowsFunctionSchema(
-        name="choose_size",
-        description="Record the pizza size the customer wants.",
-        required=["size"],
-        properties={"size": {"type": "string", "enum": ["small", "medium", "large"]}},
-        handler=handle_choose_size,
-    )
-
-    node = NodeConfig(
-        name="size",
         task_messages=[
             {
                 "role": "system",
-                "content": "Ask the customer what size they want: small ($0 extra), medium (+$2), or large (+$4).",
+                "content": "Greet the customer warmly and ask for their name.",
             }
         ],
-        functions=[choose_size_func],
+        functions=[provide_name_func],
     )
-    log_node(dict(node), "size")
+    log_node(dict(node), "greeting")
     return node
 
 
-async def handle_choose_size(args: FlowArgs, flow_manager: FlowManager) -> tuple:
-    size = args["size"].lower()
-    surcharge = {"small": 0.0, "medium": 2.0, "large": 4.0}.get(size, 0.0)
-    total = flow_manager.state["price"] + surcharge
-    logger.info(f"[ORDER] Size chosen: {size} | total=${total:.2f}")
-    flow_manager.state["size"] = size
-    flow_manager.state["total"] = total
-    return {"size": size, "total": total}, create_confirm_node()
+async def handle_provide_name(args: FlowArgs, flow_manager: FlowManager) -> tuple:
+    name = args["name"]
+    flow_manager.state["name"] = name
+    logger.info(f"[SUPPORT] Customer name: {name}")
+    return {"name": name}, create_issue_category_node()
 
 
-def create_confirm_node() -> NodeConfig:
-    confirm_func = FlowsFunctionSchema(
-        name="confirm_order",
-        description="Confirm or cancel the order.",
-        required=["confirmed"],
-        properties={"confirmed": {"type": "boolean"}},
-        handler=handle_confirm,
+def create_issue_category_node() -> NodeConfig:
+    select_category_func = FlowsFunctionSchema(
+        name="select_category",
+        description="Record the issue category the customer needs help with.",
+        required=["category"],
+        properties={
+            "category": {"type": "string", "enum": ISSUE_CATEGORIES},
+        },
+        handler=handle_select_category,
     )
 
     node = NodeConfig(
-        name="confirm",
+        name="issue_category",
         task_messages=[
             {
                 "role": "system",
                 "content": (
-                    "Read back the order summary to the customer and ask them to confirm. "
-                    "Include the pizza name, size, and total price from what was just ordered."
+                    "Ask the customer what type of issue they're experiencing. "
+                    "The options are: billing, technical support, or account management."
                 ),
             }
         ],
-        functions=[confirm_func],
+        functions=[select_category_func],
     )
-    log_node(dict(node), "confirm")
+    log_node(dict(node), "issue_category")
     return node
 
 
-async def handle_confirm(args: FlowArgs, flow_manager: FlowManager) -> tuple:
-    confirmed = args["confirmed"]
-    logger.info(f"[ORDER] Confirmed: {confirmed} | state={flow_manager.state}")
-    if confirmed:
-        return {"confirmed": True}, create_farewell_node(confirmed=True)
-    else:
-        return {"confirmed": False}, create_farewell_node(confirmed=False)
+async def handle_select_category(args: FlowArgs, flow_manager: FlowManager) -> tuple:
+    category = args["category"].lower()
+    flow_manager.state["category"] = category
+    logger.info(f"[SUPPORT] Category: {category}")
+    return {"category": category}, create_collect_context_node()
 
 
-def create_farewell_node(confirmed: bool = True) -> NodeConfig:
-    if confirmed:
+def create_collect_context_node() -> NodeConfig:
+    describe_issue_func = FlowsFunctionSchema(
+        name="describe_issue",
+        description="Record a brief description of the customer's issue.",
+        required=["description"],
+        properties={"description": {"type": "string"}},
+        handler=handle_describe_issue,
+    )
+
+    node = NodeConfig(
+        name="collect_context",
+        task_messages=[
+            {
+                "role": "system",
+                "content": (
+                    "Ask the customer to briefly describe the specific problem they are experiencing. "
+                    "Keep it open-ended so they can explain in their own words."
+                ),
+            }
+        ],
+        functions=[describe_issue_func],
+    )
+    log_node(dict(node), "collect_context")
+    return node
+
+
+async def handle_describe_issue(args: FlowArgs, flow_manager: FlowManager) -> tuple:
+    description = args["description"]
+    flow_manager.state["description"] = description
+    logger.info(f"[SUPPORT] Issue description: {description}")
+    return {"description": description}, create_resolution_node()
+
+
+def create_resolution_node() -> NodeConfig:
+    mark_resolved_func = FlowsFunctionSchema(
+        name="mark_resolved",
+        description="Indicate whether the customer's issue was resolved or needs escalation.",
+        required=["resolved"],
+        properties={"resolved": {"type": "boolean"}},
+        handler=handle_mark_resolved,
+    )
+
+    node = NodeConfig(
+        name="resolution",
+        task_messages=[
+            {
+                "role": "system",
+                "content": (
+                    "Attempt to resolve the customer's issue using the appropriate script for their category. "
+                    f"Billing: {RESOLUTION_SCRIPTS['billing']} "
+                    f"Technical: {RESOLUTION_SCRIPTS['technical']} "
+                    f"Account: {RESOLUTION_SCRIPTS['account']} "
+                    "Use the category and description captured earlier to tailor your response. "
+                    "After providing guidance, ask if this resolved their issue."
+                ),
+            }
+        ],
+        functions=[mark_resolved_func],
+    )
+    log_node(dict(node), "resolution")
+    return node
+
+
+async def handle_mark_resolved(args: FlowArgs, flow_manager: FlowManager) -> tuple:
+    resolved = args["resolved"]
+    flow_manager.state["resolved"] = resolved
+    logger.info(f"[SUPPORT] Resolved: {resolved} | state={flow_manager.state}")
+    return {"resolved": resolved}, create_farewell_node(resolved)
+
+
+def create_farewell_node(resolved: bool) -> NodeConfig:
+    if resolved:
         content = (
-            "Thank the customer enthusiastically, tell them their order is being prepared, "
-            "and wish them a great meal. Then end the conversation."
+            "Thank the customer by name for contacting Acme Corp support. "
+            "Let them know their issue has been resolved and wish them a great day. "
+            "Then end the conversation."
         )
     else:
-        content = "Apologise politely, tell them they can call back anytime, and end the conversation."
+        content = (
+            "Apologise that the issue could not be resolved immediately. "
+            "Inform the customer that a senior support specialist will contact them within 24 hours. "
+            "Thank them for their patience and end the conversation."
+        )
 
     node = NodeConfig(
         name="farewell",
@@ -273,7 +327,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     observer = FlowsObserver(
         api_key=os.getenv("TUNER_API_KEY", "dev"),
         workspace_id=int(os.getenv("TUNER_WORKSPACE_ID")),
-        agent_id=os.getenv("TUNER_AGENT_ID", "pizzeria-bot"),
+        agent_id=os.getenv("TUNER_AGENT_ID", "customer-support-bot"),
         call_id=str(uuid.uuid4()),
         base_url=os.getenv("TUNER_BASE_URL", "http://localhost:8000"),
         asr_model=os.getenv("TUNER_ASR_MODEL", "deepgram/nova-3"),
@@ -286,7 +340,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         [
             transport.input(),
             stt,
-            debug_logger,                       # intercepts TranscriptionFrame + bot text
+            debug_logger,
             context_aggregator.user(),
             llm,
             tts,
@@ -315,7 +369,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
-        logger.info("[BOT] Client connected — starting pizzeria flow")
+        logger.info("[BOT] Client connected — starting customer support flow")
         await flow_manager.initialize(create_greeting_node())
 
     @transport.event_handler("on_client_disconnected")
