@@ -11,13 +11,28 @@ then sends a structured `CallPayload` to the Tuner API when a call ends.
 - Exact metrics from Pipecat: TTFB, processing latency, LLM token counts, TTS character counts via `MetricsFrame`.
 - Typed payload models for downstream tooling.
 
+## Requirements
+
+- Python **>=3.10** (3.12 recommended, following [pipecat's prerequisites](https://github.com/pipecat-ai/pipecat))
+
 ## Installation
 
+> **Note:** This package is not yet published to PyPI. Install it directly from the repository.
+
+1. Clone the repo:
+
 ```bash
-pip install pipecat-flows-tuner
+git clone https://github.com/usetuner/tuner-pipecat-sdk-python.git
+cd tuner-pipecat-sdk-python
 ```
 
-For local development:
+2. Install the SDK into your project's virtual environment:
+
+```bash
+pip install -e .
+```
+
+Or with dev dependencies:
 
 ```bash
 pip install -e ".[dev]"

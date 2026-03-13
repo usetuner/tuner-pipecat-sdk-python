@@ -29,10 +29,10 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Ginni-AI/tuner_pipecat_sdk"
-Documentation = "https://github.com/Ginni-AI/tuner_pipecat_sdk/tree/main/docs"
-Repository = "https://github.com/Ginni-AI/tuner_pipecat_sdk"
-Issues = "https://github.com/Ginni-AI/tuner_pipecat_sdk/issues"
+Homepage = "https://github.com/usetuner/tuner-pipecat-sdk-python"
+Documentation = "https://github.com/usetuner/tuner-pipecat-sdk-python/tree/main/docs"
+Repository = "https://github.com/usetuner/tuner-pipecat-sdk-python"
+Issues = "https://github.com/usetuner/tuner-pipecat-sdk-python/issues"
 
 [project.optional-dependencies]
 test = [
