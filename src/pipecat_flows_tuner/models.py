@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class PendingTransition(BaseModel):
@@ -36,11 +36,43 @@ class LatencyTurn(BaseModel):
     bot_stopped_ms: int | None = None
 
 
+class TranscriptWord(BaseModel):
+    """Word-level timing within a transcript segment."""
+
+    word: str
+    start_ms: int
+    end_ms: int
+    confidence: float | None = None
+
+
+class TranscriptMetadata(BaseModel):
+    """Known metadata fields on a transcript segment.
+
+    The backend accepts extra keys (extra="allow"), so provider-specific fields
+    can be included alongside these known ones.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    e2e_latency: float | None = None
+    interrupted: bool | None = None
+    llm_node_ttft: float | None = None
+    tts_node_ttfb: float | None = None
+    transcript_confidence: float | None = None
+    stt_node_ttfb: float | None = None
+    asr_node_ttfb: float | None = None
+
+
 class ToolInfo(BaseModel):
+    """Tool call or result details for agent_function / agent_result segments."""
+
     name: str | None = None
     request_id: str | None = None
     params: dict[str, Any] | None = None
-    result: Any | None = None
+    result: dict[str, Any] | None = None
+    is_error: bool | None = None
+    error: str | None = None
+    start_ms: int | None = None
 
 
 class NodeInfo(BaseModel):
@@ -55,6 +87,8 @@ class TranscriptSegment(BaseModel):
     start_ms: int
     end_ms: int
     metadata: dict[str, Any]
+    words: list[TranscriptWord] | None = None
+    duration_ms: int | None = None
     tool: ToolInfo | None = None
     node: NodeInfo | None = None
 
@@ -91,10 +125,13 @@ class CallPayload(BaseModel):
         """Serialize payload to a JSON-ready dict."""
         return self.model_dump(exclude_none=True, by_alias=True)
 
+
 __all__ = [
     "PendingTransition",
     "NodeTransitionRecord",
     "LatencyTurn",
+    "TranscriptWord",
+    "TranscriptMetadata",
     "ToolInfo",
     "NodeInfo",
     "TranscriptSegment",
