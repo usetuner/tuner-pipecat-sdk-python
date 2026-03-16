@@ -84,6 +84,38 @@ def test_enrich_transcript_tool_call_and_result_and_node_transition(tuner_config
     assert func_segments[0].start_ms != result_segments[0].start_ms
 
 
+def test_consecutive_assistant_messages_merged_into_one_segment(tuner_config):
+    acc = FlowsAccumulator()
+    acc.call_start_abs_ns = 0
+    acc.call_end_abs_ns = 2_000_000_000
+    acc.done = True
+    acc.node_transitions = []
+    acc.latency_turns = [
+        LatencyTurn(
+            turn_index=0,
+            node="greeting",
+            ttfb_ms=10,
+            llm_ms=20,
+            tts_ms=30,
+            bot_started_ms=100,
+            user_stopped_ms=50,
+            user_started_ms=10,
+            bot_stopped_ms=300,
+        ),
+    ]
+    transcript = [
+        {"role": "user", "content": "Hello"},
+        {"role": "assistant", "content": "Hi there,"},
+        {"role": "assistant", "content": "how can I help?"},
+    ]
+    payload = acc.build_payload(tuner_config, transcript)
+    agent_segments = [s for s in payload.transcript_with_tool_calls if s.role == "agent"]
+    assert len(agent_segments) == 1
+    assert agent_segments[0].text == "Hi there, how can I help?"
+    assert agent_segments[0].start_ms == 100
+    assert agent_segments[0].end_ms == 300
+
+
 def test_enrich_transcript_initial_node_transition(tuner_config):
     acc = FlowsAccumulator()
     acc.call_start_abs_ns = 0

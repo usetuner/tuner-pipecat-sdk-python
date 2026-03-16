@@ -57,6 +57,22 @@ def calculate_agent_interruptions(acc: FlowsAccumulator) -> dict[int, bool]:
     return interrupted
 
 
+def collect_consecutive_assistant_messages(
+    messages: list[dict[str, Any]], start_idx: int
+) -> tuple[list[dict[str, Any]], int]:
+    """Collect consecutive plain assistant text messages (no tool_calls)."""
+    grouped: list[dict[str, Any]] = []
+    idx = start_idx
+    while idx < len(messages):
+        msg = messages[idx]
+        if msg.get("role") == "assistant" and "tool_calls" not in msg:
+            grouped.append(msg)
+            idx += 1
+        else:
+            break
+    return grouped, idx
+
+
 def collect_consecutive_user_messages(
     messages: list[dict[str, Any]], start_idx: int
 ) -> tuple[list[dict[str, Any]], int]:
@@ -192,15 +208,16 @@ def build_agent_result_segments(
 
 def build_agent_text_segment(
     acc: FlowsAccumulator,
-    message: dict[str, Any],
+    messages: list[dict[str, Any]],
     turn: Any | None,
     assistant_index: int,
     agent_interrupted: dict[int, bool],
 ) -> TranscriptSegment:
     end_to_end_latency = ((turn.bot_started_ms - turn.user_stopped_ms) or None) if turn else None
+    text = " ".join(m.get("content", "") for m in messages).strip()
     return TranscriptSegment(
         role="agent",
-        text=message.get("content", ""),
+        text=text,
         start_ms=turn.bot_started_ms if turn else 0,
         end_ms=(
             turn.bot_stopped_ms
@@ -285,19 +302,23 @@ def enrich_transcript(
             continue
 
         if role == "assistant":
+            grouped_messages, message_idx = collect_consecutive_assistant_messages(
+                messages, message_idx
+            )
             assistant_turn = (
                 acc.latency_turns[assistant_idx] if assistant_idx < len(acc.latency_turns) else None
             )
             result.append(
                 build_agent_text_segment(
                     acc=acc,
-                    message=message,
+                    messages=grouped_messages,
                     turn=assistant_turn,
                     assistant_index=assistant_idx,
                     agent_interrupted=agent_interrupted,
                 )
             )
             assistant_idx += 1
+            continue
 
         message_idx += 1
 
