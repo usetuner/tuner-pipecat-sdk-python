@@ -89,6 +89,7 @@ class FlowsAccumulator:
             task_messages=node_config.get("task_messages", []),
             functions_available=functions_available,
             timestamp_ms=self._rel_ms(timestamp_ns),
+            trigger_timestamp_ms=trigger.timestamp_ms if trigger else None,
         ))
         self._current_node = to_node
         self._pending_transition = None

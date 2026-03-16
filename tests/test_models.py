@@ -38,6 +38,24 @@ def test_node_transition_record():
     assert r.to_node == "transfer"
     assert r.trigger_function == "transfer"
     assert r.timestamp_ms == 200
+    assert r.trigger_timestamp_ms is None
+
+
+def test_node_transition_record_trigger_timestamp_ms():
+    r = NodeTransitionRecord(
+        from_node="greeting",
+        to_node="transfer",
+        trigger_function="transfer",
+        trigger_args={"to": "sales"},
+        state_snapshot={},
+        task_messages=[],
+        functions_available=[],
+        timestamp_ms=150,
+        trigger_timestamp_ms=80,
+    )
+    assert r.trigger_timestamp_ms == 80
+    # trigger_timestamp_ms should be before timestamp_ms (function invoked before node switch)
+    assert r.trigger_timestamp_ms < r.timestamp_ms
 
 
 def test_latency_turn():

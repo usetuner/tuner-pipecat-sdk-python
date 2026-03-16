@@ -127,6 +127,8 @@ def test_full_call_flow_with_tool_and_node_transition(config):
     assert acc._current_node == "transfer"
     assert acc.get_pending_transition() is None
     assert len(acc.node_transitions) == 2
+    triggered_transition = next(t for t in acc.node_transitions if t.trigger_function)
+    assert triggered_transition.trigger_timestamp_ms == 100  # _rel_ms(base_ns + 100ms)
 
     acc.on_llm_started(base_ns + 130_000_000)
     acc.on_tts_started(base_ns + 180_000_000)

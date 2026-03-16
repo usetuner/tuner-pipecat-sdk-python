@@ -19,6 +19,7 @@ def test_enrich_transcript_tool_call_and_result_and_node_transition(tuner_config
             task_messages=[],
             functions_available=[],
             timestamp_ms=100,
+            trigger_timestamp_ms=60,
         )
     ]
     transcript = [
@@ -72,6 +73,15 @@ def test_enrich_transcript_tool_call_and_result_and_node_transition(tuner_config
     ]
     assert "asr_node_ttft" not in user_segments[0].metadata
     assert agent_segments[0].metadata["tts_node_ttfb"] == 50
+
+    # agent_function uses trigger_timestamp_ms (function invocation); agent_result uses timestamp_ms (node switch)
+    func_segments = [s for s in payload.transcript_with_tool_calls if s.role == "agent_function"]
+    result_segments = [s for s in payload.transcript_with_tool_calls if s.role == "agent_result"]
+    assert func_segments, "expected agent_function segment"
+    assert result_segments, "expected agent_result segment"
+    assert func_segments[0].start_ms == 60   # trigger_timestamp_ms
+    assert result_segments[0].start_ms == 100  # timestamp_ms (node switch)
+    assert func_segments[0].start_ms != result_segments[0].start_ms
 
 
 def test_enrich_transcript_initial_node_transition(tuner_config):

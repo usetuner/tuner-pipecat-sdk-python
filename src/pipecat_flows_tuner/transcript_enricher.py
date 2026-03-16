@@ -99,11 +99,14 @@ def build_agent_function_segment(
     transition = transitions_by_function.get(function_name)
     argument_items = parsed_args.items() if isinstance(parsed_args, dict) else []
     arg_str = ", ".join(f"{key}={value}" for key, value in argument_items)
+    invocation_ms = (
+        (transition.trigger_timestamp_ms or transition.timestamp_ms) if transition else 0
+    )
     return TranscriptSegment(
         role="agent_function",
         text=f"{function_name}({arg_str})",
-        start_ms=transition.timestamp_ms if transition else 0,
-        end_ms=transition.timestamp_ms if transition else 0,
+        start_ms=invocation_ms,
+        end_ms=invocation_ms,
         tool=ToolInfo(
             name=function_name,
             request_id=tool_call.get("id"),
