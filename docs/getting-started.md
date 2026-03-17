@@ -45,6 +45,7 @@ observer = FlowsObserver(
 )
 
 observer.attach_flow_manager(flow_manager)
+observer.attach_context_aggregators(context_aggregator)
 ```
 
 Set `asr_model`, `llm_model`, and `tts_model` to populate
@@ -78,6 +79,7 @@ from pipecat.pipeline.pipeline_params import PipelineParams
 task = PipelineTask(
     pipeline,
     params=PipelineParams(
+        observers=[observer.latency_observer],
         enable_metrics=True,
         enable_usage_metrics=True,
     ),

@@ -400,6 +400,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         tts_model=os.getenv("TUNER_TTS_MODEL", "cartesia/sonic"),
         debug=True,
     )
+    observer.attach_context_aggregators(context_aggregator)
 
     pipeline = Pipeline(
         [
@@ -419,6 +420,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         pipeline,
         params=PipelineParams(
             allow_interruptions=True,
+            observers=[observer.latency_observer],
             enable_metrics=True,
             enable_usage_metrics=True,
         ),
