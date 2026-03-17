@@ -57,6 +57,7 @@ observer = FlowsObserver(
 
 # Required: attach the flow manager before running the pipeline
 observer.attach_flow_manager(flow_manager)
+observer.attach_context_aggregators(context_aggregator)
 ```
 
 Place the observer after TTS in your pipeline:
@@ -83,6 +84,7 @@ from pipecat.pipeline.pipeline_params import PipelineParams
 task = PipelineTask(
     pipeline,
     params=PipelineParams(
+        observers=[observer.latency_observer],
         enable_metrics=True,
         enable_usage_metrics=True,
     ),

@@ -25,6 +25,8 @@ FlowsObserver(
 Methods:
 
 - `attach_flow_manager(flow_manager) -> None`
+- `attach_context_aggregators(context_aggregator_pair) -> None`
+- `latency_observer -> UserBotLatencyObserver`
 
 ## `TunerConfig`
 
