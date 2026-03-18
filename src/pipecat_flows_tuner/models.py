@@ -4,22 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
-
-
-class PendingTransition(BaseModel):
-    function_name: str
-    arguments: Any
-    timestamp_ms: int
-
-
-class NodeTransitionRecord(BaseModel):
-    from_node: str | None = None
-    to_node: str
-    trigger_function: str | None = None
-    trigger_args: Any | None = None
-    timestamp_ms: int
-    trigger_timestamp_ms: int | None = None  # when the function call was initiated
+from pydantic import BaseModel, ConfigDict
 
 
 class LatencyTurn(BaseModel):
@@ -75,12 +60,6 @@ class ToolInfo(BaseModel):
     start_ms: int | None = None
 
 
-class NodeInfo(BaseModel):
-    from_node: str | None = Field(None, serialization_alias="from")
-    to: str
-    reason: str | None = None
-
-
 class TranscriptSegment(BaseModel):
     role: str
     text: str
@@ -90,7 +69,6 @@ class TranscriptSegment(BaseModel):
     words: list[TranscriptWord] | None = None
     duration_ms: int | None = None
     tool: ToolInfo | None = None
-    node: NodeInfo | None = None
 
 
 class AiModels(BaseModel):
@@ -127,13 +105,10 @@ class CallPayload(BaseModel):
 
 
 __all__ = [
-    "PendingTransition",
-    "NodeTransitionRecord",
     "LatencyTurn",
     "TranscriptWord",
     "TranscriptMetadata",
     "ToolInfo",
-    "NodeInfo",
     "TranscriptSegment",
     "AiModels",
     "UsageToken",

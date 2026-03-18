@@ -6,7 +6,7 @@ from typing import Any
 
 from loguru import logger
 
-from .models import CallPayload, LatencyTurn, NodeTransitionRecord, PendingTransition
+from .models import CallPayload, LatencyTurn
 from .payload_builder import build_payload
 from .tool_timing_registry import ToolTimingRegistry
 
@@ -18,13 +18,6 @@ class FlowsAccumulator:
     # call-level timing
     call_start_abs_ns: int = 0
     call_end_abs_ns: int = 0
-
-    # flow state
-    _current_node: str | None = field(default=None, repr=False)
-
-    # node transitions
-    node_transitions: list[NodeTransitionRecord] = field(default_factory=list)
-    _pending_transition: PendingTransition | None = field(default=None, repr=False)
 
     # latency tracking
     latency_turns: list[LatencyTurn] = field(default_factory=list)
@@ -79,27 +72,6 @@ class FlowsAccumulator:
     def get_total_tts_characters(self) -> int:
         return self._pipecat_tts_chars
 
-    def get_pending_transition(self) -> PendingTransition | None:
-        return self._pending_transition
-
-    def on_node_entered(
-        self,
-        from_node: str | None,
-        to_node: str,
-        trigger: PendingTransition | None,
-        timestamp_ns: int,
-    ) -> None:
-        self.node_transitions.append(NodeTransitionRecord(
-            from_node=from_node,
-            to_node=to_node,
-            trigger_function=trigger.function_name if trigger else None,
-            trigger_args=trigger.arguments if trigger else None,
-            timestamp_ms=self._rel_ms(timestamp_ns),
-            trigger_timestamp_ms=trigger.timestamp_ms if trigger else None,
-        ))
-        self._current_node = to_node
-        self._pending_transition = None
-
     def on_start(self, timestamp_ns: int) -> None:
         self.call_start_abs_ns = timestamp_ns
 
@@ -133,7 +105,6 @@ class FlowsAccumulator:
         self.latency_turns.append(
             LatencyTurn(
                 turn_index=new_idx,
-                node=self._current_node,
                 user_started_ms=self._rel_ms(timestamp_ns),
             )
         )
@@ -192,24 +163,15 @@ class FlowsAccumulator:
             )
 
     def on_function_call_in_progress(self, frame: Any, timestamp_ns: int) -> None:
-        name = getattr(frame, "function_name", "") or "function"
-        arguments = getattr(frame, "arguments", None)
-        ms = self._rel_ms(timestamp_ns)
         tool_call_id = getattr(frame, "tool_call_id", None)
         if tool_call_id:
             self.registry.record_invocation_ns(tool_call_id, timestamp_ns)
-        self._pending_transition = PendingTransition(
-            function_name=name,
-            arguments=arguments,
-            timestamp_ms=ms,
-        )
 
     def on_bot_started_speaking(self, timestamp_ns: int) -> None:
         if self._open_latency_idx is None or self._open_latency_idx >= len(self.latency_turns):
             return
         turn = self.latency_turns[self._open_latency_idx]
         turn.bot_started_ms = self._rel_ms(timestamp_ns)
-        turn.bot_node = self._current_node
         self._bot_turn_idx = self._open_latency_idx
         self._open_latency_idx = None
 
@@ -281,8 +243,6 @@ class FlowsAccumulator:
 
         # Preserve the bot-side turn mapping across interruptions.
         self._bot_turn_idx = idx
-        if not turn.bot_node:
-            turn.bot_node = self._current_node
         if self._open_latency_idx == idx:
             self._open_latency_idx = None
 

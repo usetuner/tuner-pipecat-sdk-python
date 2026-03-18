@@ -34,16 +34,6 @@ def test_full_call_flow_single_turn(config):
     acc.on_start(base_ns)
     assert acc.call_start_abs_ns == base_ns
 
-    # Initial node (e.g. greeting)
-    acc.on_node_entered(
-        from_node=None,
-        to_node="greeting",
-        trigger=None,
-        timestamp_ns=base_ns,
-    )
-    assert len(acc.node_transitions) == 1
-    assert acc.node_transitions[-1].to_node == "greeting"
-
     # TurnTrackingObserver fires on_turn_started when user begins speaking
     acc.on_turn_started(1, base_ns + 50_000_000)  # user started at +50ms
 
@@ -65,7 +55,6 @@ def test_full_call_flow_single_turn(config):
     assert len(acc.latency_turns) == 1
     turn = acc.latency_turns[0]
     assert turn.turn_index == 0
-    assert turn.node == "greeting"
     assert turn.user_stopped_ms == 100
     assert turn.bot_started_ms == 250
     assert turn.bot_stopped_ms == 400
@@ -92,39 +81,18 @@ def test_full_call_flow_single_turn(config):
     assert "agent" in roles
 
 
-def test_full_call_flow_with_tool_and_node_transition(config):
-    """Simulate user → tool call → node transition → assistant response."""
+def test_full_call_flow_with_tool_call(config):
+    """Simulate user → tool call → assistant response."""
     acc = FlowsAccumulator()
     base_ns = 2_000_000_000
 
     acc.on_start(base_ns)
-    acc.on_node_entered(
-        from_node=None,
-        to_node="greeting",
-        trigger=None,
-        timestamp_ns=base_ns,
-    )
 
     # First turn: user asks for transfer
     acc.on_function_call_in_progress(
         SimpleNamespace(function_name="transfer", arguments={"to": "sales"}, tool_call_id="tc-1"),
         base_ns + 100_000_000,
     )
-    assert acc.get_pending_transition() is not None
-    assert acc.get_pending_transition().function_name == "transfer"
-
-    # Node transition (flow manager calls patched _set_node)
-    acc.on_node_entered(
-        from_node="greeting",
-        to_node="transfer",
-        trigger=acc.get_pending_transition(),
-        timestamp_ns=base_ns + 120_000_000,
-    )
-    assert acc.node_transitions[-1].to_node == "transfer"
-    assert acc.get_pending_transition() is None
-    assert len(acc.node_transitions) == 2
-    triggered_transition = next(t for t in acc.node_transitions if t.trigger_function)
-    assert triggered_transition.trigger_timestamp_ms == 100  # _rel_ms(base_ns + 100ms)
 
     acc.on_turn_started(1, base_ns + 10_000_000)  # user started speaking at +10ms
     acc.on_latency_measured(0.15)
@@ -155,7 +123,4 @@ def test_full_call_flow_with_tool_and_node_transition(config):
     roles = [s.role for s in payload.transcript_with_tool_calls]
     assert "agent_function" in roles
     assert "agent_result" in roles
-    assert "node_transition" in roles
-    # Initial + one triggered transition
-    transitions = [s for s in payload.transcript_with_tool_calls if s.role == "node_transition"]
-    assert len(transitions) >= 2  # initial → greeting, greeting → transfer
+    assert "node_transition" not in roles

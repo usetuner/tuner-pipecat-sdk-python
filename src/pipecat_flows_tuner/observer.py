@@ -32,7 +32,6 @@ from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from .accumulator import FlowsAccumulator
 from .client import post_call
 from .config import TunerConfig
-from .flow_manager_integration import attach_flow_manager_patch
 
 from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
 
@@ -84,7 +83,6 @@ class FlowsObserver(FrameProcessor):
 
     def attach_flow_manager(self, flow_manager: Any) -> None:
         self._flow_manager = flow_manager
-        attach_flow_manager_patch(flow_manager, self._acc, self._config)
 
     def attach_turn_tracking_observer(self, turn_tracker: Any) -> None:
         """Wire TurnTrackingObserver turn lifecycle events to the accumulator."""

@@ -6,7 +6,7 @@ import json
 import uuid
 from typing import TYPE_CHECKING, Any
 
-from .models import NodeInfo, ToolInfo, TranscriptSegment
+from .models import ToolInfo, TranscriptSegment
 
 if TYPE_CHECKING:
     from .accumulator import FlowsAccumulator
@@ -25,15 +25,6 @@ def parse_json_value(value: Any) -> Any:
         return json.loads(value) if isinstance(value, str) else value
     except Exception:
         return value
-
-
-def index_transitions_by_function(acc: FlowsAccumulator) -> dict[str, Any]:
-    transitions: dict[str, list[Any]] = {}
-    for transition in acc.node_transitions:
-        if not transition.trigger_function:
-            continue
-        transitions.setdefault(transition.trigger_function, []).append(transition)
-    return transitions
 
 
 def calculate_user_interruptions(acc: FlowsAccumulator) -> dict[int, bool]:
@@ -106,7 +97,6 @@ def build_user_segment(
 
 def build_agent_function_segment(
     tool_call: dict[str, Any],
-    transition: Any | None,
     invocation_ms: int,
 ) -> TranscriptSegment:
     function_name = tool_call["function"]["name"]
@@ -125,7 +115,7 @@ def build_agent_function_segment(
             params=parsed_args if isinstance(parsed_args, dict) else {},
             start_ms=invocation_ms,
         ),
-        metadata=build_segment_metadata(node=transition.from_node if transition else None),
+        metadata=build_segment_metadata(),
     )
 
 
@@ -144,13 +134,11 @@ def find_matching_tool_call(
     )
 
 
-def build_agent_result_segments(
+def build_agent_result_segment(
     acc: FlowsAccumulator,
     message: dict[str, Any],
     messages: list[dict[str, Any]],
-    transition: Any | None,
-    invocation_ms: int,
-) -> list[TranscriptSegment]:
+) -> TranscriptSegment:
     tool_call_id = message.get("tool_call_id", "")
     matched_tool_call = find_matching_tool_call(messages, tool_call_id)
     function_name = matched_tool_call["function"]["name"] if matched_tool_call else None
@@ -158,46 +146,27 @@ def build_agent_result_segments(
     completion_ms = acc.get_tool_completion_ms(tool_call_id) if tool_call_id else None
     result_ms = completion_ms if completion_ms is not None else 0
 
-    result_segments = [
-        TranscriptSegment(
-            role="agent_result",
-            text=(
-                json.dumps(parsed_result, default=str)
-                if parsed_result is not None
-                else message.get("content", "")
+    return TranscriptSegment(
+        role="agent_result",
+        text=(
+            json.dumps(parsed_result, default=str)
+            if parsed_result is not None
+            else message.get("content", "")
+        ),
+        start_ms=result_ms,
+        end_ms=None,
+        tool=ToolInfo(
+            name=function_name,
+            request_id=tool_call_id or None,
+            result=(
+                parsed_result
+                if isinstance(parsed_result, dict)
+                else {"value": parsed_result}
             ),
             start_ms=result_ms,
-            end_ms=None,
-            tool=ToolInfo(
-                name=function_name,
-                request_id=tool_call_id or None,
-                result=(
-                    parsed_result
-                    if isinstance(parsed_result, dict)
-                    else {"value": parsed_result}
-                ),
-                start_ms=result_ms,
-            ),
-            metadata=build_segment_metadata(),
-        )
-    ]
-
-    if transition:
-        result_segments.append(
-            TranscriptSegment(
-                role="node_transition",
-                text=f"{transition.from_node} → {transition.to_node}",
-                start_ms=transition.timestamp_ms,
-                end_ms=transition.timestamp_ms,
-                node=NodeInfo(
-                    from_node=transition.from_node,
-                    to=transition.to_node,
-                    reason=function_name,
-                ),
-                metadata=build_segment_metadata(),
-            )
-        )
-    return result_segments
+        ),
+        metadata=build_segment_metadata(),
+    )
 
 
 def build_agent_text_segment(
@@ -265,28 +234,9 @@ def find_spoken_assistant_message_indices(messages: list[dict[str, Any]]) -> set
     return set(last_per_window.values()) | trailing_assistant_indices
 
 
-def build_initial_transition_segment(acc: FlowsAccumulator) -> TranscriptSegment | None:
-    initial_transition = next(
-        (transition for transition in acc.node_transitions if transition.trigger_function is None),
-        None,
-    )
-    if not initial_transition:
-        return None
-
-    return TranscriptSegment(
-        role="node_transition",
-        text=f"→ {initial_transition.to_node}",
-        start_ms=initial_transition.timestamp_ms,
-        end_ms=initial_transition.timestamp_ms,
-        node=NodeInfo(from_node="", to=initial_transition.to_node, reason=""),
-        metadata=build_segment_metadata(),
-    )
-
-
 def enrich_transcript(
     acc: FlowsAccumulator, messages: list[dict[str, Any]]
 ) -> list[TranscriptSegment]:
-    transitions_by_function = index_transitions_by_function(acc)
     user_interrupted = calculate_user_interruptions(acc)
     agent_interrupted = calculate_agent_interruptions(acc)
 
@@ -296,7 +246,6 @@ def enrich_transcript(
     assistant_idx = 0
     latency_turn_idx = 0
     spoken_indices = find_spoken_assistant_message_indices(messages)
-    tool_call_transition_by_id: dict[str, Any] = {}
 
     while message_idx < len(messages):
         message = messages[message_idx]
@@ -317,19 +266,13 @@ def enrich_transcript(
 
         if role == "assistant" and "tool_calls" in message:
             for tool_call in message.get("tool_calls", []):
-                function_name = tool_call.get("function", {}).get("name", "")
-                transition_queue = transitions_by_function.get(function_name, [])
-                transition = transition_queue.pop(0) if transition_queue else None
                 tool_call_id = tool_call.get("id")
                 invocation_ms = (
                     acc.get_tool_invocation_ms(tool_call_id) or 0 if tool_call_id else 0
                 )
-                if tool_call_id:
-                    tool_call_transition_by_id[tool_call_id] = transition
                 result.append(
                     build_agent_function_segment(
                         tool_call=tool_call,
-                        transition=transition,
                         invocation_ms=invocation_ms,
                     )
                 )
@@ -337,16 +280,11 @@ def enrich_transcript(
             continue
 
         if role == "tool":
-            tool_call_id = message.get("tool_call_id", "")
-            transition = tool_call_transition_by_id.get(tool_call_id)
-            invocation_ms = acc.get_tool_invocation_ms(tool_call_id) or 0 if tool_call_id else 0
-            result.extend(
-                build_agent_result_segments(
+            result.append(
+                build_agent_result_segment(
                     acc=acc,
                     message=message,
                     messages=messages,
-                    transition=transition,
-                    invocation_ms=invocation_ms,
                 )
             )
             message_idx += 1
@@ -384,9 +322,5 @@ def enrich_transcript(
             continue
 
         message_idx += 1
-
-    initial_transition_segment = build_initial_transition_segment(acc)
-    if initial_transition_segment:
-        result.insert(0, initial_transition_segment)
 
     return result

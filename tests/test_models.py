@@ -5,51 +5,12 @@ from pipecat_flows_tuner.models import (
     CallPayload,
     GeneralMetaData,
     LatencyTurn,
-    NodeInfo,
-    NodeTransitionRecord,
-    PendingTransition,
     ToolInfo,
     TranscriptMetadata,
     TranscriptSegment,
     TranscriptWord,
     UsageToken,
 )
-
-
-def test_pending_transition():
-    pt = PendingTransition(function_name="transfer", arguments={"to": "sales"}, timestamp_ms=100)
-    assert pt.function_name == "transfer"
-    assert pt.arguments == {"to": "sales"}
-    assert pt.timestamp_ms == 100
-
-
-def test_node_transition_record():
-    r = NodeTransitionRecord(
-        from_node="greeting",
-        to_node="transfer",
-        trigger_function="transfer",
-        trigger_args={"to": "sales"},
-        timestamp_ms=200,
-    )
-    assert r.from_node == "greeting"
-    assert r.to_node == "transfer"
-    assert r.trigger_function == "transfer"
-    assert r.timestamp_ms == 200
-    assert r.trigger_timestamp_ms is None
-
-
-def test_node_transition_record_trigger_timestamp_ms():
-    r = NodeTransitionRecord(
-        from_node="greeting",
-        to_node="transfer",
-        trigger_function="transfer",
-        trigger_args={"to": "sales"},
-        timestamp_ms=150,
-        trigger_timestamp_ms=80,
-    )
-    assert r.trigger_timestamp_ms == 80
-    # trigger_timestamp_ms should be before timestamp_ms (function invoked before node switch)
-    assert r.trigger_timestamp_ms < r.timestamp_ms
 
 
 def test_latency_turn():
@@ -163,27 +124,6 @@ def test_tool_info_error():
 
 
 # ---------------------------------------------------------------------------
-# NodeInfo
-# ---------------------------------------------------------------------------
-
-
-def test_node_info_serialization_alias():
-    ni = NodeInfo(from_node="A", to="B", reason="transfer")
-    d = ni.model_dump(by_alias=True)
-    assert "from" in d
-    assert "from_node" not in d
-    assert d["from"] == "A"
-    assert d["to"] == "B"
-
-
-def test_node_info_from_none_for_first_node():
-    ni = NodeInfo(from_node=None, to="greeting")
-    d = ni.model_dump(by_alias=True, exclude_none=True)
-    assert "from" not in d
-    assert d["to"] == "greeting"
-
-
-# ---------------------------------------------------------------------------
 # TranscriptSegment
 # ---------------------------------------------------------------------------
 
@@ -199,7 +139,6 @@ def test_transcript_segment_minimal():
     assert seg.role == "user"
     assert seg.text == "Hello"
     assert seg.tool is None
-    assert seg.node is None
     assert seg.words is None
     assert seg.duration_ms is None
 
@@ -240,21 +179,6 @@ def test_transcript_segment_with_tool():
     assert seg.tool.start_ms == 17500
 
 
-def test_transcript_segment_with_node_transition():
-    seg = TranscriptSegment(
-        role="node_transition",
-        text="greeting → collect_details",
-        start_ms=14000,
-        end_ms=14000,
-        metadata={},
-        node=NodeInfo(from_node="greeting", to="collect_details", reason="user_intent"),
-    )
-    d = seg.model_dump(by_alias=True, exclude_none=True)
-    assert d["node"]["from"] == "greeting"
-    assert "from_node" not in d["node"]
-    assert d["node"]["to"] == "collect_details"
-
-
 def test_transcript_segment_serialization_excludes_none():
     seg = TranscriptSegment(
         role="agent",
@@ -265,7 +189,6 @@ def test_transcript_segment_serialization_excludes_none():
     )
     d = seg.model_dump(by_alias=True, exclude_none=True)
     assert "tool" not in d
-    assert "node" not in d
     assert "words" not in d
     assert "duration_ms" not in d
     assert d["role"] == "agent"
@@ -301,32 +224,3 @@ def test_call_payload_to_dict():
     assert "transcript_with_tool_calls" in d
 
 
-def test_call_payload_node_alias_in_serialized_output():
-    """NodeInfo 'from_node' must appear as 'from' in the final JSON dict."""
-    payload = CallPayload(
-        call_id="c2",
-        call_type="web_call",
-        start_timestamp=1000,
-        end_timestamp=2000,
-        recording_url="https://example.com/rec",
-        call_status="call_ended",
-        duration_ms=1000,
-        general_meta_data_raw=GeneralMetaData(
-            ai_models=AiModels(asr_model="dg", llm_model="gpt", tts_model="eleven"),
-            usage_token=UsageToken(asr_duration=1000),
-        ),
-        transcript_with_tool_calls=[
-            TranscriptSegment(
-                role="node_transition",
-                text="begin → greeting",
-                start_ms=0,
-                end_ms=0,
-                metadata={},
-                node=NodeInfo(from_node="begin", to="greeting"),
-            )
-        ],
-    )
-    d = payload.to_dict()
-    node = d["transcript_with_tool_calls"][0]["node"]
-    assert node["from"] == "begin"
-    assert "from_node" not in node

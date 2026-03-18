@@ -44,24 +44,6 @@ def test_observer_init():
     assert o._flushed is False
 
 
-@pytest.mark.asyncio
-async def test_attach_flow_manager_patches_set_node(observer, mock_flow_manager):
-    original_set_node = AsyncMock()
-    mock_flow_manager._set_node = original_set_node
-    mock_flow_manager._current_node = "greeting"
-    mock_flow_manager.state = {"key": "value"}
-
-    observer.attach_flow_manager(mock_flow_manager)
-
-    assert mock_flow_manager._set_node is not original_set_node
-    # Call the patched _set_node
-    await mock_flow_manager._set_node("transfer", {"functions": [], "task_messages": []})
-    assert original_set_node.called
-    assert len(observer._acc.node_transitions) == 1
-    assert observer._acc.node_transitions[0].from_node == "greeting"
-    assert observer._acc.node_transitions[0].to_node == "transfer"
-
-
 def test_handle_start_frame_updates_accumulator(observer):
     """_handle(StartFrame) updates accumulator; process_frame requires pipeline setup."""
     frame = StartFrame()

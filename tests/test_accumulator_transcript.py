@@ -1,10 +1,10 @@
 """Accumulator transcript enrichment with tools and transitions."""
 
 from pipecat_flows_tuner.accumulator import FlowsAccumulator
-from pipecat_flows_tuner.models import LatencyTurn, NodeTransitionRecord
+from pipecat_flows_tuner.models import LatencyTurn
 
 
-def test_enrich_transcript_tool_call_and_result_and_node_transition(tuner_config):
+def test_enrich_transcript_tool_call_and_result(tuner_config):
     acc = FlowsAccumulator()
     base_ns = 1_000_000_000
     acc.call_start_abs_ns = base_ns
@@ -12,16 +12,6 @@ def test_enrich_transcript_tool_call_and_result_and_node_transition(tuner_config
     acc.done = True
     acc.registry.record_invocation_ns("tc-1", base_ns + 60_000_000)
     acc.registry.record_completion_ns("tc-1", base_ns + 90_000_000)
-    acc.node_transitions = [
-        NodeTransitionRecord(
-            from_node="greeting",
-            to_node="transfer",
-            trigger_function="transfer",
-            trigger_args={"to": "sales"},
-            timestamp_ms=100,
-            trigger_timestamp_ms=60,
-        )
-    ]
     transcript = [
         {"role": "user", "content": "Transfer me"},
         {
@@ -64,16 +54,7 @@ def test_enrich_transcript_tool_call_and_result_and_node_transition(tuner_config
     roles = [segment.role for segment in payload.transcript_with_tool_calls]
     assert "agent_function" in roles
     assert "agent_result" in roles
-    assert "node_transition" in roles
-    transition_segments = [
-        segment
-        for segment in payload.transcript_with_tool_calls
-        if segment.role == "node_transition"
-    ]
-    assert transition_segments
-    assert "state_snapshot" not in transition_segments[0].metadata
-    assert "functions_available" not in transition_segments[0].metadata
-    assert "task_messages" not in transition_segments[0].metadata
+    assert "node_transition" not in roles
     user_segments = [
         segment for segment in payload.transcript_with_tool_calls if segment.role == "user"
     ]
@@ -98,7 +79,6 @@ def test_consecutive_assistant_messages_merged_into_one_segment(tuner_config):
     acc.call_start_abs_ns = 0
     acc.call_end_abs_ns = 2_000_000_000
     acc.done = True
-    acc.node_transitions = []
     acc.latency_turns = [
         LatencyTurn(
             turn_index=0,
@@ -123,46 +103,6 @@ def test_consecutive_assistant_messages_merged_into_one_segment(tuner_config):
     assert agent_segments[0].text == "Hi there, how can I help?"
     assert agent_segments[0].start_ms == 100
     assert agent_segments[0].end_ms == 300
-
-
-def test_enrich_transcript_initial_node_transition(tuner_config):
-    acc = FlowsAccumulator()
-    acc.call_start_abs_ns = 0
-    acc.call_end_abs_ns = 1_000_000_000
-    acc.done = True
-    acc.node_transitions = [
-        NodeTransitionRecord(
-            from_node=None,
-            to_node="start",
-            trigger_function=None,
-            trigger_args=None,
-            timestamp_ms=0,
-        )
-    ]
-    transcript = [
-        {"role": "user", "content": "Hi"},
-        {"role": "assistant", "content": "Hi!"},
-    ]
-    acc.latency_turns = [
-        LatencyTurn(
-            turn_index=0,
-            node="start",
-            ttfb_ms=0,
-            llm_ms=0,
-            tts_ms=0,
-            bot_started_ms=0,
-            user_stopped_ms=0,
-            user_started_ms=0,
-            bot_stopped_ms=100,
-        )
-    ]
-    payload = acc.build_payload(tuner_config, transcript)
-    first = payload.transcript_with_tool_calls[0]
-    assert first.role == "node_transition"
-    assert first.node is not None
-    assert first.node.to == "start"
-    assert "state_snapshot" not in first.metadata
-    assert "functions_available" not in first.metadata
 
 
 def test_enrich_transcript_uses_assistant_turn_events_to_skip_ghost_messages(tuner_config):
@@ -364,7 +304,7 @@ def test_parallel_same_name_tools_use_distinct_invocation_ms_by_id(tuner_config)
     assert func_segs[1].start_ms == 200
 
 
-def test_agent_result_does_not_fallback_to_transition_timestamp(tuner_config):
+def test_agent_result_without_registry_completion_is_zero(tuner_config):
     """Without registry completion, agent_result timing stays unset (0)."""
     acc = FlowsAccumulator()
     base_ns = 1_000_000_000
@@ -372,16 +312,6 @@ def test_agent_result_does_not_fallback_to_transition_timestamp(tuner_config):
     acc.call_end_abs_ns = base_ns + 2_000_000_000
     acc.done = True
     acc.registry.record_invocation_ns("tc-1", base_ns + 75_000_000)
-    acc.node_transitions = [
-        NodeTransitionRecord(
-            from_node="greeting",
-            to_node="next",
-            trigger_function="transfer",
-            trigger_args={},
-            timestamp_ms=200,
-            trigger_timestamp_ms=75,
-        )
-    ]
     transcript = [
         {"role": "user", "content": "transfer"},
         {

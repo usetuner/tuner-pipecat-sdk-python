@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from pipecat_flows_tuner.accumulator import FlowsAccumulator
-from pipecat_flows_tuner.models import LatencyTurn, NodeTransitionRecord, PendingTransition
+from pipecat_flows_tuner.models import LatencyTurn
 
 
 def test_on_bot_stopped_updates_last_turn():
@@ -48,18 +48,6 @@ def test_on_bot_stopped_no_op_when_done():
     assert acc.latency_turns[-1].bot_stopped_ms is None
 
 
-def test_on_function_call_in_progress_sets_pending():
-    acc = FlowsAccumulator()
-    acc.call_start_abs_ns = 1
-    frame = MagicMock(function_name="transfer", arguments={"to": "sales"}, tool_call_id="tc-1")
-    acc.on_function_call_in_progress(frame, 1 + 300 * 1_000_000)
-    pending = acc.get_pending_transition()
-    assert pending is not None
-    assert pending.function_name == "transfer"
-    assert pending.arguments == {"to": "sales"}
-    assert pending.timestamp_ms == 300
-
-
 def test_on_function_call_in_progress_records_invocation_in_registry():
     acc = FlowsAccumulator()
     acc.call_start_abs_ns = 1_000_000_000
@@ -75,44 +63,6 @@ def test_on_function_call_result_records_completion_in_registry():
     assert acc.get_tool_completion_ms("call_abc") == 250
 
 
-def test_on_node_entered_appends_transition_and_clears_pending():
-    acc = FlowsAccumulator()
-    acc._pending_transition = PendingTransition(
-        function_name="transfer", arguments={"to": "sales"}, timestamp_ms=100
-    )
-    acc.call_start_abs_ns = 1
-    acc.on_node_entered(
-        from_node="greeting",
-        to_node="transfer",
-        trigger=acc._pending_transition,
-        timestamp_ns=1 + 200 * 1_000_000,
-    )
-    assert len(acc.node_transitions) == 1
-    record = acc.node_transitions[0]
-    assert record.from_node == "greeting"
-    assert record.to_node == "transfer"
-    assert record.trigger_function == "transfer"
-    assert record.trigger_args == {"to": "sales"}
-    assert record.timestamp_ms == 200
-    assert acc.node_transitions[-1].to_node == "transfer"
-    assert acc.get_pending_transition() is None
-
-
-def test_on_node_entered_without_trigger_records_minimal_transition():
-    acc = FlowsAccumulator()
-
-    acc.on_node_entered(
-        from_node=None,
-        to_node="start",
-        trigger=None,
-        timestamp_ns=0,
-    )
-    record = acc.node_transitions[0]
-    assert record.from_node is None
-    assert record.to_node == "start"
-    assert record.trigger_function is None
-
-
 def test_usage_counter_accessors():
     acc = FlowsAccumulator()
     llm_metric = type("LLMUsageMetricsData", (), {"value": SimpleNamespace(total_tokens=42)})
@@ -125,25 +75,23 @@ def test_usage_counter_accessors():
 def test_on_turn_started_creates_latency_turn():
     acc = FlowsAccumulator()
     acc.call_start_abs_ns = 1_000_000_000
-    acc._current_node = "greeting"
     acc.on_turn_started(1, 1_000_000_000 + 400_000_000)
     assert len(acc.latency_turns) == 1
     turn = acc.latency_turns[0]
     assert turn.turn_index == 0
-    assert turn.node == "greeting"
+    assert turn.node is None
     assert turn.user_started_ms == 400
     assert acc._active_turn_number == 1
 
 
 
-def test_on_bot_started_speaking_sets_turn_bot_node():
+def test_on_bot_started_speaking_sets_bot_started_ms():
     acc = FlowsAccumulator()
     base_ns = 1_000_000_000
     acc.call_start_abs_ns = base_ns
-    acc._current_node = "delivery_or_pickup"
     acc.on_turn_started(1, base_ns + 100_000_000)
     acc.on_bot_started_speaking(base_ns + 200_000_000)
-    assert acc.latency_turns[0].bot_node == "delivery_or_pickup"
+    assert acc.latency_turns[0].bot_started_ms == 200
 
 
 def test_on_turn_ended_sets_was_interrupted():
@@ -158,7 +106,6 @@ def test_on_turn_ended_sets_was_interrupted():
 def test_on_latency_breakdown_enriches_existing_turn():
     acc = FlowsAccumulator()
     acc.call_start_abs_ns = 1_000_000_000
-    acc._current_node = "greeting"
     acc._pending_pipecat_llm_processing_s = 0.03
     acc._pending_pipecat_tts_processing_s = 0.07
     acc.on_latency_measured(0.2)
@@ -176,7 +123,6 @@ def test_on_latency_breakdown_enriches_existing_turn():
 
     assert len(acc.latency_turns) == 1
     turn = acc.latency_turns[0]
-    assert turn.node == "greeting"
     assert turn.user_started_ms == 500
     assert turn.user_stopped_ms == 700
     assert turn.bot_started_ms == 900
@@ -248,7 +194,6 @@ def test_on_latency_breakdown_skips_overwrite_for_initial_proactive_greeting():
     base_ns = 1_000_000_000  # 1.0s unix time
     acc = FlowsAccumulator()
     acc.call_start_abs_ns = base_ns
-    acc._current_node = "greeting"
 
     # on_latency_measured fires for the initial proactive greeting (1132ms latency)
     acc.on_latency_measured(1.132)

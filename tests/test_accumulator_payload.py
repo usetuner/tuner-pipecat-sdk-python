@@ -3,7 +3,7 @@
 from types import SimpleNamespace
 
 from pipecat_flows_tuner.accumulator import FlowsAccumulator
-from pipecat_flows_tuner.models import LatencyTurn, NodeTransitionRecord
+from pipecat_flows_tuner.models import LatencyTurn
 
 
 def _metric(cls_name: str, **kwargs):
@@ -168,25 +168,16 @@ def test_payload_transcript_preserves_conversation_order(tuner_config):
     assert roles == ["user", "agent_function", "agent_result", "agent"]
 
 
+
 def test_payload_keeps_initial_greeting_before_first_user(tuner_config):
     acc = FlowsAccumulator()
     base_ns = 1_000_000_000
     acc.call_start_abs_ns = base_ns
     acc.call_end_abs_ns = base_ns + 5_000_000_000
     acc.done = True
-    acc.node_transitions = [
-        NodeTransitionRecord(
-            from_node=None,
-            to_node="greeting",
-            trigger_function=None,
-            trigger_args=None,
-            timestamp_ms=900,
-        )
-    ]
     acc.latency_turns = [
         LatencyTurn(
             turn_index=0,
-            node="greeting",
             ttfb_ms=100,
             llm_ms=50,
             tts_ms=40,
@@ -204,9 +195,9 @@ def test_payload_keeps_initial_greeting_before_first_user(tuner_config):
 
     payload = acc.build_payload(tuner_config, transcript)
     roles = [segment.role for segment in payload.transcript_with_tool_calls]
-    assert roles == ["node_transition", "agent", "user", "agent"]
+    assert roles == ["agent", "user", "agent"]
 
-    greeting = payload.transcript_with_tool_calls[1]
+    greeting = payload.transcript_with_tool_calls[0]
     assert greeting.text == "Welcome to Pipecat Pizza!"
     assert greeting.start_ms == 0
     assert greeting.end_ms == 0
