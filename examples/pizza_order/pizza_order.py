@@ -42,6 +42,7 @@ from pipecat.runner.utils import create_transport
 from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.openai.llm import OpenAILLMService
+from pipecat.observers.turn_tracking_observer import TurnTrackingObserver
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 
 from pipecat_flows import (
@@ -270,6 +271,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     )
 
     debug_logger = DebugLogProcessor()
+    turn_tracker = TurnTrackingObserver()
 
     observer = FlowsObserver(
         api_key=os.getenv("TUNER_API_KEY", "dev"),
@@ -283,6 +285,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         debug=True,
     )
     observer.attach_context_aggregators(context_aggregator)
+    observer.attach_turn_tracking_observer(turn_tracker)
 
     pipeline = Pipeline(
         [
@@ -302,7 +305,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         pipeline,
         params=PipelineParams(
             allow_interruptions=True,
-            observers=[observer.latency_observer],
+            observers=[observer.latency_observer, turn_tracker],
             enable_metrics=True,
             enable_usage_metrics=True,
         ),

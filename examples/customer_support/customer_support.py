@@ -37,6 +37,7 @@ from pipecat.frames.frames import (
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
+from pipecat.observers.turn_tracking_observer import TurnTrackingObserver
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
@@ -324,6 +325,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     )
 
     debug_logger = DebugLogProcessor()
+    turn_tracker = TurnTrackingObserver()
 
     observer = FlowsObserver(
         api_key=os.getenv("TUNER_API_KEY", "dev"),
@@ -337,6 +339,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         debug=True,
     )
     observer.attach_context_aggregators(context_aggregator)
+    observer.attach_turn_tracking_observer(turn_tracker)
 
     pipeline = Pipeline(
         [
@@ -356,7 +359,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         pipeline,
         params=PipelineParams(
             allow_interruptions=True,
-            observers=[observer.latency_observer],
+            observers=[observer.latency_observer, turn_tracker],
             enable_metrics=True,
             enable_usage_metrics=True,
         ),
