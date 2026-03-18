@@ -18,17 +18,17 @@ def test_rel_ms_relative_to_call_start():
     assert acc._rel_ms(1_000_000_000) == 0
 
 
-def test_ns_to_ms_returns_none_when_zero():
+def test_abs_to_rel_ms_returns_zero_when_no_start():
     acc = FlowsAccumulator()
-    assert acc._ns_to_ms(0, 1_000_000) is None
-    assert acc._ns_to_ms(1_000_000, 0) is None
+    assert acc._abs_to_rel_ms(1.5) == 0
+    assert acc._abs_to_rel_ms(0) == 0
 
 
-def test_ns_to_ms_computes_milliseconds():
+def test_abs_to_rel_ms_computes_milliseconds():
     acc = FlowsAccumulator()
-    assert acc._ns_to_ms(0, 1_000_000) is None
-    assert acc._ns_to_ms(1_000_000_000, 2_000_000_000) == 1_000
-    assert acc._ns_to_ms(1_000_000_000, 1_500_000_000) == 500
+    acc.call_start_abs_ns = 1_000_000_000
+    assert acc._abs_to_rel_ms(2.0) == 1000
+    assert acc._abs_to_rel_ms(1.5) == 500
 
 
 def test_on_start_sets_call_start():

@@ -1,7 +1,8 @@
 """Tests for FlowsObserver: frame routing, attach_flow_manager, flush."""
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from typing import Any
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -9,10 +10,9 @@ pytest.importorskip("pipecat", reason="pipecat not installed")
 
 from pipecat.frames.frames import (
     EndFrame,
+    FunctionCallResultFrame,
     MetricsFrame,
     StartFrame,
-    VADUserStartedSpeakingFrame,
-    VADUserStoppedSpeakingFrame,
 )
 
 from pipecat_flows_tuner.observer import FlowsObserver
@@ -68,23 +68,6 @@ def test_handle_start_frame_updates_accumulator(observer):
     ts = 1_000_000_000
     observer._handle(frame, ts)
     assert observer._acc.call_start_abs_ns == ts
-
-
-@pytest.mark.asyncio
-async def test_handle_vad_user_started(observer):
-    observer._acc.call_start_abs_ns = 0
-    observer._handle(VADUserStartedSpeakingFrame(), 100)
-    assert observer._acc._user_started_ns == 100
-
-
-@pytest.mark.asyncio
-async def test_handle_vad_user_stopped(observer):
-    frame = MagicMock(spec=VADUserStoppedSpeakingFrame)
-    frame.stop_secs = 0
-    observer._acc._current_node = "n1"
-    observer._handle(frame, 200)
-    assert observer._acc._user_stopped_ns == 200
-    assert observer._acc._llm_started_ns == 0
 
 
 @pytest.mark.asyncio
@@ -147,12 +130,60 @@ def test_handle_metrics_frame_routes_to_accumulator(observer):
         mock_on_metrics.assert_called_once_with(frame)
 
 
+def test_handle_function_call_result_frame_records_completion(observer):
+    observer._acc.call_start_abs_ns = 1_000_000_000
+    frame = FunctionCallResultFrame(tool_call_id="tc-1", function_name="foo", arguments="{}", result="ok")
+    observer._handle(frame, 1_000_000_000 + 300_000_000)
+    assert observer._acc.get_tool_completion_ms("tc-1") == 300
+
+
+def test_observer_exposes_latency_observer(observer):
+    assert observer.latency_observer is not None
+
+
 @pytest.mark.asyncio
 async def test_flush_without_flow_manager_does_not_post(observer):
     assert observer._flow_manager is None
     with patch("pipecat_flows_tuner.observer.post_call", new_callable=AsyncMock) as post_mock:
         await observer._flush()
         post_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_attach_turn_tracking_observer_wiring(observer):
+    """attach_turn_tracking_observer registers on_turn_started/ended on the accumulator."""
+    from unittest.mock import patch
+
+    handlers: dict[str, Any] = {}
+
+    class FakeTurnTracker:
+        def event_handler(self, event_name: str):
+            def decorator(func):
+                handlers[event_name] = func
+                return func
+            return decorator
+
+    tracker = FakeTurnTracker()
+    observer.attach_turn_tracking_observer(tracker)
+
+    assert "on_turn_started" in handlers
+    assert "on_turn_ended" in handlers
+
+    # Simulate on_turn_started firing
+    observer._acc.call_start_abs_ns = 1_000_000_000
+    with patch("pipecat_flows_tuner.observer.time") as mock_time:
+        mock_time.time_ns.return_value = 1_000_000_000 + 300_000_000  # +300ms
+        await handlers["on_turn_started"](tracker, 1)
+
+    assert len(observer._acc.latency_turns) == 1
+    assert observer._acc.latency_turns[0].turn_index == 0
+    assert observer._acc.latency_turns[0].user_started_ms == 300
+    assert observer._acc._active_turn_number == 1
+
+    # Simulate on_turn_ended firing
+    await handlers["on_turn_ended"](tracker, 1, 2.5, True)
+    assert observer._acc.latency_turns[0].was_interrupted is True
+    assert observer._acc._active_turn_number is None
 
 
 @pytest.mark.asyncio

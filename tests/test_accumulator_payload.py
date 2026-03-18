@@ -1,7 +1,13 @@
 """Accumulator payload-shape and metadata tests."""
 
+from types import SimpleNamespace
+
 from pipecat_flows_tuner.accumulator import FlowsAccumulator
 from pipecat_flows_tuner.models import LatencyTurn
+
+
+def _metric(cls_name: str, **kwargs):
+    return type(cls_name, (), kwargs)()
 
 
 def test_build_payload_basic(tuner_config):
@@ -9,7 +15,7 @@ def test_build_payload_basic(tuner_config):
     acc.call_start_abs_ns = 1_000_000_000
     acc.call_end_abs_ns = 2_000_000_000
     acc.done = True
-    acc._pipecat_tts_chars = 50
+    acc.on_metrics_frame(SimpleNamespace(data=[_metric("TTSUsageMetricsData", value=50)]))
     transcript = [
         {"role": "user", "content": "Hi"},
         {"role": "assistant", "content": "Hello!"},
@@ -31,7 +37,11 @@ def test_llm_token_uses_pipecat_value(tuner_config):
     acc.call_start_abs_ns = 0
     acc.call_end_abs_ns = 1_000_000_000
     acc.done = True
-    acc._pipecat_llm_total_tokens = 500
+    acc.on_metrics_frame(
+        SimpleNamespace(
+            data=[_metric("LLMUsageMetricsData", value=SimpleNamespace(total_tokens=500))]
+        )
+    )
     payload = acc.build_payload(tuner_config, [])
     assert payload.general_meta_data_raw.usage_token.llm_token == 500
 
@@ -41,7 +51,6 @@ def test_llm_token_is_none_when_pipecat_zero(tuner_config):
     acc.call_start_abs_ns = 0
     acc.call_end_abs_ns = 1_000_000_000
     acc.done = True
-    acc._pipecat_llm_total_tokens = 0
     payload = acc.build_payload(tuner_config, [{"role": "user", "content": "A" * 400}])
     assert payload.general_meta_data_raw.usage_token.llm_token is None
 
@@ -51,7 +60,7 @@ def test_tts_char_count_uses_pipecat_value(tuner_config):
     acc.call_start_abs_ns = 0
     acc.call_end_abs_ns = 1_000_000_000
     acc.done = True
-    acc._pipecat_tts_chars = 999
+    acc.on_metrics_frame(SimpleNamespace(data=[_metric("TTSUsageMetricsData", value=999)]))
     payload = acc.build_payload(tuner_config, [])
     assert payload.general_meta_data_raw.usage_token.tts_character_count == 999
 
@@ -61,7 +70,6 @@ def test_tts_char_count_is_none_when_pipecat_zero(tuner_config):
     acc.call_start_abs_ns = 0
     acc.call_end_abs_ns = 1_000_000_000
     acc.done = True
-    acc._pipecat_tts_chars = 0
     payload = acc.build_payload(tuner_config, [])
     assert payload.general_meta_data_raw.usage_token.tts_character_count is None
 
@@ -120,3 +128,41 @@ def test_enrich_transcript_skips_system(tuner_config):
     payload = acc.build_payload(tuner_config, transcript)
     roles = [segment.role for segment in payload.transcript_with_tool_calls]
     assert "system" not in roles
+
+
+def test_payload_transcript_segments_are_sorted_by_start_ms(tuner_config):
+    acc = FlowsAccumulator()
+    base_ns = 1_000_000_000
+    acc.call_start_abs_ns = base_ns
+    acc.call_end_abs_ns = base_ns + 10_000_000_000
+    acc.done = True
+    acc.registry.record_invocation_ns("tc-1", base_ns + 80_000_000)
+    acc.registry.record_completion_ns("tc-1", base_ns + 160_000_000)
+    acc.latency_turns = [
+        LatencyTurn(
+            turn_index=0,
+            node="greeting",
+            ttfb_ms=10,
+            llm_ms=20,
+            tts_ms=30,
+            bot_started_ms=6000,
+            user_stopped_ms=1000,
+            user_started_ms=500,
+            bot_stopped_ms=7000,
+        )
+    ]
+    transcript = [
+        {"role": "user", "content": "Hi"},
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {"id": "tc-1", "function": {"name": "transfer", "arguments": "{}"}}
+            ],
+        },
+        {"role": "tool", "tool_call_id": "tc-1", "content": '{"ok": true}'},
+        {"role": "assistant", "content": "Done"},
+    ]
+
+    payload = acc.build_payload(tuner_config, transcript)
+    start_times = [segment.start_ms for segment in payload.transcript_with_tool_calls]
+    assert start_times == sorted(start_times)

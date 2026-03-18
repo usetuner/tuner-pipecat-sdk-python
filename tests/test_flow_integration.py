@@ -1,16 +1,14 @@
-"""End-to-end flow tests: full call lifecycle with accumulator and payload build.
-
-These tests simulate a complete call flow (start → user/LLM/TTS/bot events → node
-transitions → end) and assert the resulting payload and transcript enrichment.
-No pipecat runtime required.
-"""
-
-from unittest.mock import MagicMock
+"""End-to-end flow tests: runtime observer flow with accumulator and payload build."""
+from types import SimpleNamespace
 
 import pytest
 
 from pipecat_flows_tuner.accumulator import FlowsAccumulator
 from pipecat_flows_tuner.config import TunerConfig
+
+
+def _metric(cls_name: str, **kwargs):
+    return type(cls_name, (), kwargs)()
 
 
 @pytest.fixture
@@ -48,16 +46,22 @@ def test_full_call_flow_single_turn(config):
     assert acc._current_node == "greeting"
     assert len(acc.node_transitions) == 1
 
-    # User speaks; simulate MetricsFrame so latency comes from Pipecat
-    acc.on_user_started(base_ns + 50_000_000)
-    acc.on_user_stopped(MagicMock(stop_secs=0), base_ns + 100_000_000)
-    acc.on_llm_started(base_ns + 150_000_000)
-    acc.on_tts_started(base_ns + 200_000_000)
-    acc._pipecat_tts_chars = 11
-    acc._pending_pipecat_tts_ttfb_s = 0.1
+    # TurnTrackingObserver fires on_turn_started when user begins speaking
+    acc.on_turn_started(1, base_ns + 50_000_000)  # user started at +50ms
+
+    # Runtime observer data
+    acc.on_latency_measured(0.15)
+    acc.on_metrics_frame(SimpleNamespace(data=[_metric("TTSUsageMetricsData", value=11)]))
     acc._pending_pipecat_llm_processing_s = 0.05
     acc._pending_pipecat_tts_processing_s = 0.05
-    acc.on_bot_started_speaking(base_ns + 250_000_000)
+    acc.on_latency_breakdown(
+        SimpleNamespace(
+            user_turn_start_time=1.05,
+            user_turn_secs=0.05,
+            ttfb=[SimpleNamespace(duration_secs=0.1)],
+            function_calls=[],
+        )
+    )
     acc.on_bot_stopped(base_ns + 400_000_000)
 
     assert len(acc.latency_turns) == 1
@@ -106,10 +110,8 @@ def test_full_call_flow_with_tool_and_node_transition(config):
     )
 
     # First turn: user asks for transfer
-    acc.on_user_started(base_ns + 10_000_000)
-    acc.on_user_stopped(MagicMock(stop_secs=0), base_ns + 50_000_000)
     acc.on_function_call_in_progress(
-        MagicMock(function_name="transfer", arguments={"to": "sales"}),
+        SimpleNamespace(function_name="transfer", arguments={"to": "sales"}, tool_call_id="tc-1"),
         base_ns + 100_000_000,
     )
     assert acc.get_pending_transition() is not None
@@ -130,9 +132,18 @@ def test_full_call_flow_with_tool_and_node_transition(config):
     triggered_transition = next(t for t in acc.node_transitions if t.trigger_function)
     assert triggered_transition.trigger_timestamp_ms == 100  # _rel_ms(base_ns + 100ms)
 
-    acc.on_llm_started(base_ns + 130_000_000)
-    acc.on_tts_started(base_ns + 180_000_000)
-    acc.on_bot_started_speaking(base_ns + 200_000_000)
+    acc.on_turn_started(1, base_ns + 10_000_000)  # user started speaking at +10ms
+    acc.on_latency_measured(0.15)
+    acc.on_latency_breakdown(
+        SimpleNamespace(
+            user_turn_start_time=2.01,
+            user_turn_secs=0.04,
+            ttfb=[SimpleNamespace(duration_secs=0.07)],
+            function_calls=[
+                SimpleNamespace(function_name="transfer", start_time=2.1, duration_secs=0.02)
+            ],
+        )
+    )
     acc.on_bot_stopped(base_ns + 350_000_000)
     acc.on_call_end(base_ns + 400_000_000)
 
