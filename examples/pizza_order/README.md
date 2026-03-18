@@ -25,12 +25,12 @@ greeting (choose pizza)
 
 ## Prerequisites
 
-- Python 3.10+
-- `uv` package manager
+- Python 3.10+, [`uv`](https://docs.astral.sh/uv/)
+- SDK install paths (PyPI, `pip` vs examples): see the **repository root README**.
 
 ## Setup
 
-1. Install dependencies:
+1. From this directory:
 
    ```bash
    uv sync

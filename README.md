@@ -13,30 +13,43 @@ then sends a structured `CallPayload` to the Tuner API when a call ends.
 
 ## Requirements
 
-- Python **>=3.10** (3.12 recommended, following [pipecat's prerequisites](https://github.com/pipecat-ai/pipecat))
+- Python **3.10–3.13**. **`python3.12` is verified** for `pip install -e .` (repo includes `.python-version` for `uv`).
+- **Do not use Python 3.14** for installs yet: Pipecat pulls **`onnxruntime~=1.23.2`** and **`numba`** without 3.14 wheels → errors like *No matching distribution found for onnxruntime*.
+- This SDK depends on **`pipecat-ai>=0.0.105`**.
 
 ## Installation
 
-> **Note:** This package is not yet published to PyPI. Install it directly from the repository.
-
-1. Clone the repo:
+This package is **not on PyPI**. Install from a clone of this repository.
 
 ```bash
 git clone https://github.com/usetuner/tuner-pipecat-sdk-python.git
 cd tuner-pipecat-sdk-python
 ```
 
-2. Install the SDK into your project's virtual environment:
+Create a venv with **Python 3.12 or 3.13** (not the system 3.14 if that is your default):
+
+```bash
+python3.12 -m venv .venv && source .venv/bin/activate   # macOS/Linux
+# or: uv venv --python 3.12 && source .venv/bin/activate
+```
+
+**Into that venv:**
 
 ```bash
 pip install -e .
-```
-
-Or with dev dependencies:
-
-```bash
+# optional dev/test extras
 pip install -e ".[dev]"
 ```
+
+**Examples** under `examples/` depend on this SDK via a **local path** (`tool.uv.sources`). Use **`uv sync`** inside each example directory, or install the SDK from the repo root with `pip install -e .` first, then `pip install -e .` in the example (plain `pip` does not read `uv.sources`).
+
+**Troubleshooting**
+
+| Issue | What to do |
+|-------|------------|
+| `No matching distribution found for onnxruntime~=1.23.2` | **Python 3.14**: Pipecat pins `onnxruntime` versions that have no 3.14 wheels. Switch to **3.12 or 3.13** (new venv). |
+| `Failed to build numba` / *Cannot install on Python version 3.14* | Same: use **Python 3.12 or 3.13**. |
+| `No matching distribution found for pipecat-flows-tuner` (example + **pip**) | Install the SDK from **repo root** first (`pip install -e .`), then install the example. |
 
 ## Quick Start
 
@@ -57,8 +70,13 @@ observer = FlowsObserver(
 
 # Required: attach the flow manager before running the pipeline
 observer.attach_flow_manager(flow_manager)
-observer.attach_context_aggregators(context_aggregator)
+observer.attach_turn_tracking_observer(turn_tracker)
 ```
+
+### OpenTelemetry (optional)
+
+- **Not required** for the Tuner API payload. With `pip install 'pipecat-flows-tuner[otel]'`, the observer can emit optional spans around `FunctionCall*` frames if you configure an exporter.
+- Tool transcript timings use **`FlowManager._create_transition_func`** (`params.tool_call_id`), not FCIP frame order.
 
 Place the observer after TTS in your pipeline:
 
@@ -80,11 +98,14 @@ Enable metrics on the pipeline task so latency and usage fields are populated:
 ```python
 from pipecat.pipeline.task import PipelineTask
 from pipecat.pipeline.pipeline_params import PipelineParams
+from pipecat.observers.turn_tracking_observer import TurnTrackingObserver
+
+turn_tracker = TurnTrackingObserver()
 
 task = PipelineTask(
     pipeline,
     params=PipelineParams(
-        observers=[observer.latency_observer],
+        observers=[observer.latency_observer, turn_tracker],
         enable_metrics=True,
         enable_usage_metrics=True,
     ),
@@ -126,14 +147,14 @@ See [`examples/`](examples/) for working bots built with this SDK:
 | [`appointment_booking/`](examples/appointment_booking/) | Medical clinic receptionist, 7-node linear flow |
 | [`customer_support/`](examples/customer_support/) | Multi-branch support agent with escalation |
 
-Each example is self-contained. To run one:
+Each example is self-contained. See **Installation** above for how the SDK is resolved. To run one:
 
 ```bash
 cd examples/<example_name>
 uv sync
-cp .env.example .env   # fill in your API keys
-uv run <example_name>.py
+cp .env.example .env   # if present; fill in API keys
+uv run <script>.py
 ```
 
-Then open http://localhost:7860 in your browser.
+Then open http://localhost:7860 where applicable.
 

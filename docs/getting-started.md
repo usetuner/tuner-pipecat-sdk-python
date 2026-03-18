@@ -24,7 +24,7 @@ Relative imports, config paths, and pipeline setup all resolve from this directo
 ## Install
 
 ```bash
-pip install pipecat-flows-tuner
+pip install -e .
 ```
 
 ## Minimal Setup
@@ -72,13 +72,17 @@ Pipeline([
 The SDK reads **usage and latency from Pipecat only** (no fallback). Ensure the task is created with metrics enabled:
 
 ```python
-from pipecat.pipeline import PipelineTask
+from pipecat.pipeline.task import PipelineTask
 from pipecat.pipeline.pipeline_params import PipelineParams
+from pipecat.observers.turn_tracking_observer import TurnTrackingObserver
+
+turn_tracker = TurnTrackingObserver()
+observer.attach_turn_tracking_observer(turn_tracker)
 
 task = PipelineTask(
     pipeline,
     params=PipelineParams(
-        observers=[observer.latency_observer],
+        observers=[observer.latency_observer, turn_tracker],
         enable_metrics=True,
         enable_usage_metrics=True,
     ),

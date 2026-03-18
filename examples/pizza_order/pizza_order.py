@@ -6,7 +6,6 @@
 """Pizzeria ordering bot built with Pipecat Flows.
 
 Requirements:
-- CARTESIA_API_KEY
 - DEEPGRAM_API_KEY
 - OPENAI_API_KEY
 
@@ -39,11 +38,13 @@ from pipecat.processors.aggregators.llm_response_universal import (
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
-from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.services.deepgram.stt import DeepgramSTTService
+from pipecat.services.deepgram.tts import DeepgramTTSService
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.observers.turn_tracking_observer import TurnTrackingObserver
 from pipecat.transports.base_transport import BaseTransport, TransportParams
+
+from openai import AsyncOpenAI
 
 from pipecat_flows import (
     FlowArgs,
@@ -106,6 +107,43 @@ MENU = {
     "veggie": 11.99,
     "bbq chicken": 13.99,
 }
+
+TOPPINGS = {
+    "mushrooms": 1.50,
+    "extra cheese": 1.50,
+    "jalapeños": 1.25,
+    "peppers": 1.00,
+    "olives": 1.00,
+    "onions": 0.75,
+}
+
+# Zip codes we deliver to, mapped to zone label (used for ETA estimation)
+DELIVERY_ZONES: dict[str, str] = {
+    "10001": "zone-a",  # Manhattan core — 20 min
+    "10002": "zone-a",
+    "10003": "zone-a",
+    "10011": "zone-b",  # West Village / Chelsea — 30 min
+    "10014": "zone-b",
+    "10036": "zone-b",
+    "10019": "zone-b",
+    "11201": "zone-c",  # Brooklyn — 45 min
+    "11211": "zone-c",
+    "11222": "zone-c",
+}
+
+ZONE_ETA: dict[str, str] = {
+    "zone-a": "approximately 20 minutes",
+    "zone-b": "approximately 30 minutes",
+    "zone-c": "approximately 45 minutes",
+}
+
+# Time slots available for pre-scheduled orders (every 30 min, next 4 hours)
+AVAILABLE_SLOTS = [
+    "12:00", "12:30", "13:00", "13:30", "14:00",
+    "14:30", "15:00", "15:30", "16:00", "16:30",
+    "17:00", "17:30", "18:00", "18:30", "19:00",
+    "19:30", "20:00", "20:30", "21:00", "21:30",
+]
 
 
 def log_node(node: dict, label: str) -> None:
@@ -193,7 +231,296 @@ async def handle_choose_size(args: FlowArgs, flow_manager: FlowManager) -> tuple
     logger.info(f"[ORDER] Size chosen: {size} | total=${total:.2f}")
     flow_manager.state["size"] = size
     flow_manager.state["total"] = total
-    return {"size": size, "total": total}, create_confirm_node()
+    flow_manager.state["toppings"] = []
+    return {"size": size, "total": total}, create_ai_pairing_node()
+
+
+# ---------------------------------------------------------------------------
+# AI drink pairing node — makes a real async OpenAI call to verify timing
+# ---------------------------------------------------------------------------
+
+
+def create_ai_pairing_node() -> NodeConfig:
+    suggest_func = FlowsFunctionSchema(
+        name="suggest_drink_pairing",
+        description="Fetch an AI-generated drink pairing suggestion for the chosen pizza.",
+        properties={},
+        required=[],
+        handler=handle_suggest_drink_pairing,
+    )
+    node = NodeConfig(
+        name="ai_pairing",
+        task_messages=[
+            {
+                "role": "system",
+                "content": (
+                    "Call `suggest_drink_pairing` immediately to fetch a personalized drink "
+                    "recommendation for the customer's pizza. Then share it conversationally "
+                    "before moving on to toppings."
+                ),
+            }
+        ],
+        functions=[suggest_func],
+    )
+    log_node(dict(node), "ai_pairing")
+    return node
+
+
+async def handle_suggest_drink_pairing(args: FlowArgs, flow_manager: FlowManager) -> tuple:
+    pizza = flow_manager.state.get("pizza", "pizza")
+    size = flow_manager.state.get("size", "")
+    client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    response = await client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {
+                "role": "user",
+                "content": (
+                    f"Suggest a drink that pairs well with a {size} {pizza} pizza. "
+                    "One short sentence only."
+                ),
+            }
+        ],
+        max_tokens=40,
+    )
+    suggestion = response.choices[0].message.content.strip()
+    logger.info(f"[AI PAIRING] {suggestion}")
+    flow_manager.state["drink_suggestion"] = suggestion
+    return {"drink_pairing": suggestion}, create_toppings_node()
+
+
+# ---------------------------------------------------------------------------
+# Toppings node — multiple function calls: add_topping (stays) + finish_toppings
+# ---------------------------------------------------------------------------
+
+
+def create_toppings_node() -> NodeConfig:
+    topping_list = ", ".join(f"{k} (+${v:.2f})" for k, v in TOPPINGS.items())
+
+    add_topping_func = FlowsFunctionSchema(
+        name="add_topping",
+        description="Add one extra topping to the pizza. Can be called multiple times.",
+        required=["topping"],
+        properties={"topping": {"type": "string", "enum": list(TOPPINGS.keys())}},
+        handler=handle_add_topping,
+    )
+    finish_toppings_func = FlowsFunctionSchema(
+        name="finish_toppings",
+        description="Customer is done selecting toppings (even if none were added). Proceed to delivery options.",
+        properties={},
+        required=[],
+        handler=handle_finish_toppings,
+    )
+
+    node = NodeConfig(
+        name="toppings",
+        task_messages=[
+            {
+                "role": "system",
+                "content": (
+                    f"Ask the customer if they'd like any extra toppings. Available toppings: {topping_list}. "
+                    "They can add multiple toppings by calling add_topping for each one. "
+                    "When they're done (or if they don't want any), call finish_toppings."
+                ),
+            }
+        ],
+        functions=[add_topping_func, finish_toppings_func],
+    )
+    log_node(dict(node), "toppings")
+    return node
+
+
+async def handle_add_topping(args: FlowArgs, flow_manager: FlowManager) -> tuple:
+    topping = args["topping"].lower()
+    price = TOPPINGS.get(topping, 0.0)
+    toppings = flow_manager.state.setdefault("toppings", [])
+    if topping not in toppings:
+        toppings.append(topping)
+        flow_manager.state["total"] = flow_manager.state.get("total", 0.0) + price
+    logger.info(f"[ORDER] Topping added: {topping} (+${price:.2f}) | toppings={toppings}")
+    # Return None as next node to stay on the same node
+    return {"topping": topping, "toppings": toppings, "new_total": flow_manager.state["total"]}, None
+
+
+async def handle_finish_toppings(args: FlowArgs, flow_manager: FlowManager) -> tuple:
+    toppings = flow_manager.state.get("toppings", [])
+    total = flow_manager.state.get("total", 0.0)
+    logger.info(f"[ORDER] Toppings finalised: {toppings} | total=${total:.2f}")
+    return {"toppings": toppings, "total": total}, create_delivery_node()
+
+
+# ---------------------------------------------------------------------------
+# Delivery / pickup branching node
+# ---------------------------------------------------------------------------
+
+
+def create_delivery_node() -> NodeConfig:
+    pickup_func = FlowsFunctionSchema(
+        name="choose_pickup",
+        description="Customer wants to pick up the order in-store.",
+        properties={},
+        required=[],
+        handler=handle_choose_pickup,
+    )
+    delivery_func = FlowsFunctionSchema(
+        name="choose_delivery",
+        description="Customer wants the order delivered to their address.",
+        properties={},
+        required=[],
+        handler=handle_choose_delivery,
+    )
+
+    node = NodeConfig(
+        name="delivery_or_pickup",
+        task_messages=[
+            {
+                "role": "system",
+                "content": (
+                    "Ask the customer whether they'd like to pick up their order in-store (free) "
+                    "or have it delivered (flat $3 delivery fee). "
+                    "Call choose_pickup or choose_delivery based on their answer."
+                ),
+            }
+        ],
+        functions=[pickup_func, delivery_func],
+    )
+    log_node(dict(node), "delivery_or_pickup")
+    return node
+
+
+async def handle_choose_pickup(args: FlowArgs, flow_manager: FlowManager) -> tuple:
+    logger.info("[ORDER] Fulfilment: pickup")
+    flow_manager.state["fulfilment"] = "pickup"
+    return {"fulfilment": "pickup"}, create_schedule_node()
+
+
+async def handle_choose_delivery(args: FlowArgs, flow_manager: FlowManager) -> tuple:
+    fee = 3.0
+    flow_manager.state["fulfilment"] = "delivery"
+    flow_manager.state["total"] = flow_manager.state.get("total", 0.0) + fee
+    logger.info(f"[ORDER] Fulfilment: delivery | +${fee:.2f} fee | total=${flow_manager.state['total']:.2f}")
+    return {"fulfilment": "delivery", "delivery_fee": fee}, create_address_node()
+
+
+# ---------------------------------------------------------------------------
+# Address collection node
+# ---------------------------------------------------------------------------
+
+
+def create_address_node(error: str | None = None) -> NodeConfig:
+    set_address_func = FlowsFunctionSchema(
+        name="set_delivery_address",
+        description="Record the customer's delivery address.",
+        required=["street", "city", "zip_code"],
+        properties={
+            "street": {"type": "string", "description": "Street name and number"},
+            "city": {"type": "string", "description": "City name"},
+            "zip_code": {"type": "string", "description": "Postal/ZIP code"},
+        },
+        handler=handle_set_address,
+    )
+
+    if error:
+        content = (
+            f"{error} Please ask the customer for a different delivery address "
+            "and collect the street, city, and zip code again."
+        )
+    else:
+        content = (
+            "Ask the customer for their delivery address. "
+            "Collect the street, city, and zip code, then call set_delivery_address."
+        )
+
+    node = NodeConfig(
+        name="address",
+        task_messages=[{"role": "system", "content": content}],
+        functions=[set_address_func],
+    )
+    log_node(dict(node), "address")
+    return node
+
+
+async def handle_set_address(args: FlowArgs, flow_manager: FlowManager) -> tuple:
+    street = args["street"]
+    city = args["city"]
+    zip_code = args["zip_code"].strip()
+    zone = DELIVERY_ZONES.get(zip_code)
+
+    if zone is None:
+        logger.warning(f"[ORDER] Zip {zip_code!r} outside delivery zone — staying on address node")
+        error_msg = (
+            f"Sorry, we don't deliver to zip code {zip_code}. "
+            f"We currently serve: {', '.join(sorted(DELIVERY_ZONES.keys()))}."
+        )
+        return {"error": "out_of_zone", "zip_code": zip_code}, create_address_node(error=error_msg)
+
+    address = {"street": street, "city": city, "zip_code": zip_code}
+    eta = ZONE_ETA[zone]
+    flow_manager.state["address"] = address
+    flow_manager.state["delivery_zone"] = zone
+    flow_manager.state["eta"] = eta
+    logger.info(f"[ORDER] Delivery address: {address} | zone={zone} | ETA={eta}")
+    return {"address": address, "zone": zone, "eta": eta}, create_schedule_node()
+
+
+# ---------------------------------------------------------------------------
+# Schedule node — ASAP or pick a time slot
+# ---------------------------------------------------------------------------
+
+
+def create_schedule_node() -> NodeConfig:
+    slots_str = ", ".join(AVAILABLE_SLOTS)
+
+    asap_func = FlowsFunctionSchema(
+        name="order_asap",
+        description="Customer wants the order as soon as possible.",
+        properties={},
+        required=[],
+        handler=handle_order_asap,
+    )
+    schedule_func = FlowsFunctionSchema(
+        name="schedule_order",
+        description="Customer wants to pre-schedule the order for a specific time slot.",
+        required=["time_slot"],
+        properties={
+            "time_slot": {
+                "type": "string",
+                "enum": AVAILABLE_SLOTS,
+                "description": "Time slot in HH:MM format (24-hour)",
+            }
+        },
+        handler=handle_schedule_order,
+    )
+
+    node = NodeConfig(
+        name="schedule",
+        task_messages=[
+            {
+                "role": "system",
+                "content": (
+                    "Ask the customer when they'd like their order: as soon as possible, "
+                    f"or scheduled for a specific time. Available slots today: {slots_str}. "
+                    "Call order_asap for ASAP, or schedule_order with the chosen time slot."
+                ),
+            }
+        ],
+        functions=[asap_func, schedule_func],
+    )
+    log_node(dict(node), "schedule")
+    return node
+
+
+async def handle_order_asap(args: FlowArgs, flow_manager: FlowManager) -> tuple:
+    logger.info("[ORDER] Timing: ASAP")
+    flow_manager.state["scheduled_time"] = "ASAP"
+    return {"scheduled_time": "ASAP"}, create_confirm_node()
+
+
+async def handle_schedule_order(args: FlowArgs, flow_manager: FlowManager) -> tuple:
+    slot = args["time_slot"]
+    logger.info(f"[ORDER] Timing: scheduled for {slot}")
+    flow_manager.state["scheduled_time"] = slot
+    return {"scheduled_time": slot}, create_confirm_node()
 
 
 def create_confirm_node() -> NodeConfig:
@@ -211,8 +538,9 @@ def create_confirm_node() -> NodeConfig:
             {
                 "role": "system",
                 "content": (
-                    "Read back the order summary to the customer and ask them to confirm. "
-                    "Include the pizza name, size, and total price from what was just ordered."
+                    "Read back the full order summary to the customer and ask them to confirm. "
+                    "Include: pizza name, size, any extra toppings, fulfilment method (pickup or delivery address), "
+                    "scheduled time (or ASAP), and the total price. Then ask for confirmation."
                 ),
             }
         ],
@@ -256,9 +584,8 @@ def create_farewell_node(confirmed: bool = True) -> NodeConfig:
 
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     stt = DeepgramSTTService(api_key=os.getenv("DEEPGRAM_API_KEY"))
-    tts = CartesiaTTSService(
-        api_key=os.getenv("CARTESIA_API_KEY"),
-        voice_id="32b3f3c5-7171-46aa-abe7-b598964aa793",
+    tts = DeepgramTTSService(
+        api_key=os.getenv("DEEPGRAM_API_KEY"),
     )
     llm = OpenAILLMService(api_key=os.getenv("OPENAI_API_KEY"))
 
@@ -281,7 +608,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         base_url=os.getenv("TUNER_BASE_URL", "http://localhost:8000"),
         asr_model=os.getenv("TUNER_ASR_MODEL", "deepgram/nova-3"),
         llm_model=os.getenv("TUNER_LLM_MODEL", "gpt-4o-mini"),
-        tts_model=os.getenv("TUNER_TTS_MODEL", "cartesia/sonic"),
+        tts_model=os.getenv("TUNER_TTS_MODEL", "deepgram/aura-2"),
         debug=True,
     )
     observer.attach_turn_tracking_observer(turn_tracker)

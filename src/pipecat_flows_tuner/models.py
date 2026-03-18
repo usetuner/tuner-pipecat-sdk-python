@@ -28,13 +28,15 @@ class NodeTransitionRecord(BaseModel):
 class LatencyTurn(BaseModel):
     turn_index: int
     node: str | None = None
+    bot_node: str | None = None
     ttfb_ms: int | None = None
     llm_ms: int | None = None
     tts_ms: int | None = None
-    bot_started_ms: int
-    user_stopped_ms: int
-    user_started_ms: int
+    bot_started_ms: int = 0
+    user_stopped_ms: int = 0
+    user_started_ms: int = 0
     bot_stopped_ms: int | None = None
+    was_interrupted: bool | None = None
 
 
 class TranscriptWord(BaseModel):
@@ -86,7 +88,7 @@ class TranscriptSegment(BaseModel):
     role: str
     text: str
     start_ms: int
-    end_ms: int
+    end_ms: int | None = None
     metadata: dict[str, Any]
     words: list[TranscriptWord] | None = None
     duration_ms: int | None = None

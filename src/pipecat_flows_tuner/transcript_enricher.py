@@ -28,32 +28,31 @@ def parse_json_value(value: Any) -> Any:
 
 
 def index_transitions_by_function(acc: FlowsAccumulator) -> dict[str, Any]:
-    return {
-        transition.trigger_function: transition
-        for transition in acc.node_transitions
-        if transition.trigger_function
-    }
+    transitions: dict[str, list[Any]] = {}
+    for transition in acc.node_transitions:
+        if not transition.trigger_function:
+            continue
+        transitions.setdefault(transition.trigger_function, []).append(transition)
+    return transitions
 
 
 def calculate_user_interruptions(acc: FlowsAccumulator) -> dict[int, bool]:
+    """User turn idx is an interruption if the previous turn was_interrupted by the user."""
     interrupted: dict[int, bool] = {}
-    for idx, latency_turn in enumerate(acc.latency_turns):
+    for idx in range(len(acc.latency_turns)):
         if idx == 0:
             interrupted[idx] = False
-            continue
-        prev_bot_stopped = acc.latency_turns[idx - 1].bot_stopped_ms or 0
-        interrupted[idx] = bool(latency_turn.user_started_ms < prev_bot_stopped)
+        else:
+            prev_turn = acc.latency_turns[idx - 1]
+            interrupted[idx] = bool(prev_turn.was_interrupted)
     return interrupted
 
 
 def calculate_agent_interruptions(acc: FlowsAccumulator) -> dict[int, bool]:
+    """Agent turn idx was interrupted if TurnTrackingObserver reported was_interrupted=True."""
     interrupted: dict[int, bool] = {}
-    for idx, latency_turn in enumerate(acc.latency_turns):
-        if idx + 1 < len(acc.latency_turns):
-            next_user_started = acc.latency_turns[idx + 1].user_started_ms
-            interrupted[idx] = bool(next_user_started < (latency_turn.bot_stopped_ms or 0))
-        else:
-            interrupted[idx] = False
+    for idx, turn in enumerate(acc.latency_turns):
+        interrupted[idx] = bool(turn.was_interrupted)
     return interrupted
 
 
@@ -106,27 +105,25 @@ def build_user_segment(
 
 
 def build_agent_function_segment(
-    message: dict[str, Any], transitions_by_function: dict[str, Any]
+    tool_call: dict[str, Any],
+    transition: Any | None,
+    invocation_ms: int,
 ) -> TranscriptSegment:
-    tool_call = message["tool_calls"][0]
     function_name = tool_call["function"]["name"]
     raw_args = tool_call["function"].get("arguments", "{}")
     parsed_args = parse_json_value(raw_args) or {}
-    transition = transitions_by_function.get(function_name)
     argument_items = parsed_args.items() if isinstance(parsed_args, dict) else []
     arg_str = ", ".join(f"{key}={value}" for key, value in argument_items)
-    invocation_ms = (
-        (transition.trigger_timestamp_ms or transition.timestamp_ms) if transition else 0
-    )
     return TranscriptSegment(
         role="agent_function",
         text=f"{function_name}({arg_str})",
         start_ms=invocation_ms,
-        end_ms=invocation_ms,
+        end_ms=None,
         tool=ToolInfo(
             name=function_name,
             request_id=tool_call.get("id"),
             params=parsed_args if isinstance(parsed_args, dict) else {},
+            start_ms=invocation_ms,
         ),
         metadata=build_segment_metadata(node=transition.from_node if transition else None),
     )
@@ -148,15 +145,18 @@ def find_matching_tool_call(
 
 
 def build_agent_result_segments(
+    acc: FlowsAccumulator,
     message: dict[str, Any],
     messages: list[dict[str, Any]],
-    transitions_by_function: dict[str, Any],
+    transition: Any | None,
+    invocation_ms: int,
 ) -> list[TranscriptSegment]:
     tool_call_id = message.get("tool_call_id", "")
     matched_tool_call = find_matching_tool_call(messages, tool_call_id)
     function_name = matched_tool_call["function"]["name"] if matched_tool_call else None
-    transition = transitions_by_function.get(function_name) if function_name else None
     parsed_result = parse_json_value(message.get("content"))
+    completion_ms = acc.get_tool_completion_ms(tool_call_id) if tool_call_id else None
+    result_ms = completion_ms if completion_ms is not None else 0
 
     result_segments = [
         TranscriptSegment(
@@ -166,8 +166,8 @@ def build_agent_result_segments(
                 if parsed_result is not None
                 else message.get("content", "")
             ),
-            start_ms=transition.timestamp_ms if transition else 0,
-            end_ms=transition.timestamp_ms if transition else 0,
+            start_ms=result_ms,
+            end_ms=None,
             tool=ToolInfo(
                 name=function_name,
                 request_id=tool_call_id or None,
@@ -176,6 +176,7 @@ def build_agent_result_segments(
                     if isinstance(parsed_result, dict)
                     else {"value": parsed_result}
                 ),
+                start_ms=result_ms,
             ),
             metadata=build_segment_metadata(
                 node=transition.from_node if transition else None,
@@ -215,15 +216,12 @@ def build_agent_text_segment(
 ) -> TranscriptSegment:
     end_to_end_latency = ((turn.bot_started_ms - turn.user_stopped_ms) or None) if turn else None
     text = " ".join(m.get("content", "") for m in messages).strip()
+    node = (turn.bot_node or turn.node) if turn else None
     return TranscriptSegment(
         role="agent",
         text=text,
         start_ms=turn.bot_started_ms if turn else 0,
-        end_ms=(
-            turn.bot_stopped_ms
-            if turn and turn.bot_stopped_ms is not None
-            else acc._rel_ms(acc.call_end_abs_ns)
-        ),
+        end_ms=turn.bot_stopped_ms if turn and turn.bot_stopped_ms is not None else 0,
         metadata=build_segment_metadata(
             e2e_latency=(
                 end_to_end_latency
@@ -233,10 +231,45 @@ def build_agent_text_segment(
             interrupted=agent_interrupted.get(assistant_index, False),
             llm_node_ttft=turn.llm_ms if turn else None,
             tts_node_ttfb=turn.ttfb_ms if turn else None,
-            node=turn.node if turn else None,
+            node=node,
             turn_index=turn.turn_index if turn else None,
         ),
     )
+
+
+def find_spoken_assistant_message_indices(messages: list[dict[str, Any]]) -> set[int]:
+    """Return the set of context message indices that are 'spoken' (final) assistant text.
+
+    The last plain assistant text before each user message (or end of context) is the one
+    that was actually spoken. All earlier ones in the same window are ghost messages
+    (generated but not spoken due to immediate tool-call-triggered node transitions).
+    """
+    last_per_window: dict[int, int] = {}
+    trailing_assistant_indices: set[int] = set()
+
+    # Treat the final contiguous plain-assistant block at end-of-context as spoken.
+    i = len(messages) - 1
+    while i >= 0:
+        role = messages[i].get("role", "")
+        if role == "system":
+            i -= 1
+            continue
+        if role == "assistant" and "tool_calls" not in messages[i]:
+            trailing_assistant_indices.add(i)
+            i -= 1
+            continue
+        break
+
+    user_idx = -1
+    for i, msg in enumerate(messages):
+        role = msg.get("role", "")
+        if role == "system":
+            continue
+        if role == "user":
+            user_idx += 1
+        elif role == "assistant" and "tool_calls" not in msg:
+            last_per_window[user_idx] = i  # overwrite → keeps the last one
+    return set(last_per_window.values()) | trailing_assistant_indices
 
 
 def build_initial_transition_segment(acc: FlowsAccumulator) -> TranscriptSegment | None:
@@ -271,6 +304,9 @@ def enrich_transcript(
     message_idx = 0
     user_idx = 0
     assistant_idx = 0
+    latency_turn_idx = 0
+    spoken_indices = find_spoken_assistant_message_indices(messages)
+    tool_call_transition_by_id: dict[str, Any] = {}
 
     while message_idx < len(messages):
         message = messages[message_idx]
@@ -290,13 +326,38 @@ def enrich_transcript(
             continue
 
         if role == "assistant" and "tool_calls" in message:
-            result.append(build_agent_function_segment(message, transitions_by_function))
+            for tool_call in message.get("tool_calls", []):
+                function_name = tool_call.get("function", {}).get("name", "")
+                transition_queue = transitions_by_function.get(function_name, [])
+                transition = transition_queue.pop(0) if transition_queue else None
+                tool_call_id = tool_call.get("id")
+                invocation_ms = (
+                    acc.get_tool_invocation_ms(tool_call_id) or 0 if tool_call_id else 0
+                )
+                if tool_call_id:
+                    tool_call_transition_by_id[tool_call_id] = transition
+                result.append(
+                    build_agent_function_segment(
+                        tool_call=tool_call,
+                        transition=transition,
+                        invocation_ms=invocation_ms,
+                    )
+                )
             message_idx += 1
             continue
 
         if role == "tool":
+            tool_call_id = message.get("tool_call_id", "")
+            transition = tool_call_transition_by_id.get(tool_call_id)
+            invocation_ms = acc.get_tool_invocation_ms(tool_call_id) or 0 if tool_call_id else 0
             result.extend(
-                build_agent_result_segments(message, messages, transitions_by_function)
+                build_agent_result_segments(
+                    acc=acc,
+                    message=message,
+                    messages=messages,
+                    transition=transition,
+                    invocation_ms=invocation_ms,
+                )
             )
             message_idx += 1
             continue
@@ -305,15 +366,22 @@ def enrich_transcript(
             grouped_messages, message_idx = collect_consecutive_assistant_messages(
                 messages, message_idx
             )
-            assistant_turn = (
-                acc.latency_turns[assistant_idx] if assistant_idx < len(acc.latency_turns) else None
-            )
+            final_msg_idx = message_idx - 1  # last message in the consecutive group
+            if final_msg_idx in spoken_indices and latency_turn_idx < len(acc.latency_turns):
+                assistant_turn = (
+                    acc.latency_turns[latency_turn_idx]
+                    if latency_turn_idx < len(acc.latency_turns)
+                    else None
+                )
+                latency_turn_idx += 1
+            else:
+                assistant_turn = None  # ghost — not actually spoken
             result.append(
                 build_agent_text_segment(
                     acc=acc,
                     messages=grouped_messages,
                     turn=assistant_turn,
-                    assistant_index=assistant_idx,
+                    assistant_index=latency_turn_idx - 1 if assistant_turn else -1,
                     agent_interrupted=agent_interrupted,
                 )
             )

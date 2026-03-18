@@ -16,13 +16,20 @@ def attach_flow_manager_patch(
     accumulator: FlowsAccumulator,
     config: TunerConfig,
 ) -> None:
-    original_set_node = flow_manager._set_node
+    # NOTE: This bridge depends on private pipecat-flows internals. Keep this
+    # dependency isolated here so future FlowManager API updates are contained.
+    original_set_node = getattr(flow_manager, "_set_node", None)
+    if not callable(original_set_node):
+        logger.warning("[flows-tuner] FlowManager has no callable _set_node; skipping patch")
+        return
+    if getattr(flow_manager, "_flows_tuner_patch_applied", False):
+        return
 
     async def patched_set_node(node_id: str, node_config: dict[str, object]) -> None:
-        from_node = flow_manager._current_node
+        from_node = getattr(flow_manager, "_current_node", None)
         pending = accumulator.get_pending_transition()
         await original_set_node(node_id, node_config)
-        state = dict(flow_manager.state)
+        state = dict(getattr(flow_manager, "state", {}))
         accumulator.on_node_entered(
             from_node=from_node,
             to_node=node_id,
@@ -40,4 +47,5 @@ def attach_flow_manager_patch(
             )
 
     flow_manager._set_node = patched_set_node
+    flow_manager._flows_tuner_patch_applied = True
     logger.info("[flows-tuner] attached to FlowManager (patched _set_node)")

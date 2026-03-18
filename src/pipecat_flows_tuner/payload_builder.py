@@ -12,12 +12,24 @@ if TYPE_CHECKING:
     from .config import TunerConfig
 
 
+def _ensure_monotonic_bounds(segments: list[Any]) -> list[Any]:
+    for segment in segments:
+        end_ms = getattr(segment, "end_ms", None)
+        if end_ms is not None and end_ms < getattr(segment, "start_ms", 0):
+            segment.end_ms = segment.start_ms
+    return segments
+
+
+def _sort_by_start_ms(segments: list[Any]) -> list[Any]:
+    return sorted(segments, key=lambda segment: getattr(segment, "start_ms", 0))
+
+
 def build_payload(
     acc: FlowsAccumulator,
     config: TunerConfig,
     transcript: list[dict[str, Any]],
 ) -> CallPayload:
-    enriched = enrich_transcript(acc, transcript)
+    enriched = _sort_by_start_ms(_ensure_monotonic_bounds(enrich_transcript(acc, transcript)))
     start_ts = acc.call_start_abs_ns // 1_000_000_000
     end_ts = acc.call_end_abs_ns // 1_000_000_000
 
@@ -38,8 +50,8 @@ def build_payload(
             ),
             usage_token=UsageToken(
                 asr_duration=max(0, end_ts - start_ts),
-                llm_token=acc._pipecat_llm_total_tokens or None,
-                tts_character_count=acc._pipecat_tts_chars or None,
+                llm_token=acc.get_total_llm_tokens() or None,
+                tts_character_count=acc.get_total_tts_characters() or None,
             ),
         ),
     )
