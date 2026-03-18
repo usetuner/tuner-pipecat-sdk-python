@@ -178,10 +178,7 @@ def build_agent_result_segments(
                 ),
                 start_ms=result_ms,
             ),
-            metadata=build_segment_metadata(
-                node=transition.from_node if transition else None,
-                triggered_transition_to=transition.to_node if transition else None,
-            ),
+            metadata=build_segment_metadata(),
         )
     ]
 
@@ -197,11 +194,7 @@ def build_agent_result_segments(
                     to=transition.to_node,
                     reason=function_name,
                 ),
-                metadata=build_segment_metadata(
-                    trigger_args=transition.trigger_args,
-                    state_snapshot=transition.state_snapshot,
-                    functions_available=transition.functions_available,
-                ),
+                metadata=build_segment_metadata(),
             )
         )
     return result_segments
@@ -286,10 +279,7 @@ def build_initial_transition_segment(acc: FlowsAccumulator) -> TranscriptSegment
         start_ms=initial_transition.timestamp_ms,
         end_ms=initial_transition.timestamp_ms,
         node=NodeInfo(from_node="", to=initial_transition.to_node, reason=""),
-        metadata=build_segment_metadata(
-            state_snapshot=initial_transition.state_snapshot,
-            functions_available=initial_transition.functions_available,
-        ),
+        metadata=build_segment_metadata(),
     )
 
 
@@ -367,7 +357,12 @@ def enrich_transcript(
                 messages, message_idx
             )
             final_msg_idx = message_idx - 1  # last message in the consecutive group
-            if final_msg_idx in spoken_indices and latency_turn_idx < len(acc.latency_turns):
+            is_preamble = user_idx == 0
+            if (
+                final_msg_idx in spoken_indices
+                and latency_turn_idx < len(acc.latency_turns)
+                and not is_preamble
+            ):
                 assistant_turn = (
                     acc.latency_turns[latency_turn_idx]
                     if latency_turn_idx < len(acc.latency_turns)

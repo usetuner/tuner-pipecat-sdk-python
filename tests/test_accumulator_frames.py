@@ -84,9 +84,7 @@ def test_on_node_entered_appends_transition_and_clears_pending():
     acc.on_node_entered(
         from_node="greeting",
         to_node="transfer",
-        node_config={"functions": [{"name": "hangup"}], "task_messages": []},
         trigger=acc._pending_transition,
-        state_snapshot={"x": 1},
         timestamp_ns=1 + 200 * 1_000_000,
     )
     assert len(acc.node_transitions) == 1
@@ -95,32 +93,24 @@ def test_on_node_entered_appends_transition_and_clears_pending():
     assert record.to_node == "transfer"
     assert record.trigger_function == "transfer"
     assert record.trigger_args == {"to": "sales"}
-    assert record.state_snapshot == {"x": 1}
-    assert record.functions_available == ["hangup"]
     assert record.timestamp_ms == 200
-    assert acc._current_node == "transfer"
-    assert acc._pending_transition is None
+    assert acc.node_transitions[-1].to_node == "transfer"
+    assert acc.get_pending_transition() is None
 
 
-def test_on_node_entered_extracts_function_names_from_objects():
+def test_on_node_entered_without_trigger_records_minimal_transition():
     acc = FlowsAccumulator()
-
-    class FunctionObject:
-        def __init__(self, name: str) -> None:
-            self.name = name
 
     acc.on_node_entered(
         from_node=None,
         to_node="start",
-        node_config={
-            "functions": [FunctionObject("a"), {"name": "b"}],
-            "task_messages": [],
-        },
         trigger=None,
-        state_snapshot={},
         timestamp_ns=0,
     )
-    assert acc.node_transitions[0].functions_available == ["a", "b"]
+    record = acc.node_transitions[0]
+    assert record.from_node is None
+    assert record.to_node == "start"
+    assert record.trigger_function is None
 
 
 def test_usage_counter_accessors():
@@ -144,25 +134,6 @@ def test_on_turn_started_creates_latency_turn():
     assert turn.user_started_ms == 400
     assert acc._active_turn_number == 1
 
-
-def test_on_turn_started_backfills_initial_transition_timestamp_when_zero():
-    acc = FlowsAccumulator()
-    base_ns = 1_000_000_000
-    acc.call_start_abs_ns = base_ns
-    acc.node_transitions.append(
-        NodeTransitionRecord(
-            from_node=None,
-            to_node="greeting",
-            trigger_function=None,
-            trigger_args=None,
-            state_snapshot={},
-            task_messages=[],
-            functions_available=[],
-            timestamp_ms=0,
-        )
-    )
-    acc.on_turn_started(1, base_ns + 350_000_000)
-    assert acc.node_transitions[0].timestamp_ms == 350
 
 
 def test_on_bot_started_speaking_sets_turn_bot_node():
@@ -264,6 +235,52 @@ def test_on_latency_breakdown_skips_when_no_active_turn(caplog):
     with caplog.at_level(logging.WARNING):
         acc.on_latency_breakdown(breakdown)
     assert not acc.latency_turns
+
+
+def test_on_latency_breakdown_skips_overwrite_for_initial_proactive_greeting():
+    """Initial proactive greeting fires breakdown with user_turn_start_time ≈ call_start.
+
+    computed_started_ms will be 0 (or very close), which must NOT overwrite the
+    user timing captured by on_turn_started, and must NOT corrupt bot_started_ms
+    by using the initial greeting latency.  The latency IS consumed from the queue
+    so the subsequent real-turn breakdown gets the correct value.
+    """
+    base_ns = 1_000_000_000  # 1.0s unix time
+    acc = FlowsAccumulator()
+    acc.call_start_abs_ns = base_ns
+    acc._current_node = "greeting"
+
+    # on_latency_measured fires for the initial proactive greeting (1132ms latency)
+    acc.on_latency_measured(1.132)
+
+    # User says "Hi." at +1200ms — on_turn_started creates latency_turn[0]
+    acc.on_turn_started(0, base_ns + 1_200_000_000)
+    assert acc.latency_turns[0].user_started_ms == 1200
+
+    # Bot says "Hi there!" starts at +2400ms (after the greeting was interrupted)
+    acc.on_bot_started_speaking(base_ns + 2_400_000_000)
+    assert acc.latency_turns[0].bot_started_ms == 2400
+
+    # Breakdown fires for the initial proactive greeting while user "Hi." is active.
+    # user_turn_start_time ≈ call_start → computed_started_ms = 0 → skip overwrite.
+    acc.on_latency_breakdown(
+        SimpleNamespace(
+            user_turn_start_time=1.0,   # ≈ call start → computed_started_ms = 0
+            user_turn_secs=0.0,
+            ttfb=[SimpleNamespace(duration_secs=0.769)],
+            function_calls=[],
+        )
+    )
+
+    turn = acc.latency_turns[0]
+    # user timing must NOT be overwritten (stays from on_turn_started)
+    assert turn.user_started_ms == 1200
+    # bot_started must NOT be overwritten by the initial greeting latency
+    assert turn.bot_started_ms == 2400
+    # ttfb from the initial greeting breakdown IS captured (useful for "Welcome" segment)
+    assert turn.ttfb_ms == 769
+    # latency was consumed from the queue — verify it's empty now
+    assert len(acc._pending_latency_ms_queue) == 0
 
 
 def test_on_call_end_marks_done_without_creating_turns():

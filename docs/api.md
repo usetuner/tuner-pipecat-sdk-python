@@ -45,6 +45,3 @@ Public payload and transcript models are available via:
 - `pipecat_flows_tuner.models.TranscriptSegment`
 - `pipecat_flows_tuner.models.ToolInfo`
 - `pipecat_flows_tuner.models.NodeInfo`
-
-Internal transition/timing models are also exported from `pipecat_flows_tuner.models`
-for backwards compatibility.

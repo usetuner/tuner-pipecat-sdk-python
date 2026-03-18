@@ -18,9 +18,6 @@ def test_enrich_transcript_tool_call_and_result_and_node_transition(tuner_config
             to_node="transfer",
             trigger_function="transfer",
             trigger_args={"to": "sales"},
-            state_snapshot={},
-            task_messages=[],
-            functions_available=[],
             timestamp_ms=100,
             trigger_timestamp_ms=60,
         )
@@ -68,6 +65,15 @@ def test_enrich_transcript_tool_call_and_result_and_node_transition(tuner_config
     assert "agent_function" in roles
     assert "agent_result" in roles
     assert "node_transition" in roles
+    transition_segments = [
+        segment
+        for segment in payload.transcript_with_tool_calls
+        if segment.role == "node_transition"
+    ]
+    assert transition_segments
+    assert "state_snapshot" not in transition_segments[0].metadata
+    assert "functions_available" not in transition_segments[0].metadata
+    assert "task_messages" not in transition_segments[0].metadata
     user_segments = [
         segment for segment in payload.transcript_with_tool_calls if segment.role == "user"
     ]
@@ -130,9 +136,6 @@ def test_enrich_transcript_initial_node_transition(tuner_config):
             to_node="start",
             trigger_function=None,
             trigger_args=None,
-            state_snapshot={"x": 1},
-            task_messages=[],
-            functions_available=["next"],
             timestamp_ms=0,
         )
     ]
@@ -158,6 +161,8 @@ def test_enrich_transcript_initial_node_transition(tuner_config):
     assert first.role == "node_transition"
     assert first.node is not None
     assert first.node.to == "start"
+    assert "state_snapshot" not in first.metadata
+    assert "functions_available" not in first.metadata
 
 
 def test_enrich_transcript_uses_assistant_turn_events_to_skip_ghost_messages(tuner_config):
@@ -337,8 +342,14 @@ def test_parallel_same_name_tools_use_distinct_invocation_ms_by_id(tuner_config)
         {
             "role": "assistant",
             "tool_calls": [
-                {"id": "tc-a", "function": {"name": "add_topping", "arguments": '{"topping": "mushrooms"}'}},
-                {"id": "tc-b", "function": {"name": "add_topping", "arguments": '{"topping": "olives"}'}},
+                {
+                    "id": "tc-a",
+                    "function": {"name": "add_topping", "arguments": '{"topping": "mushrooms"}'},
+                },
+                {
+                    "id": "tc-b",
+                    "function": {"name": "add_topping", "arguments": '{"topping": "olives"}'},
+                },
             ],
         },
         {"role": "tool", "tool_call_id": "tc-a", "content": '{"ok": true}'},
@@ -367,9 +378,6 @@ def test_agent_result_does_not_fallback_to_transition_timestamp(tuner_config):
             to_node="next",
             trigger_function="transfer",
             trigger_args={},
-            state_snapshot={},
-            task_messages=[],
-            functions_available=[],
             timestamp_ms=200,
             trigger_timestamp_ms=75,
         )

@@ -18,9 +18,6 @@ class NodeTransitionRecord(BaseModel):
     to_node: str
     trigger_function: str | None = None
     trigger_args: Any | None = None
-    state_snapshot: dict[str, Any]
-    task_messages: list[dict[str, Any]]
-    functions_available: list[str]
     timestamp_ms: int
     trigger_timestamp_ms: int | None = None  # when the function call was initiated
 

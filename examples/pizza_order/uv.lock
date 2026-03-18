@@ -2045,8 +2045,6 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "loguru", specifier = "~=0.7.2" },
     { name = "mypy", marker = "extra == 'type'", specifier = ">=1.10" },
-    { name = "opentelemetry-api", marker = "extra == 'otel'", specifier = ">=1.20" },
-    { name = "opentelemetry-sdk", marker = "extra == 'otel'", specifier = ">=1.20" },
     { name = "pipecat-ai", specifier = ">=0.0.105" },
     { name = "pipecat-flows-tuner", extras = ["test", "lint", "type"], marker = "extra == 'dev'" },
     { name = "pydantic", specifier = ">=2.0" },
@@ -2055,7 +2053,7 @@ requires-dist = [
     { name = "pytest-cov", marker = "extra == 'test'", specifier = ">=5.0" },
     { name = "ruff", marker = "extra == 'lint'", specifier = ">=0.6" },
 ]
-provides-extras = ["otel", "test", "lint", "type", "dev"]
+provides-extras = ["test", "lint", "type", "dev"]
 
 [package.metadata.requires-dev]
 dev = [

@@ -11,13 +11,14 @@ from .accumulator import FlowsAccumulator
 from .config import TunerConfig
 
 
+# TODO this is a temp sol (limitaiton), till i find another way to have access to the node transitions :)
 def attach_flow_manager_patch(
     flow_manager: Any,
     accumulator: FlowsAccumulator,
     config: TunerConfig,
 ) -> None:
-    # NOTE: This bridge depends on private pipecat-flows internals. Keep this
-    # dependency isolated here so future FlowManager API updates are contained.
+    # NOTE: This bridge depends on private pipecat-flows internals will be removed in the future 
+    # once we find another way to have access to the node transitions.
     original_set_node = getattr(flow_manager, "_set_node", None)
     if not callable(original_set_node):
         logger.warning("[flows-tuner] FlowManager has no callable _set_node; skipping patch")
@@ -29,14 +30,11 @@ def attach_flow_manager_patch(
         from_node = getattr(flow_manager, "_current_node", None)
         pending = accumulator.get_pending_transition()
         await original_set_node(node_id, node_config)
-        state = dict(getattr(flow_manager, "state", {}))
         accumulator.on_node_entered(
             from_node=from_node,
             to_node=node_id,
-            node_config=node_config,
             trigger=pending,
-            state_snapshot=state,
-            timestamp_ns=time.time_ns(),
+                timestamp_ns=time.time_ns(),
         )
         if config.debug:
             logger.debug(

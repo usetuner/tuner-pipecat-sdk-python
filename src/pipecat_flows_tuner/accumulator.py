@@ -65,17 +65,6 @@ class FlowsAccumulator:
         call_start_s = self.call_start_abs_ns / 1_000_000_000
         return max(0, int((abs_unix_s - call_start_s) * 1000))
 
-    def _backfill_initial_transition_timestamp(self, timestamp_ns: int) -> None:
-        if self.call_start_abs_ns == 0:
-            return
-        rel_ms = self._rel_ms(timestamp_ns)
-        if rel_ms <= 0:
-            return
-        for transition in self.node_transitions:
-            if transition.trigger_function is None and transition.timestamp_ms == 0:
-                transition.timestamp_ms = rel_ms
-                return
-
     def get_tool_invocation_ms(self, tool_call_id: str) -> int | None:
         abs_ns = self.registry.get_invocation_ns(tool_call_id)
         return self._rel_ms(abs_ns) if abs_ns else None
@@ -97,29 +86,14 @@ class FlowsAccumulator:
         self,
         from_node: str | None,
         to_node: str,
-        node_config: dict[str, Any],
         trigger: PendingTransition | None,
-        state_snapshot: dict[str, Any],
         timestamp_ns: int,
     ) -> None:
-        functions_available: list[str] = []
-        for function_ref in node_config.get("functions", []):
-            if hasattr(function_ref, "name"):
-                name = function_ref.name
-            elif isinstance(function_ref, dict):
-                name = function_ref.get("name")
-            else:
-                name = str(function_ref)
-            if name:
-                functions_available.append(str(name))
         self.node_transitions.append(NodeTransitionRecord(
             from_node=from_node,
             to_node=to_node,
             trigger_function=trigger.function_name if trigger else None,
             trigger_args=trigger.arguments if trigger else None,
-            state_snapshot=state_snapshot,
-            task_messages=node_config.get("task_messages", []),
-            functions_available=functions_available,
             timestamp_ms=self._rel_ms(timestamp_ns),
             trigger_timestamp_ms=trigger.timestamp_ms if trigger else None,
         ))
@@ -137,8 +111,6 @@ class FlowsAccumulator:
         This handles users who pause briefly and speak again before the bot replies.
         The breakdown fires once per bot response, so one LatencyTurn must match it.
         """
-        self._backfill_initial_transition_timestamp(timestamp_ns)
-
         if self._open_latency_idx is not None and self._open_latency_idx < len(self.latency_turns):
             # Collapse consecutive user fragments before bot starts speaking.
             active_turn = self.latency_turns[self._open_latency_idx]
@@ -175,7 +147,6 @@ class FlowsAccumulator:
 
     def on_user_started_speaking(self, timestamp_ns: int) -> None:
         """Use frame timestamp as the authoritative user-start anchor for the active turn."""
-        self._backfill_initial_transition_timestamp(timestamp_ns)
         if self._active_turn_number is None:
             return
         idx = self._turn_to_latency_idx.get(self._active_turn_number)
@@ -195,7 +166,6 @@ class FlowsAccumulator:
         receives user_turn_start_time=None and cannot compute user_stopped_ms.
         on_latency_breakdown overrides this with its computed value when available.
         """
-        self._backfill_initial_transition_timestamp(timestamp_ns)
         if self._active_turn_number is None:
             return
         idx = self._turn_to_latency_idx.get(self._active_turn_number)
@@ -212,9 +182,8 @@ class FlowsAccumulator:
             return
         bot_stopped_ms = self._rel_ms(timestamp_ns)
         if self._bot_turn_idx is not None and self._bot_turn_idx < len(self.latency_turns):
-            # Use the turn index captured at on_latency_breakdown time.
-            # This is correct even for interrupted turns where on_turn_started(N+1)
-            # has already fired and appended a new entry to latency_turns.
+            # Keep bot stop anchored to the same turn chosen at breakdown time,
+            # even if a new user turn started meanwhile (interruption case).
             self.latency_turns[self._bot_turn_idx].bot_stopped_ms = bot_stopped_ms
             self._bot_turn_idx = None
         else:
@@ -226,7 +195,6 @@ class FlowsAccumulator:
         name = getattr(frame, "function_name", "") or "function"
         arguments = getattr(frame, "arguments", None)
         ms = self._rel_ms(timestamp_ns)
-        self._backfill_initial_transition_timestamp(timestamp_ns)
         tool_call_id = getattr(frame, "tool_call_id", None)
         if tool_call_id:
             self.registry.record_invocation_ns(tool_call_id, timestamp_ns)
@@ -237,7 +205,6 @@ class FlowsAccumulator:
         )
 
     def on_bot_started_speaking(self, timestamp_ns: int) -> None:
-        self._backfill_initial_transition_timestamp(timestamp_ns)
         if self._open_latency_idx is None or self._open_latency_idx >= len(self.latency_turns):
             return
         turn = self.latency_turns[self._open_latency_idx]
@@ -271,16 +238,27 @@ class FlowsAccumulator:
             if user_start_abs is not None and user_turn_secs is not None
             else None
         )
+        is_real_user_turn = True
         if user_start_abs is not None:
-            # Override with breakdown's authoritative timestamps.
-            # When user_turn_start_time is None (interrupted turns), the VAD-captured
-            # values from on_user_stopped_speaking / on_turn_started are preserved.
-            turn.user_started_ms = self._abs_to_rel_ms(user_start_abs)
-            turn.user_stopped_ms = self._abs_to_rel_ms(user_stop_abs)
+            computed_started_ms = self._abs_to_rel_ms(user_start_abs)
+            if computed_started_ms > 0:
+                # Prefer breakdown timestamps when available, but only when they represent
+                # a real user utterance (> 0ms from call start). For the initial proactive
+                # bot greeting the breakdown fires with user_turn_start_time ≈ call start,
+                # which would wrongly overwrite the user-turn timing captured by
+                # on_turn_started with 0.
+                turn.user_started_ms = computed_started_ms
+                turn.user_stopped_ms = self._abs_to_rel_ms(user_stop_abs)
+            else:
+                # user_turn_start_time ≈ call start → initial proactive greeting breakdown.
+                # Do not derive bot_started_ms from this latency; on_bot_started_speaking
+                # already captured the correct bot start from the BotStartedSpeakingFrame.
+                is_real_user_turn = False
 
         if self._pending_latency_ms_queue:
             latency_ms = self._pending_latency_ms_queue.popleft()
-            turn.bot_started_ms = turn.user_stopped_ms + latency_ms
+            if is_real_user_turn:
+                turn.bot_started_ms = turn.user_stopped_ms + latency_ms
 
         ttfb_ms: int | None = None
         for ttfb in getattr(breakdown, "ttfb", []) or []:
@@ -301,9 +279,7 @@ class FlowsAccumulator:
             else None
         )
 
-        # Remember which latency_turn index the bot is currently speaking for,
-        # so on_bot_stopped writes to the right turn even if a new user turn
-        # has already started (interrupted scenario).
+        # Preserve the bot-side turn mapping across interruptions.
         self._bot_turn_idx = idx
         if not turn.bot_node:
             turn.bot_node = self._current_node

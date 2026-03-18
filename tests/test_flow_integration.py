@@ -38,13 +38,11 @@ def test_full_call_flow_single_turn(config):
     acc.on_node_entered(
         from_node=None,
         to_node="greeting",
-        node_config={"functions": [], "task_messages": []},
         trigger=None,
-        state_snapshot={},
         timestamp_ns=base_ns,
     )
-    assert acc._current_node == "greeting"
     assert len(acc.node_transitions) == 1
+    assert acc.node_transitions[-1].to_node == "greeting"
 
     # TurnTrackingObserver fires on_turn_started when user begins speaking
     acc.on_turn_started(1, base_ns + 50_000_000)  # user started at +50ms
@@ -103,9 +101,7 @@ def test_full_call_flow_with_tool_and_node_transition(config):
     acc.on_node_entered(
         from_node=None,
         to_node="greeting",
-        node_config={"functions": [{"name": "transfer"}], "task_messages": []},
         trigger=None,
-        state_snapshot={},
         timestamp_ns=base_ns,
     )
 
@@ -121,12 +117,10 @@ def test_full_call_flow_with_tool_and_node_transition(config):
     acc.on_node_entered(
         from_node="greeting",
         to_node="transfer",
-        node_config={"functions": [{"name": "hangup"}], "task_messages": []},
         trigger=acc.get_pending_transition(),
-        state_snapshot={"transferred": True},
         timestamp_ns=base_ns + 120_000_000,
     )
-    assert acc._current_node == "transfer"
+    assert acc.node_transitions[-1].to_node == "transfer"
     assert acc.get_pending_transition() is None
     assert len(acc.node_transitions) == 2
     triggered_transition = next(t for t in acc.node_transitions if t.trigger_function)

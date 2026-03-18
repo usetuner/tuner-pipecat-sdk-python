@@ -29,9 +29,6 @@ def test_node_transition_record():
         to_node="transfer",
         trigger_function="transfer",
         trigger_args={"to": "sales"},
-        state_snapshot={"key": "value"},
-        task_messages=[],
-        functions_available=["transfer", "hangup"],
         timestamp_ms=200,
     )
     assert r.from_node == "greeting"
@@ -47,9 +44,6 @@ def test_node_transition_record_trigger_timestamp_ms():
         to_node="transfer",
         trigger_function="transfer",
         trigger_args={"to": "sales"},
-        state_snapshot={},
-        task_messages=[],
-        functions_available=[],
         timestamp_ms=150,
         trigger_timestamp_ms=80,
     )

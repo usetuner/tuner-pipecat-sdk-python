@@ -2,8 +2,8 @@
 
 ## Integration Contract
 
-`FlowsObserver` currently depends on `FlowManager` for transcript retrieval and transition capture.
-Turn timing is captured through `attach_turn_tracking_observer(...)`;
+`FlowsObserver` reads runtime events from your pipeline and emits one payload at call end.
+Turn timing is captured through `attach_turn_tracking_observer(...)`.
 
 ## Recommended Flow
 
@@ -20,8 +20,6 @@ Turn timing is captured through `attach_turn_tracking_observer(...)`;
 - Flow node transitions:
   - from/to node
   - triggering function and arguments
-  - state snapshot at transition time
-  - functions available in target node
 - Transcript segments:
   - user turns
   - agent turns

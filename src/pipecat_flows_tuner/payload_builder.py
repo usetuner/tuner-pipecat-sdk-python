@@ -20,16 +20,12 @@ def _ensure_monotonic_bounds(segments: list[Any]) -> list[Any]:
     return segments
 
 
-def _sort_by_start_ms(segments: list[Any]) -> list[Any]:
-    return sorted(segments, key=lambda segment: getattr(segment, "start_ms", 0))
-
-
 def build_payload(
     acc: FlowsAccumulator,
     config: TunerConfig,
     transcript: list[dict[str, Any]],
 ) -> CallPayload:
-    enriched = _sort_by_start_ms(_ensure_monotonic_bounds(enrich_transcript(acc, transcript)))
+    enriched = _ensure_monotonic_bounds(enrich_transcript(acc, transcript))
     start_ts = acc.call_start_abs_ns // 1_000_000_000
     end_ts = acc.call_end_abs_ns // 1_000_000_000
 

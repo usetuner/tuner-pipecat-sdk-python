@@ -132,7 +132,12 @@ def test_handle_metrics_frame_routes_to_accumulator(observer):
 
 def test_handle_function_call_result_frame_records_completion(observer):
     observer._acc.call_start_abs_ns = 1_000_000_000
-    frame = FunctionCallResultFrame(tool_call_id="tc-1", function_name="foo", arguments="{}", result="ok")
+    frame = FunctionCallResultFrame(
+        tool_call_id="tc-1",
+        function_name="foo",
+        arguments="{}",
+        result="ok",
+    )
     observer._handle(frame, 1_000_000_000 + 300_000_000)
     assert observer._acc.get_tool_completion_ms("tc-1") == 300
 

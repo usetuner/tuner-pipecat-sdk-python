@@ -4,12 +4,7 @@
 It captures flow transitions, latency signals, transcript segments, and usage metadata,
 then sends a structured `CallPayload` to the Tuner API when a call ends.
 
-## Why this SDK
 
-- Small integration surface: one `FlowsObserver` in the pipeline.
-- Flow-aware analytics: node transitions and state snapshots from `FlowManager`.
-- Exact metrics from Pipecat: TTFB, processing latency, LLM token counts, TTS character counts via `MetricsFrame`.
-- Typed payload models for downstream tooling.
 
 ## Requirements
 
@@ -62,7 +57,7 @@ observer = FlowsObserver(
     workspace_id=42,
     agent_id="my-agent",
     call_id=str(uuid.uuid4()),
-    base_url="https://app.tuner.ai",
+    base_url="https://app.usetuner.ai",
     asr_model="deepgram/nova-3",
     llm_model="gpt-4o-mini",
     tts_model="cartesia/sonic",
@@ -73,10 +68,6 @@ observer.attach_flow_manager(flow_manager)
 observer.attach_turn_tracking_observer(turn_tracker)
 ```
 
-### OpenTelemetry (optional)
-
-- **Not required** for the Tuner API payload. With `pip install 'pipecat-flows-tuner[otel]'`, the observer can emit optional spans around `FunctionCall*` frames if you configure an exporter.
-- Tool transcript timings use **`FlowManager._create_transition_func`** (`params.tool_call_id`), not FCIP frame order.
 
 Place the observer after TTS in your pipeline:
 
