@@ -284,7 +284,6 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         tts_model=os.getenv("TUNER_TTS_MODEL", "cartesia/sonic"),
         debug=True,
     )
-    observer.attach_context_aggregators(context_aggregator)
     observer.attach_turn_tracking_observer(turn_tracker)
 
     pipeline = Pipeline(

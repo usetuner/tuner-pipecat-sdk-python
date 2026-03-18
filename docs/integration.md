@@ -3,7 +3,7 @@
 ## Integration Contract
 
 `FlowsObserver` currently depends on `FlowManager` for transcript retrieval and transition capture.
-The SDK does not expose `attach_context_aggregator` at this time.
+Turn timing is captured through `attach_turn_tracking_observer(...)`;
 
 ## Recommended Flow
 

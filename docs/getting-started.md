@@ -45,7 +45,6 @@ observer = FlowsObserver(
 )
 
 observer.attach_flow_manager(flow_manager)
-observer.attach_context_aggregators(context_aggregator)
 ```
 
 Set `asr_model`, `llm_model`, and `tts_model` to populate

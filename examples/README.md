@@ -20,8 +20,8 @@ Every example is self-contained with its own `pyproject.toml`. Run `uv sync` ins
 
 All examples share the same requirements:
 
-- Python 3.10+
-- [`uv`](https://docs.astral.sh/uv/) package manager
+- Python 3.10+, [`uv`](https://docs.astral.sh/uv/)
+- For **installing the SDK with pip**, Python version issues, or local path deps, see the **repository root README** (not repeated here).
 - API keys: `CARTESIA_API_KEY`, `DEEPGRAM_API_KEY`, `OPENAI_API_KEY`
 - Optional: Tuner API credentials (`TUNER_API_KEY`, `TUNER_WORKSPACE_ID`, `TUNER_AGENT_ID`, `TUNER_BASE_URL`)
 
