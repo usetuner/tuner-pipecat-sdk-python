@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "pipecat-flows-tuner"
+name = "tuner-pipecat-sdk"
 version = "0.1.0"
 description = "Pipecat FrameProcessor that observes pipecat-flows calls and sends structured data to the Tuner API."
 readme = "README.md"
@@ -55,14 +55,14 @@ publish = [
     "twine>=5.0",
 ]
 dev = [
-    "pipecat-flows-tuner[test,lint,type,publish]",
+    "tuner-pipecat-sdk[test,lint,type,publish]",
 ]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
-addopts = "-ra --strict-markers --strict-config --cov=pipecat_flows_tuner --cov-report=term-missing"
+addopts = "-ra --strict-markers --strict-config --cov=tuner_pipecat_sdk --cov-report=term-missing"
 
 [tool.ruff]
 line-length = 100
@@ -76,7 +76,7 @@ select = ["E", "F", "I", "UP", "B", "SIM", "W"]
 
 [tool.mypy]
 python_version = "3.10"
-packages = ["pipecat_flows_tuner"]
+packages = ["tuner_pipecat_sdk"]
 warn_return_any = true
 warn_unused_configs = true
 warn_redundant_casts = true
@@ -90,11 +90,11 @@ module = ["pipecat.*"]
 ignore_missing_imports = true
 
 [tool.coverage.run]
-source = ["pipecat_flows_tuner"]
+source = ["tuner_pipecat_sdk"]
 branch = true
 omit = [
-    "src/pipecat_flows_tuner/observer.py",
-    "src/pipecat_flows_tuner/flow_manager_integration.py",
+    "src/tuner_pipecat_sdk/observer.py",
+    "src/tuner_pipecat_sdk/flow_manager_integration.py",
 ]
 
 [tool.coverage.report]
@@ -103,7 +103,7 @@ skip_covered = false
 fail_under = 85
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/pipecat_flows_tuner"]
+packages = ["src/tuner_pipecat_sdk"]
 
 [dependency-groups]
 dev = [

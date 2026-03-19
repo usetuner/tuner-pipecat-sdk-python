@@ -44,7 +44,7 @@ uv sync --extra dev
 
 2. Build the package
 
-cd src/pipecat_flows_tuner
+cd src/tuner_pipecat_sdk
 hatch build
 
 
