@@ -1,10 +1,10 @@
-"""Shared pytest fixtures for pipecat_flows_tuner tests."""
+"""Shared pytest fixtures for tuner_pipecat_sdk tests."""
 
 from unittest.mock import MagicMock
 
 import pytest
 
-from pipecat_flows_tuner.config import TunerConfig
+from tuner_pipecat_sdk.config import TunerConfig
 
 
 @pytest.fixture

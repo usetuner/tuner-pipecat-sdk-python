@@ -2,7 +2,7 @@
 
 from types import SimpleNamespace
 
-from pipecat_flows_tuner.accumulator import FlowsAccumulator
+from tuner_pipecat_sdk.accumulator import FlowsAccumulator
 
 
 def _metric(cls_name, **kwargs):

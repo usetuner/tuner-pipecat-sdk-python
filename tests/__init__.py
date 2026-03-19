@@ -1,1 +1,1 @@
-"""Tests for pipecat_flows_tuner."""
+"""Tests for tuner_pipecat_sdk."""

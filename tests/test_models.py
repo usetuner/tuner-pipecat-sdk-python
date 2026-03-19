@@ -1,6 +1,6 @@
 """Tests for data models (PendingTransition, LatencyTurn, CallPayload, etc.)."""
 
-from pipecat_flows_tuner.models import (
+from tuner_pipecat_sdk.models import (
     AiModels,
     CallPayload,
     GeneralMetaData,

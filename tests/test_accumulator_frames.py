@@ -3,8 +3,8 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from pipecat_flows_tuner.accumulator import FlowsAccumulator
-from pipecat_flows_tuner.models import LatencyTurn
+from tuner_pipecat_sdk.accumulator import FlowsAccumulator
+from tuner_pipecat_sdk.models import LatencyTurn
 
 
 def test_on_bot_stopped_updates_last_turn():

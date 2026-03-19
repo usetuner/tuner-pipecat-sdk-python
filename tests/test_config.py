@@ -3,7 +3,7 @@
 import pytest
 from pydantic import ValidationError
 
-from pipecat_flows_tuner.config import TunerConfig
+from tuner_pipecat_sdk.config import TunerConfig
 
 
 def test_config_valid(tuner_config):

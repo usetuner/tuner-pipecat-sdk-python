@@ -3,8 +3,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from pipecat_flows_tuner.accumulator import FlowsAccumulator
-from pipecat_flows_tuner.config import TunerConfig
+from tuner_pipecat_sdk.accumulator import FlowsAccumulator
+from tuner_pipecat_sdk.config import TunerConfig
 
 
 def _metric(cls_name: str, **kwargs):

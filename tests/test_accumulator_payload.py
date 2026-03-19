@@ -2,8 +2,8 @@
 
 from types import SimpleNamespace
 
-from pipecat_flows_tuner.accumulator import FlowsAccumulator
-from pipecat_flows_tuner.models import LatencyTurn
+from tuner_pipecat_sdk.accumulator import FlowsAccumulator
+from tuner_pipecat_sdk.models import LatencyTurn
 
 
 def _metric(cls_name: str, **kwargs):
