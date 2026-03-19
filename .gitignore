@@ -11,3 +11,4 @@ build/
 dist/
 *.egg-info/
 .env
+settings.local.json
