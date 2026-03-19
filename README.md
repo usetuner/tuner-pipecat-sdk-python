@@ -14,29 +14,10 @@ then sends a structured `CallPayload` to the Tuner API when a call ends.
 
 ## Installation
 
-This package is **not on PyPI**. Install from a clone of this repository.
-
 ```bash
-git clone https://github.com/usetuner/tuner-pipecat-sdk-python.git
-cd tuner-pipecat-sdk-python
+[placeholder for pypi command] feat/update-call-details-page
 ```
 
-Create a venv with **Python 3.12 or 3.13** (not the system 3.14 if that is your default):
-
-```bash
-python3.12 -m venv .venv && source .venv/bin/activate   # macOS/Linux
-# or: uv venv --python 3.12 && source .venv/bin/activate
-```
-
-**Into that venv:**
-
-```bash
-pip install -e .
-# optional dev/test extras
-pip install -e ".[dev]"
-```
-
-**Examples** under `examples/` depend on this SDK via a **local path** (`tool.uv.sources`). Use **`uv sync`** inside each example directory, or install the SDK from the repo root with `pip install -e .` first, then `pip install -e .` in the example (plain `pip` does not read `uv.sources`).
 
 **Troubleshooting**
 
@@ -46,7 +27,7 @@ pip install -e ".[dev]"
 | `Failed to build numba` / *Cannot install on Python version 3.14* | Same: use **Python 3.12 or 3.13**. |
 | `No matching distribution found for pipecat-flows-tuner` (example + **pip**) | Install the SDK from **repo root** first (`pip install -e .`), then install the example. |
 
-## Quick Start
+## Quick Start Example
 
 ```python
 import uuid
@@ -128,24 +109,4 @@ Without these flags the observer will log warnings and LLM/TTS metric fields wil
 
 Payload and transcript schemas are available under `pipecat_flows_tuner.models`.
 
-## Examples
-
-See [`examples/`](examples/) for working bots built with this SDK:
-
-| Example | Use case |
-|---------|----------|
-| [`pizza_order/`](examples/pizza_order/) | Pizza ordering with toppings, delivery/pickup branch |
-| [`appointment_booking/`](examples/appointment_booking/) | Medical clinic receptionist, 7-node linear flow |
-| [`customer_support/`](examples/customer_support/) | Multi-branch support agent with escalation |
-
-Each example is self-contained. See **Installation** above for how the SDK is resolved. To run one:
-
-```bash
-cd examples/<example_name>
-uv sync
-cp .env.example .env   # if present; fill in API keys
-uv run <script>.py
-```
-
-Then open http://localhost:7860 where applicable.
 

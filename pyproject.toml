@@ -13,9 +13,11 @@ authors = [
 # Pipecat (onnxruntime, numba, etc.) does not resolve on 3.14 yet; see README.
 requires-python = ">=3.10,<3.14"
 keywords = ["pipecat", "voice", "sdk", "observability", "agent"]
+license = { file = "LICENSE" }
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -48,8 +50,12 @@ lint = [
 type = [
     "mypy>=1.10",
 ]
+publish = [
+    "hatch>=1.12",
+    "twine>=5.0",
+]
 dev = [
-    "pipecat-flows-tuner[test,lint,type]",
+    "pipecat-flows-tuner[test,lint,type,publish]",
 ]
 
 [tool.pytest.ini_options]
