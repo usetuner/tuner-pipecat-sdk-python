@@ -164,7 +164,7 @@ def test_on_latency_breakdown_preserves_user_started_ms_when_user_turn_start_tim
     turn = acc.latency_turns[0]
     assert turn.user_started_ms == 500  # preserved from on_turn_started
     assert turn.user_stopped_ms == 0   # unknown (no fallback)
-    assert turn.bot_started_ms == 200  # 0 + 200ms latency
+    assert turn.bot_started_ms == 0    # not set for proactive breakdown (is_real_user_turn=False)
 
 
 def test_on_latency_breakdown_skips_when_no_active_turn(caplog):
