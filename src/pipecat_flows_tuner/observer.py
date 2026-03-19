@@ -69,6 +69,7 @@ class FlowsObserver(FrameProcessor):
             tts_model=tts_model,
         )
         self._acc = FlowsAccumulator()
+        self._acc.call_start_abs_ns = time.time_ns()  # anchor timeline before pipeline starts
         self._latency_observer = UserBotLatencyObserver()
         self._flushed = False
         self._flow_manager: Any | None = None

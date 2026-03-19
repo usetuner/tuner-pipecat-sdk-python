@@ -11,6 +11,7 @@ class LatencyTurn(BaseModel):
     turn_index: int
     node: str | None = None
     bot_node: str | None = None
+    is_proactive: bool = False
     ttfb_ms: int | None = None
     llm_ms: int | None = None
     tts_ms: int | None = None
