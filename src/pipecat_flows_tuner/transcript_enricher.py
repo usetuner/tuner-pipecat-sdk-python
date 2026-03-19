@@ -182,7 +182,11 @@ def build_agent_text_segment(
     assistant_index: int,
     agent_interrupted: dict[int, bool],
 ) -> TranscriptSegment:
-    end_to_end_latency = ((turn.bot_started_ms - turn.user_stopped_ms) or None) if turn else None
+    end_to_end_latency = (
+        ((turn.bot_started_ms - turn.user_stopped_ms) or None)
+        if turn and not turn.is_proactive
+        else None
+    )
     text = " ".join(m.get("content", "") for m in messages).strip()
     node = (turn.bot_node or turn.node) if turn else None
     return TranscriptSegment(
@@ -254,6 +258,7 @@ def enrich_transcript(
     message_idx = 0
     user_idx = 0
     assistant_idx = 0
+    proactive_turn_idx = 0       # cursor into proactive turns (0..latency_offset-1)
     latency_turn_idx = latency_offset
     tool_turn: Any | None = None
     spoken_indices = find_spoken_assistant_message_indices(messages)
@@ -329,25 +334,29 @@ def enrich_transcript(
             )
             final_msg_idx = message_idx - 1  # last message in the consecutive group
             is_preamble = user_idx == 0
-            if (
-                final_msg_idx in spoken_indices
+            if is_preamble and proactive_turn_idx < latency_offset:
+                # Proactive greeting: assign the corresponding proactive latency turn
+                # so bot_started_ms / bot_stopped_ms are populated correctly.
+                assistant_turn = acc.latency_turns[proactive_turn_idx]
+                turn_index_for_segment = proactive_turn_idx
+                proactive_turn_idx += 1
+            elif (
+                not is_preamble
+                and final_msg_idx in spoken_indices
                 and latency_turn_idx < len(acc.latency_turns)
-                and not is_preamble
             ):
-                assistant_turn = (
-                    acc.latency_turns[latency_turn_idx]
-                    if latency_turn_idx < len(acc.latency_turns)
-                    else None
-                )
+                assistant_turn = acc.latency_turns[latency_turn_idx]
+                turn_index_for_segment = latency_turn_idx
                 latency_turn_idx += 1
             else:
                 assistant_turn = None  # ghost — not actually spoken
+                turn_index_for_segment = -1
             result.append(
                 build_agent_text_segment(
                     acc=acc,
                     messages=grouped_messages,
                     turn=assistant_turn,
-                    assistant_index=latency_turn_idx - 1 if assistant_turn else -1,
+                    assistant_index=turn_index_for_segment,
                     agent_interrupted=agent_interrupted,
                 )
             )

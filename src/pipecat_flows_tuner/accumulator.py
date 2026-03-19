@@ -222,7 +222,13 @@ class FlowsAccumulator:
             else None
         )
         is_real_user_turn = True
-        if user_start_abs is not None:
+        if user_start_abs is None:
+            # No user speech before this breakdown → proactive bot greeting.
+            # UserBotLatencyObserver sends user_turn_start_time=None when the bot
+            # speaks first without any prior user utterance.
+            is_real_user_turn = False
+            turn.is_proactive = True
+        else:
             computed_started_ms = self._abs_to_rel_ms(user_start_abs)
             if computed_started_ms > 0:
                 # Prefer breakdown timestamps when available, but only when they represent
