@@ -6,7 +6,6 @@
 """Pizzeria ordering bot built with Pipecat Flows.
 
 Requirements:
-- CARTESIA_API_KEY
 - DEEPGRAM_API_KEY
 - OPENAI_API_KEY
 
@@ -40,8 +39,8 @@ from pipecat.processors.aggregators.llm_response_universal import (
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
-from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.services.deepgram.stt import DeepgramSTTService
+from pipecat.services.deepgram.tts import DeepgramTTSService
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 
@@ -51,7 +50,7 @@ from pipecat_flows import (
     FlowsFunctionSchema,
     NodeConfig,
 )
-from pipecat_flows_tuner import FlowsObserver
+from tuner_pipecat_sdk import FlowsObserver
 
 load_dotenv(override=True)
 
@@ -253,9 +252,9 @@ def create_farewell_node(confirmed: bool = True) -> NodeConfig:
 
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     stt = DeepgramSTTService(api_key=os.getenv("DEEPGRAM_API_KEY"))
-    tts = CartesiaTTSService(
-        api_key=os.getenv("CARTESIA_API_KEY"),
-        voice_id="32b3f3c5-7171-46aa-abe7-b598964aa793",
+    tts = DeepgramTTSService(
+        api_key=os.getenv("DEEPGRAM_API_KEY"),
+        voice=os.getenv("DEEPGRAM_VOICE", "aura-2-thalia-en"),
     )
     llm = OpenAILLMService(api_key=os.getenv("OPENAI_API_KEY"))
 
@@ -278,7 +277,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         base_url=os.getenv("TUNER_BASE_URL", "http://localhost:8000"),
         asr_model=os.getenv("TUNER_ASR_MODEL", "deepgram/nova-3"),
         llm_model=os.getenv("TUNER_LLM_MODEL", "gpt-4o-mini"),
-        tts_model=os.getenv("TUNER_TTS_MODEL", "cartesia/sonic"),
+        tts_model=os.getenv("TUNER_TTS_MODEL", "deepgram/aura-2-thalia-en"),
         debug=True,
     )
     observer.attach_turn_tracking_observer(turn_tracker)

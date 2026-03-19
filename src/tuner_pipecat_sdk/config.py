@@ -1,4 +1,4 @@
-"""Configuration model for pipecat_flows_tuner."""
+"""Configuration model for tuner_pipecat_sdk."""
 
 from pydantic import BaseModel, field_validator
 

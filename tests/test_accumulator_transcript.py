@@ -1,7 +1,7 @@
 """Accumulator transcript enrichment with tools and transitions."""
 
-from pipecat_flows_tuner.accumulator import FlowsAccumulator
-from pipecat_flows_tuner.models import LatencyTurn
+from tuner_pipecat_sdk.accumulator import FlowsAccumulator
+from tuner_pipecat_sdk.models import LatencyTurn
 
 
 def test_enrich_transcript_tool_call_and_result(tuner_config):

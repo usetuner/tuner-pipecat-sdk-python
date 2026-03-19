@@ -41,7 +41,7 @@ Validation rules:
 
 Public payload and transcript models are available via:
 
-- `pipecat_flows_tuner.models.CallPayload`
-- `pipecat_flows_tuner.models.TranscriptSegment`
-- `pipecat_flows_tuner.models.ToolInfo`
-- `pipecat_flows_tuner.models.NodeInfo`
+- `tuner_pipecat_sdk.models.CallPayload`
+- `tuner_pipecat_sdk.models.TranscriptSegment`
+- `tuner_pipecat_sdk.models.ToolInfo`
+- `tuner_pipecat_sdk.models.NodeInfo`

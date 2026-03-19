@@ -1,4 +1,4 @@
-"""Public package interface for `pipecat_flows_tuner`."""
+"""Public package interface for `tuner_pipecat_sdk`."""
 
 from __future__ import annotations
 

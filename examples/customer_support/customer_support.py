@@ -57,7 +57,7 @@ from pipecat_flows import (
     FlowsFunctionSchema,
     NodeConfig,
 )
-from pipecat_flows_tuner import FlowsObserver
+from tuner_pipecat_sdk import FlowsObserver
 
 load_dotenv(override=True)
 

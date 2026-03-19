@@ -31,7 +31,7 @@ pip install -e .
 
 ```python
 import uuid
-from pipecat_flows_tuner import FlowsObserver
+from tuner_pipecat_sdk import FlowsObserver
 
 observer = FlowsObserver(
     api_key="YOUR_TUNER_API_KEY",

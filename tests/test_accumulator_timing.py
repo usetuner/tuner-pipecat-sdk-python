@@ -2,7 +2,7 @@
 
 import time
 
-from pipecat_flows_tuner.accumulator import FlowsAccumulator
+from tuner_pipecat_sdk.accumulator import FlowsAccumulator
 
 
 def test_rel_ms_zero_when_no_start():

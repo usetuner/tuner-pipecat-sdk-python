@@ -5,8 +5,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-from pipecat_flows_tuner.client import post_call
-from pipecat_flows_tuner.models import (
+from tuner_pipecat_sdk.client import post_call
+from tuner_pipecat_sdk.models import (
     AiModels,
     CallPayload,
     GeneralMetaData,
@@ -47,7 +47,7 @@ def _make_client_mock(response):
 
 @pytest.mark.asyncio
 async def test_post_call_success(tuner_config, sample_payload):
-    with patch("pipecat_flows_tuner.client.httpx.AsyncClient") as mock_client_cls:
+    with patch("tuner_pipecat_sdk.client.httpx.AsyncClient") as mock_client_cls:
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {"id": "tuner-1", "call_id": "call-123"}
@@ -70,7 +70,7 @@ async def test_post_call_success(tuner_config, sample_payload):
 
 @pytest.mark.asyncio
 async def test_post_call_409_skipped(tuner_config, sample_payload):
-    with patch("pipecat_flows_tuner.client.httpx.AsyncClient") as mock_client_cls:
+    with patch("tuner_pipecat_sdk.client.httpx.AsyncClient") as mock_client_cls:
         mock_response = MagicMock()
         mock_response.status_code = 409
         mock_client, inner = _make_client_mock(mock_response)
@@ -84,7 +84,7 @@ async def test_post_call_409_skipped(tuner_config, sample_payload):
 
 @pytest.mark.asyncio
 async def test_post_call_http_error_logged_not_raised(tuner_config, sample_payload):
-    with patch("pipecat_flows_tuner.client.httpx.AsyncClient") as mock_client_cls:
+    with patch("tuner_pipecat_sdk.client.httpx.AsyncClient") as mock_client_cls:
         mock_response = MagicMock()
         mock_response.status_code = 500
         mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
@@ -99,7 +99,7 @@ async def test_post_call_http_error_logged_not_raised(tuner_config, sample_paylo
 
 @pytest.mark.asyncio
 async def test_post_call_request_error_logged_not_raised(tuner_config, sample_payload):
-    with patch("pipecat_flows_tuner.client.httpx.AsyncClient") as mock_client_cls:
+    with patch("tuner_pipecat_sdk.client.httpx.AsyncClient") as mock_client_cls:
         mock_response = MagicMock()
         mock_client, inner = _make_client_mock(mock_response)
         inner.post.side_effect = httpx.RequestError("network error")

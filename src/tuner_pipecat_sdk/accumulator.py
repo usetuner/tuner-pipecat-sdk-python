@@ -44,6 +44,10 @@ class FlowsAccumulator:
     _pending_pipecat_llm_processing_s: float = field(default=0.0, repr=False)
     _pending_pipecat_tts_processing_s: float = field(default=0.0, repr=False)
 
+    # Turn-started calls that arrived before StartFrame (call_start_abs_ns not yet set).
+    # Processed retroactively in on_start once the reference timestamp is known.
+    _pending_turn_starts: list[tuple[int, int]] = field(default_factory=list, repr=False)
+
     # misc
     done: bool = False
 
@@ -73,7 +77,16 @@ class FlowsAccumulator:
         return self._pipecat_tts_chars
 
     def on_start(self, timestamp_ns: int) -> None:
-        self.call_start_abs_ns = timestamp_ns
+        # call_start_abs_ns is pre-initialized in FlowsObserver.__init__ to avoid the
+        # StartFrame race condition (TTS queues greeting audio before StartFrame, causing
+        # StartFrame to arrive late at the observer). Only fall back to StartFrame time
+        # if somehow not yet set.
+        if self.call_start_abs_ns == 0:
+            self.call_start_abs_ns = timestamp_ns
+        # Retroactively process any on_turn_started calls that arrived before on_start.
+        for turn_number, ts in self._pending_turn_starts:
+            self.on_turn_started(turn_number, ts)
+        self._pending_turn_starts.clear()
 
     def on_turn_started(self, turn_number: int, timestamp_ns: int) -> None:
         """Called by TurnTrackingObserver when the user starts speaking.
@@ -82,7 +95,15 @@ class FlowsAccumulator:
         we collapse this into the existing LatencyTurn rather than creating a new one.
         This handles users who pause briefly and speak again before the bot replies.
         The breakdown fires once per bot response, so one LatencyTurn must match it.
+        
+        If StartFrame hasn't been processed yet (call_start_abs_ns == 0), the call is
+        deferred and replayed once on_start fires with the correct reference timestamp.
         """
+        
+        if self.call_start_abs_ns == 0:
+            self._pending_turn_starts.append((turn_number, timestamp_ns))
+            return
+
         if self._open_latency_idx is not None and self._open_latency_idx < len(self.latency_turns):
             # Collapse consecutive user fragments before bot starts speaking.
             active_turn = self.latency_turns[self._open_latency_idx]
@@ -201,7 +222,13 @@ class FlowsAccumulator:
             else None
         )
         is_real_user_turn = True
-        if user_start_abs is not None:
+        if user_start_abs is None:
+            # No user speech before this breakdown → proactive bot greeting.
+            # UserBotLatencyObserver sends user_turn_start_time=None when the bot
+            # speaks first without any prior user utterance.
+            is_real_user_turn = False
+            turn.is_proactive = True
+        else:
             computed_started_ms = self._abs_to_rel_ms(user_start_abs)
             if computed_started_ms > 0:
                 # Prefer breakdown timestamps when available, but only when they represent
@@ -216,6 +243,7 @@ class FlowsAccumulator:
                 # Do not derive bot_started_ms from this latency; on_bot_started_speaking
                 # already captured the correct bot start from the BotStartedSpeakingFrame.
                 is_real_user_turn = False
+                turn.is_proactive = True
 
         if self._pending_latency_ms_queue:
             latency_ms = self._pending_latency_ms_queue.popleft()

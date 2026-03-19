@@ -138,6 +138,7 @@ def build_agent_result_segment(
     acc: FlowsAccumulator,
     message: dict[str, Any],
     messages: list[dict[str, Any]],
+    tool_turn: Any | None = None,
 ) -> TranscriptSegment:
     tool_call_id = message.get("tool_call_id", "")
     matched_tool_call = find_matching_tool_call(messages, tool_call_id)
@@ -145,6 +146,11 @@ def build_agent_result_segment(
     parsed_result = parse_json_value(message.get("content"))
     completion_ms = acc.get_tool_completion_ms(tool_call_id) if tool_call_id else None
     result_ms = completion_ms if completion_ms is not None else 0
+    if tool_turn and (
+        result_ms == 0
+        or (tool_turn.bot_started_ms > 0 and result_ms > tool_turn.bot_started_ms)
+    ):
+        result_ms = tool_turn.user_stopped_ms
 
     return TranscriptSegment(
         role="agent_result",
@@ -176,7 +182,11 @@ def build_agent_text_segment(
     assistant_index: int,
     agent_interrupted: dict[int, bool],
 ) -> TranscriptSegment:
-    end_to_end_latency = ((turn.bot_started_ms - turn.user_stopped_ms) or None) if turn else None
+    end_to_end_latency = (
+        ((turn.bot_started_ms - turn.user_stopped_ms) or None)
+        if turn and not turn.is_proactive
+        else None
+    )
     text = " ".join(m.get("content", "") for m in messages).strip()
     node = (turn.bot_node or turn.node) if turn else None
     return TranscriptSegment(
@@ -240,11 +250,17 @@ def enrich_transcript(
     user_interrupted = calculate_user_interruptions(acc)
     agent_interrupted = calculate_agent_interruptions(acc)
 
+    # Proactive turns (bot greets first, no user speech) sit at the front of
+    # latency_turns and must be skipped when aligning to user/agent messages.
+    latency_offset = sum(1 for t in acc.latency_turns if t.is_proactive)
+
     result: list[TranscriptSegment] = []
     message_idx = 0
     user_idx = 0
     assistant_idx = 0
-    latency_turn_idx = 0
+    proactive_turn_idx = 0       # cursor into proactive turns (0..latency_offset-1)
+    latency_turn_idx = latency_offset
+    tool_turn: Any | None = None
     spoken_indices = find_spoken_assistant_message_indices(messages)
 
     while message_idx < len(messages):
@@ -257,19 +273,40 @@ def enrich_transcript(
 
         if role == "user":
             grouped_messages, message_idx = collect_consecutive_user_messages(messages, message_idx)
-            user_turn = acc.latency_turns[user_idx] if user_idx < len(acc.latency_turns) else None
+            real_user_idx = user_idx + latency_offset
+            user_turn = (
+                acc.latency_turns[real_user_idx]
+                if real_user_idx < len(acc.latency_turns)
+                else None
+            )
             result.append(
-                build_user_segment(grouped_messages, user_turn, user_idx, user_interrupted)
+                build_user_segment(grouped_messages, user_turn, real_user_idx, user_interrupted)
             )
             user_idx += 1
             continue
 
         if role == "assistant" and "tool_calls" in message:
+            # Tool calls here belong to the same latency window as the next agent text
+            # segment (latency_turn_idx). FunctionCallInProgressFrame arrives late at the
+            # observer (after bot has spoken) because context_aggregator.assistant() — the
+            # last processor in the pipeline — emits it upstream after assembling the full
+            # LLM response. Detect this by comparing against bot_started_ms and fall back
+            # to user_stopped_ms as the best available approximation.
+            tool_turn = (
+                acc.latency_turns[latency_turn_idx]
+                if latency_turn_idx < len(acc.latency_turns)
+                else None
+            )
             for tool_call in message.get("tool_calls", []):
                 tool_call_id = tool_call.get("id")
                 invocation_ms = (
                     acc.get_tool_invocation_ms(tool_call_id) or 0 if tool_call_id else 0
                 )
+                if tool_turn and (
+                    invocation_ms == 0
+                    or (tool_turn.bot_started_ms > 0 and invocation_ms > tool_turn.bot_started_ms)
+                ):
+                    invocation_ms = tool_turn.user_stopped_ms
                 result.append(
                     build_agent_function_segment(
                         tool_call=tool_call,
@@ -285,6 +322,7 @@ def enrich_transcript(
                     acc=acc,
                     message=message,
                     messages=messages,
+                    tool_turn=tool_turn,
                 )
             )
             message_idx += 1
@@ -296,25 +334,29 @@ def enrich_transcript(
             )
             final_msg_idx = message_idx - 1  # last message in the consecutive group
             is_preamble = user_idx == 0
-            if (
-                final_msg_idx in spoken_indices
+            if is_preamble and proactive_turn_idx < latency_offset:
+                # Proactive greeting: assign the corresponding proactive latency turn
+                # so bot_started_ms / bot_stopped_ms are populated correctly.
+                assistant_turn = acc.latency_turns[proactive_turn_idx]
+                turn_index_for_segment = proactive_turn_idx
+                proactive_turn_idx += 1
+            elif (
+                not is_preamble
+                and final_msg_idx in spoken_indices
                 and latency_turn_idx < len(acc.latency_turns)
-                and not is_preamble
             ):
-                assistant_turn = (
-                    acc.latency_turns[latency_turn_idx]
-                    if latency_turn_idx < len(acc.latency_turns)
-                    else None
-                )
+                assistant_turn = acc.latency_turns[latency_turn_idx]
+                turn_index_for_segment = latency_turn_idx
                 latency_turn_idx += 1
             else:
                 assistant_turn = None  # ghost — not actually spoken
+                turn_index_for_segment = -1
             result.append(
                 build_agent_text_segment(
                     acc=acc,
                     messages=grouped_messages,
                     turn=assistant_turn,
-                    assistant_index=latency_turn_idx - 1 if assistant_turn else -1,
+                    assistant_index=turn_index_for_segment,
                     agent_interrupted=agent_interrupted,
                 )
             )
