@@ -228,6 +228,122 @@ def test_on_latency_breakdown_skips_overwrite_for_initial_proactive_greeting():
     assert len(acc._pending_latency_ms_queue) == 0
 
 
+def test_async_race_vad_frames_arrive_before_on_turn_started():
+    """Regression: VAD frames arrive before on_turn_started (async callback fires late).
+
+    Simulates the race where UserStartedSpeakingFrame and UserStoppedSpeakingFrame
+    process_frame calls happen before the TurnTrackingObserver async callback fires.
+    The pending cache must preserve the timestamps so on_turn_started can apply them.
+    """
+    base_ns = 1_000_000_000  # t0 = 1.0s
+
+    acc = FlowsAccumulator()
+    acc.on_start(base_ns)  # t0
+
+    t1 = base_ns + 500_000_000    # user started speaking at +500ms
+    t2 = base_ns + 2_000_000_000  # user stopped speaking at +2000ms
+    t3 = base_ns + 34_000_000_000  # bot started speaking at +34000ms
+    t4 = base_ns + 34_100_000_000  # on_turn_started fires late at +34100ms
+
+    # VAD frames arrive BEFORE the async on_turn_started callback
+    acc.on_user_started_speaking(t1)
+    acc.on_user_stopped_speaking(t2)
+
+    # Bot starts speaking (also before on_turn_started in this extreme race)
+    acc.on_bot_started_speaking(t3)  # no open turn yet — silently no-ops
+
+    # on_turn_started fires late
+    acc.on_turn_started(0, t4)
+
+    # Pending VAD timestamps must have been applied
+    assert acc.latency_turns[0].user_stopped_ms == 2000  # from t2, not 0
+
+    # Now latency breakdown arrives; bot_started was captured by on_bot_started_speaking
+    # but since that fired before on_turn_started, _open_latency_idx was None and
+    # bot_started_ms is still 0 here. The fallback formula runs.
+    acc.on_latency_measured(1.164)
+    acc.on_latency_breakdown(
+        SimpleNamespace(
+            user_turn_start_time=1.5,
+            user_turn_secs=1.5,
+            ttfb=[SimpleNamespace(duration_secs=0.05)],
+            function_calls=[],
+        )
+    )
+
+    turn = acc.latency_turns[0]
+    # user_stopped_ms must be non-zero (from cached pending frame)
+    assert turn.user_stopped_ms > 0, "user_stopped_ms must not be 0 (async race bug)"
+    # bot_started_ms must not equal 1164 (0 + 1164) since user_stopped_ms is 2000
+    assert turn.bot_started_ms != 1164, "bot_started_ms must not be derived from stale 0 user_stopped_ms"
+
+
+def test_breakdown_does_not_overwrite_bot_started_ms_when_already_set():
+    """Regression: on_latency_breakdown must not overwrite bot_started_ms if already set.
+
+    on_bot_started_speaking is authoritative; the breakdown formula is only a fallback.
+    """
+    base_ns = 1_000_000_000
+
+    acc = FlowsAccumulator()
+    acc.on_start(base_ns)
+    acc.on_turn_started(0, base_ns + 500_000_000)  # user_started_ms = 500
+
+    # Bot starts at +34000ms — direct from BotStartedSpeakingFrame
+    acc.on_bot_started_speaking(base_ns + 34_000_000_000)
+    assert acc.latency_turns[0].bot_started_ms == 34_000
+
+    # Breakdown arrives; user_stopped computes to 2000ms, latency = 1164ms
+    # Formula would yield 2000 + 1164 = 3164 — must NOT overwrite 34000
+    acc.on_latency_measured(1.164)
+    acc.on_latency_breakdown(
+        SimpleNamespace(
+            user_turn_start_time=1.5,
+            user_turn_secs=1.5,
+            ttfb=[SimpleNamespace(duration_secs=0.05)],
+            function_calls=[],
+        )
+    )
+
+    assert acc.latency_turns[0].bot_started_ms == 34_000  # preserved from on_bot_started_speaking
+
+
+def test_pending_vad_cache_not_leaked_into_second_turn():
+    """Regression: pending VAD cache must be cleared after normal (non-race) application.
+
+    In the normal flow (on_turn_started fires before VAD frames), the cache is set AND
+    immediately applied. If not cleared, the next on_turn_started would re-apply stale
+    first-turn timestamps to the second turn, corrupting user_started_ms / user_stopped_ms.
+    """
+    base_ns = 1_000_000_000
+
+    acc = FlowsAccumulator()
+    acc.on_start(base_ns)
+
+    # --- Turn 0: normal order (on_turn_started first, then VAD frames) ---
+    acc.on_turn_started(0, base_ns + 1_000_000_000)  # user_started from turn callback = 1000ms
+    acc.on_user_started_speaking(base_ns + 900_000_000)   # VAD start = 900ms (earlier)
+    acc.on_user_stopped_speaking(base_ns + 2_000_000_000)  # VAD stop = 2000ms
+
+    assert acc.latency_turns[0].user_started_ms == 900   # min(1000, 900)
+    assert acc.latency_turns[0].user_stopped_ms == 2000
+
+    # Pending caches must be cleared now
+    assert acc._pending_user_started_ns is None
+    assert acc._pending_user_stopped_ns is None
+
+    # Complete turn 0 with a bot response so turn 1 creates a new LatencyTurn
+    acc.on_bot_started_speaking(base_ns + 3_000_000_000)  # closes _open_latency_idx
+
+    # --- Turn 1: on_turn_started fires with its own fresh timestamp ---
+    acc.on_turn_started(1, base_ns + 5_000_000_000)  # user_started = 5000ms
+
+    assert len(acc.latency_turns) == 2
+    # Must NOT be contaminated by turn 0's VAD timestamps
+    assert acc.latency_turns[1].user_started_ms == 5000
+    assert acc.latency_turns[1].user_stopped_ms == 0
+
+
 def test_on_call_end_marks_done_without_creating_turns():
     acc = FlowsAccumulator()
     acc.call_start_abs_ns = 1_000_000_000

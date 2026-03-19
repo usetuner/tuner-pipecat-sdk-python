@@ -29,6 +29,9 @@ class FlowsAccumulator:
     _open_latency_idx: int | None = field(default=None, repr=False)
     # Turn index currently speaking; consumed by on_bot_stopped.
     _bot_turn_idx: int | None = field(default=None, repr=False)
+    # VAD frame timestamps that arrived before on_turn_started (async race guard).
+    _pending_user_started_ns: int | None = field(default=None, repr=False)
+    _pending_user_stopped_ns: int | None = field(default=None, repr=False)
 
     # Ordered pairing for latency observer callbacks (on_latency_measured then breakdown).
     _pending_latency_ms_queue: deque[int] = field(default_factory=deque, repr=False)
@@ -108,6 +111,19 @@ class FlowsAccumulator:
                 user_started_ms=self._rel_ms(timestamp_ns),
             )
         )
+        turn = self.latency_turns[new_idx]
+        if self._pending_user_started_ns is not None:
+            started_ms = self._rel_ms(self._pending_user_started_ns)
+            if turn.user_started_ms == 0:
+                turn.user_started_ms = started_ms
+            else:
+                turn.user_started_ms = min(turn.user_started_ms, started_ms)
+            self._pending_user_started_ns = None
+        if self._pending_user_stopped_ns is not None:
+            turn.user_stopped_ms = max(
+                turn.user_stopped_ms, self._rel_ms(self._pending_user_stopped_ns)
+            )
+            self._pending_user_stopped_ns = None
 
     def on_turn_ended(self, turn_number: int, was_interrupted: bool) -> None:
         """Called by TurnTrackingObserver when a turn ends (bot finished or interrupted)."""
@@ -118,6 +134,7 @@ class FlowsAccumulator:
 
     def on_user_started_speaking(self, timestamp_ns: int) -> None:
         """Use frame timestamp as the authoritative user-start anchor for the active turn."""
+        self._pending_user_started_ns = timestamp_ns  # cache in case on_turn_started fires late
         if self._active_turn_number is None:
             return
         idx = self._turn_to_latency_idx.get(self._active_turn_number)
@@ -129,6 +146,7 @@ class FlowsAccumulator:
             turn.user_started_ms = started_ms
         else:
             turn.user_started_ms = min(turn.user_started_ms, started_ms)
+        self._pending_user_started_ns = None  # consumed; don't leak into next on_turn_started
 
     def on_user_stopped_speaking(self, timestamp_ns: int) -> None:
         """Capture user_stopped_ms directly from VAD frame.
@@ -137,6 +155,7 @@ class FlowsAccumulator:
         receives user_turn_start_time=None and cannot compute user_stopped_ms.
         on_latency_breakdown overrides this with its computed value when available.
         """
+        self._pending_user_stopped_ns = timestamp_ns  # cache in case on_turn_started fires late
         if self._active_turn_number is None:
             return
         idx = self._turn_to_latency_idx.get(self._active_turn_number)
@@ -144,6 +163,7 @@ class FlowsAccumulator:
             stopped_ms = self._rel_ms(timestamp_ns)
             turn = self.latency_turns[idx]
             turn.user_stopped_ms = max(turn.user_stopped_ms, stopped_ms)
+            self._pending_user_stopped_ns = None  # consumed; don't leak into next on_turn_started
 
     def on_function_call_result(self, tool_call_id: str, timestamp_ns: int) -> None:
         self.registry.record_completion_ns(tool_call_id, timestamp_ns)
@@ -219,7 +239,7 @@ class FlowsAccumulator:
 
         if self._pending_latency_ms_queue:
             latency_ms = self._pending_latency_ms_queue.popleft()
-            if is_real_user_turn:
+            if is_real_user_turn and turn.bot_started_ms == 0:
                 turn.bot_started_ms = turn.user_stopped_ms + latency_ms
 
         ttfb_ms: int | None = None
