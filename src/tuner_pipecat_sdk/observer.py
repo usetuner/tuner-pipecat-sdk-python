@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
 
 from ._base import _BaseTunerObserver

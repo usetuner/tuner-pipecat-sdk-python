@@ -71,11 +71,13 @@ def test_frame_without_data_attribute_no_crash():
 
 def test_multiple_metric_types_in_one_frame():
     acc = CallAccumulator()
-    acc.on_metrics_frame(_frame(
-        _llm_usage(300),
-        _tts_usage(120),
-        _processing("ElevenLabsTTSService", 0.9),
-    ))
+    acc.on_metrics_frame(
+        _frame(
+            _llm_usage(300),
+            _tts_usage(120),
+            _processing("ElevenLabsTTSService", 0.9),
+        )
+    )
     assert acc.get_total_llm_tokens() == 300
     assert acc.get_total_tts_characters() == 120
     assert acc._pending_pipecat_tts_processing_s == 0.9

@@ -39,6 +39,9 @@ Repository = "https://github.com/usetuner/tuner-pipecat-sdk-python"
 Issues = "https://github.com/usetuner/tuner-pipecat-sdk-python/issues"
 
 [project.optional-dependencies]
+flows = [
+    "pipecat-ai-flows>=0.0.24",
+]
 test = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
@@ -55,7 +58,7 @@ publish = [
     "twine>=5.0",
 ]
 dev = [
-    "tuner-pipecat-sdk[test,lint,type,publish]",
+    "tuner-pipecat-sdk[test,lint,type,publish,flows]",
 ]
 
 [tool.pytest.ini_options]
@@ -86,7 +89,7 @@ no_implicit_optional = true
 check_untyped_defs = true
 
 [[tool.mypy.overrides]]
-module = ["pipecat.*"]
+module = ["pipecat.*","pipecat_flows.*"]
 ignore_missing_imports = true
 
 [tool.coverage.run]

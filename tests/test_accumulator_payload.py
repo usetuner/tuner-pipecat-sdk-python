@@ -155,9 +155,7 @@ def test_payload_transcript_preserves_conversation_order(tuner_config):
         {"role": "user", "content": "Hi"},
         {
             "role": "assistant",
-            "tool_calls": [
-                {"id": "tc-1", "function": {"name": "transfer", "arguments": "{}"}}
-            ],
+            "tool_calls": [{"id": "tc-1", "function": {"name": "transfer", "arguments": "{}"}}],
         },
         {"role": "tool", "tool_call_id": "tc-1", "content": '{"ok": true}'},
         {"role": "assistant", "content": "Done"},
@@ -166,7 +164,6 @@ def test_payload_transcript_preserves_conversation_order(tuner_config):
     payload = acc.build_payload(tuner_config, transcript)
     roles = [segment.role for segment in payload.transcript_with_tool_calls]
     assert roles == ["user", "agent_function", "agent_result", "agent"]
-
 
 
 def test_payload_keeps_initial_greeting_before_first_user(tuner_config):
@@ -201,5 +198,3 @@ def test_payload_keeps_initial_greeting_before_first_user(tuner_config):
     assert greeting.text == "Welcome to Pipecat Pizza!"
     assert greeting.start_ms == 0
     assert greeting.end_ms == 0
-
-

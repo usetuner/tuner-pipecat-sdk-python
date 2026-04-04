@@ -251,9 +251,7 @@ def test_agent_result_uses_registry_completion_when_available(tuner_config):
         {"role": "user", "content": "hello"},
         {
             "role": "assistant",
-            "tool_calls": [
-                {"id": "call_xyz", "function": {"name": "greet", "arguments": "{}"}}
-            ],
+            "tool_calls": [{"id": "call_xyz", "function": {"name": "greet", "arguments": "{}"}}],
         },
         {"role": "tool", "tool_call_id": "call_xyz", "content": '{"ok": true}'},
         {"role": "assistant", "content": "Done!"},

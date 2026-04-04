@@ -138,7 +138,7 @@ class CallAccumulator:
             idx = self._current_user_turn_latency_idx
             if idx < len(self.latency_turns):
                 current = self.latency_turns[idx]
-                if current.bot_started_ms == 0:  
+                if current.bot_started_ms == 0:
                     if current.user_started_ms == 0:
                         current.user_started_ms = started_ms
                     else:

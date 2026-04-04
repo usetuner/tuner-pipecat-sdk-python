@@ -84,7 +84,6 @@ def test_on_turn_started_creates_latency_turn():
     assert acc._active_turn_number == 1
 
 
-
 def test_on_bot_started_speaking_sets_bot_started_ms():
     acc = CallAccumulator()
     base_ns = 1_000_000_000
@@ -113,6 +112,8 @@ def test_on_latency_breakdown_enriches_existing_turn():
     # Turn must already exist (created by on_turn_started)
     acc.on_turn_started(1, 1_000_000_000 + 500_000_000)
 
+    # user_turn_start_time=1.5, user_turn_secs=0.2 → stopped at 1.7s → 700ms
+    acc.on_user_stopped_speaking(1_000_000_000 + 700_000_000)
     breakdown = SimpleNamespace(
         user_turn_start_time=1.5,
         user_turn_secs=0.2,
@@ -135,6 +136,7 @@ def test_on_latency_breakdown_keeps_bot_started_unset_when_latency_missing():
     acc = CallAccumulator()
     acc.call_start_abs_ns = 1_000_000_000
     acc.on_turn_started(1, 1_000_000_000 + 200_000_000)
+    acc.on_user_stopped_speaking(1_000_000_000 + 400_000_000)  # user stopped at +400ms
     breakdown = SimpleNamespace(
         user_turn_start_time=1.2,
         user_turn_secs=0.2,
@@ -163,13 +165,14 @@ def test_on_latency_breakdown_preserves_user_started_ms_when_user_turn_start_tim
 
     turn = acc.latency_turns[0]
     assert turn.user_started_ms == 500  # preserved from on_turn_started
-    assert turn.user_stopped_ms == 0   # unknown (no fallback)
-    assert turn.bot_started_ms == 0    # not set for proactive breakdown (is_real_user_turn=False)
+    assert turn.user_stopped_ms == 0  # unknown (no fallback)
+    assert turn.bot_started_ms == 0  # not set for proactive breakdown (is_real_user_turn=False)
 
 
 def test_on_latency_breakdown_skips_when_no_active_turn(caplog):
     """on_latency_breakdown logs a warning and skips when no turn is active."""
     import logging
+
     acc = CallAccumulator()
     acc.call_start_abs_ns = 1_000_000_000
     breakdown = SimpleNamespace(
@@ -210,7 +213,7 @@ def test_on_latency_breakdown_skips_overwrite_for_initial_proactive_greeting():
     # user_turn_start_time ≈ call_start → computed_started_ms = 0 → skip overwrite.
     acc.on_latency_breakdown(
         SimpleNamespace(
-            user_turn_start_time=1.0,   # ≈ call start → computed_started_ms = 0
+            user_turn_start_time=1.0,  # ≈ call start → computed_started_ms = 0
             user_turn_secs=0.0,
             ttfb=[SimpleNamespace(duration_secs=0.769)],
             function_calls=[],

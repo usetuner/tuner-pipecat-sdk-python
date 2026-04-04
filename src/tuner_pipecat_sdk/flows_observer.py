@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from pipecat_flows import FlowManager
 
 from ._base import _BaseTunerObserver

@@ -1,7 +1,7 @@
-"""Tests for TunerObserver: plain pipecat pipeline (no pipecat-flows)."""
+"""Tests for TunerFlowsObserver: pipecat-flows pipeline."""
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -9,12 +9,12 @@ pytest.importorskip("pipecat", reason="pipecat not installed")
 
 from pipecat.frames.frames import EndFrame
 
-from tuner_pipecat_sdk.observer import TunerObserver
+from tuner_pipecat_sdk.flows_observer import TunerFlowsObserver
 
 
 @pytest.fixture
 def observer():
-    return TunerObserver(
+    return TunerFlowsObserver(
         api_key="test-key",
         workspace_id=1,
         agent_id="agent-1",
@@ -23,25 +23,22 @@ def observer():
     )
 
 
-@pytest.fixture
-def mock_context():
-    ctx = MagicMock()
-    ctx.messages = [
-        {"role": "user", "content": "Hi"},
-        {"role": "assistant", "content": "Hello"},
-    ]
-    return ctx
-
-
-def test_attach_context_sets_provider(observer, mock_context):
+def test_attach_flow_manager_sets_provider(observer, mock_flow_manager):
     assert observer._context_provider is None
-    observer.attach_context(mock_context)
+    observer.attach_flow_manager(mock_flow_manager)
     assert observer._context_provider is not None
-    assert observer._context_provider() == mock_context.messages
+
+
+def test_context_provider_calls_get_current_context(observer, mock_flow_manager):
+    mock_flow_manager.get_current_context.return_value = [{"role": "user", "content": "Hi"}]
+    observer.attach_flow_manager(mock_flow_manager)
+    result = observer._context_provider()
+    mock_flow_manager.get_current_context.assert_called_once()
+    assert result == [{"role": "user", "content": "Hi"}]
 
 
 @pytest.mark.asyncio
-async def test_flush_without_context_warns_and_does_not_post(observer):
+async def test_flush_without_flow_manager_warns_and_does_not_post(observer):
     assert observer._context_provider is None
     with patch("tuner_pipecat_sdk._base.post_call", new_callable=AsyncMock) as post_mock:
         await observer._flush()
@@ -49,8 +46,12 @@ async def test_flush_without_context_warns_and_does_not_post(observer):
 
 
 @pytest.mark.asyncio
-async def test_flush_with_context_builds_and_posts(observer, mock_context):
-    observer.attach_context(mock_context)
+async def test_flush_with_flow_manager_builds_and_posts(observer, mock_flow_manager):
+    mock_flow_manager.get_current_context.return_value = [
+        {"role": "user", "content": "Hi"},
+        {"role": "assistant", "content": "Bye"},
+    ]
+    observer.attach_flow_manager(mock_flow_manager)
     observer._acc.on_start(0)
     observer._acc.on_call_end(1_000_000_000)
 
@@ -64,8 +65,12 @@ async def test_flush_with_context_builds_and_posts(observer, mock_context):
 
 
 @pytest.mark.asyncio
-async def test_handle_end_frame_triggers_flush(observer, mock_context):
-    observer.attach_context(mock_context)
+async def test_handle_end_frame_triggers_flush(observer, mock_flow_manager):
+    mock_flow_manager.get_current_context.return_value = [
+        {"role": "user", "content": "Hi"},
+        {"role": "assistant", "content": "Hello"},
+    ]
+    observer.attach_flow_manager(mock_flow_manager)
     observer._acc.call_start_abs_ns = 0
     observer._acc.call_end_abs_ns = 1_000_000_000
     observer._acc.done = True

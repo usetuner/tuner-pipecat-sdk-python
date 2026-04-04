@@ -1,4 +1,5 @@
 """End-to-end flow tests: runtime observer flow with accumulator and payload build."""
+
 from types import SimpleNamespace
 
 import pytest
@@ -37,6 +38,8 @@ def test_full_call_flow_single_turn(config):
     # TurnTrackingObserver fires on_turn_started when user begins speaking
     acc.on_turn_started(1, base_ns + 50_000_000)  # user started at +50ms
 
+    acc.on_user_stopped_speaking(base_ns + 100_000_000)  # user stopped at +100ms
+
     # Runtime observer data
     acc.on_latency_measured(0.15)
     acc.on_metrics_frame(SimpleNamespace(data=[_metric("TTSUsageMetricsData", value=11)]))
@@ -50,6 +53,7 @@ def test_full_call_flow_single_turn(config):
             function_calls=[],
         )
     )
+    acc.on_bot_started_speaking(base_ns + 250_000_000)  # bot started at +250ms
     acc.on_bot_stopped(base_ns + 400_000_000)
 
     assert len(acc.latency_turns) == 1
@@ -111,10 +115,15 @@ def test_full_call_flow_with_tool_call(config):
 
     transcript = [
         {"role": "user", "content": "Transfer me to sales"},
-        {"role": "assistant", "tool_calls": [{
-            "id": "tc-1",
-            "function": {"name": "transfer", "arguments": '{"to": "sales"}'},
-        }]},
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "tc-1",
+                    "function": {"name": "transfer", "arguments": '{"to": "sales"}'},
+                }
+            ],
+        },
         {"role": "tool", "tool_call_id": "tc-1", "content": '{"ok": true}'},
         {"role": "assistant", "content": "Transferring you now."},
     ]
