@@ -22,7 +22,7 @@ from pipecat.frames.frames import (
 from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
-from .accumulator import FlowsAccumulator
+from .accumulator import CallAccumulator
 from .client import post_call
 from .config import TunerConfig
 
@@ -64,7 +64,7 @@ class _BaseTunerObserver(FrameProcessor):
             llm_model=llm_model,
             tts_model=tts_model,
         )
-        self._acc = FlowsAccumulator()
+        self._acc = CallAccumulator()
         self._acc.call_start_abs_ns = time.time_ns()
         self._flushed = False
         self._context_provider: Callable[[], list] | None = None

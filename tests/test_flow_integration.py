@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tuner_pipecat_sdk.accumulator import FlowsAccumulator
+from tuner_pipecat_sdk.accumulator import CallAccumulator
 from tuner_pipecat_sdk.config import TunerConfig
 
 
@@ -27,7 +27,7 @@ def config():
 
 def test_full_call_flow_single_turn(config):
     """Simulate one user turn and one bot response; verify payload and transcript."""
-    acc = FlowsAccumulator()
+    acc = CallAccumulator()
     base_ns = 1_000_000_000
 
     # Start
@@ -83,7 +83,7 @@ def test_full_call_flow_single_turn(config):
 
 def test_full_call_flow_with_tool_call(config):
     """Simulate user → tool call → assistant response."""
-    acc = FlowsAccumulator()
+    acc = CallAccumulator()
     base_ns = 2_000_000_000
 
     acc.on_start(base_ns)

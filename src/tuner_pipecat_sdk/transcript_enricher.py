@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 from .models import ToolInfo, TranscriptSegment
 
 if TYPE_CHECKING:
-    from .accumulator import FlowsAccumulator
+    from .accumulator import CallAccumulator
 
 
 def build_segment_metadata(*, interrupted: bool = False, **extra: Any) -> dict[str, Any]:
@@ -27,7 +27,7 @@ def parse_json_value(value: Any) -> Any:
         return value
 
 
-def calculate_user_interruptions(acc: FlowsAccumulator) -> dict[int, bool]:
+def calculate_user_interruptions(acc: CallAccumulator) -> dict[int, bool]:
     """User turn idx is an interruption if the previous turn was_interrupted by the user."""
     interrupted: dict[int, bool] = {}
     for idx in range(len(acc.latency_turns)):
@@ -39,7 +39,7 @@ def calculate_user_interruptions(acc: FlowsAccumulator) -> dict[int, bool]:
     return interrupted
 
 
-def calculate_agent_interruptions(acc: FlowsAccumulator) -> dict[int, bool]:
+def calculate_agent_interruptions(acc: CallAccumulator) -> dict[int, bool]:
     """Agent turn idx was interrupted if TurnTrackingObserver reported was_interrupted=True."""
     interrupted: dict[int, bool] = {}
     for idx, turn in enumerate(acc.latency_turns):
@@ -135,7 +135,7 @@ def find_matching_tool_call(
 
 
 def build_agent_result_segment(
-    acc: FlowsAccumulator,
+    acc: CallAccumulator,
     message: dict[str, Any],
     messages: list[dict[str, Any]],
     tool_turn: Any | None = None,
@@ -176,7 +176,7 @@ def build_agent_result_segment(
 
 
 def build_agent_text_segment(
-    acc: FlowsAccumulator,
+    acc: CallAccumulator,
     messages: list[dict[str, Any]],
     turn: Any | None,
     assistant_index: int,
@@ -245,7 +245,7 @@ def find_spoken_assistant_message_indices(messages: list[dict[str, Any]]) -> set
 
 
 def enrich_transcript(
-    acc: FlowsAccumulator, messages: list[dict[str, Any]]
+    acc: CallAccumulator, messages: list[dict[str, Any]]
 ) -> list[TranscriptSegment]:
     user_interrupted = calculate_user_interruptions(acc)
     agent_interrupted = calculate_agent_interruptions(acc)

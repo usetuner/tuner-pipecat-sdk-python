@@ -1,11 +1,11 @@
 """Accumulator transcript enrichment with tools and transitions."""
 
-from tuner_pipecat_sdk.accumulator import FlowsAccumulator
+from tuner_pipecat_sdk.accumulator import CallAccumulator
 from tuner_pipecat_sdk.models import LatencyTurn
 
 
 def test_enrich_transcript_tool_call_and_result(tuner_config):
-    acc = FlowsAccumulator()
+    acc = CallAccumulator()
     base_ns = 1_000_000_000
     acc.call_start_abs_ns = base_ns
     acc.call_end_abs_ns = base_ns + 2_000_000_000
@@ -75,7 +75,7 @@ def test_enrich_transcript_tool_call_and_result(tuner_config):
 
 
 def test_consecutive_assistant_messages_merged_into_one_segment(tuner_config):
-    acc = FlowsAccumulator()
+    acc = CallAccumulator()
     acc.call_start_abs_ns = 0
     acc.call_end_abs_ns = 2_000_000_000
     acc.done = True
@@ -108,7 +108,7 @@ def test_consecutive_assistant_messages_merged_into_one_segment(tuner_config):
 def test_enrich_transcript_uses_assistant_turn_events_to_skip_ghost_messages(tuner_config):
     # Ghost messages appear in the same user-turn window as the spoken text, before a tool call
     # triggers a node transition. The last plain assistant text in the window is the spoken one.
-    acc = FlowsAccumulator()
+    acc = CallAccumulator()
     acc.call_start_abs_ns = 0
     acc.call_end_abs_ns = 2_000_000_000
     acc.done = True
@@ -148,7 +148,7 @@ def test_enrich_transcript_uses_assistant_turn_events_to_skip_ghost_messages(tun
 
 
 def test_last_plain_assistant_in_window_gets_turn_by_order_not_text(tuner_config):
-    acc = FlowsAccumulator()
+    acc = CallAccumulator()
     acc.call_start_abs_ns = 0
     acc.call_end_abs_ns = 1_000_000_000
     acc.done = True
@@ -180,7 +180,7 @@ def test_last_plain_assistant_in_window_gets_turn_by_order_not_text(tuner_config
 
 
 def test_agent_metadata_node_prefers_bot_node_at_response_time(tuner_config):
-    acc = FlowsAccumulator()
+    acc = CallAccumulator()
     acc.call_start_abs_ns = 0
     acc.call_end_abs_ns = 1_000_000_000
     acc.done = True
@@ -208,7 +208,7 @@ def test_agent_metadata_node_prefers_bot_node_at_response_time(tuner_config):
 
 
 def test_all_trailing_assistant_messages_after_last_user_are_spoken(tuner_config):
-    acc = FlowsAccumulator()
+    acc = CallAccumulator()
     acc.call_start_abs_ns = 0
     acc.call_end_abs_ns = 2_000_000_000
     acc.done = True
@@ -240,7 +240,7 @@ def test_all_trailing_assistant_messages_after_last_user_are_spoken(tuner_config
 
 def test_agent_result_uses_registry_completion_when_available(tuner_config):
     """agent_result.start_ms uses the registry completion time, not invocation_ms."""
-    acc = FlowsAccumulator()
+    acc = CallAccumulator()
     base_ns = 1_000_000_000
     acc.call_start_abs_ns = base_ns
     acc.call_end_abs_ns = base_ns + 2_000_000_000
@@ -269,7 +269,7 @@ def test_agent_result_uses_registry_completion_when_available(tuner_config):
 
 def test_parallel_same_name_tools_use_distinct_invocation_ms_by_id(tuner_config):
     """Two add_topping calls with different tool_call_ids get distinct invocation times."""
-    acc = FlowsAccumulator()
+    acc = CallAccumulator()
     base_ns = 1_000_000_000
     acc.call_start_abs_ns = base_ns
     acc.call_end_abs_ns = base_ns + 2_000_000_000
@@ -306,7 +306,7 @@ def test_parallel_same_name_tools_use_distinct_invocation_ms_by_id(tuner_config)
 
 def test_agent_result_without_registry_completion_is_zero(tuner_config):
     """Without registry completion, agent_result timing stays unset (0)."""
-    acc = FlowsAccumulator()
+    acc = CallAccumulator()
     base_ns = 1_000_000_000
     acc.call_start_abs_ns = base_ns
     acc.call_end_abs_ns = base_ns + 2_000_000_000
@@ -328,7 +328,7 @@ def test_agent_result_without_registry_completion_is_zero(tuner_config):
 
 
 def test_payload_monotonic_guard_corrects_agent_end_before_start(tuner_config):
-    acc = FlowsAccumulator()
+    acc = CallAccumulator()
     acc.call_start_abs_ns = 0
     acc.call_end_abs_ns = 10_000_000_000
     acc.done = True

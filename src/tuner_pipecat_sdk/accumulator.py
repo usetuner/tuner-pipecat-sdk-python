@@ -12,7 +12,7 @@ from .tool_timing_registry import ToolTimingRegistry
 
 
 @dataclass
-class FlowsAccumulator:
+class CallAccumulator:
     """Collects runtime events and produces a final call payload."""
 
     # call-level timing

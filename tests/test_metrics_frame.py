@@ -1,8 +1,8 @@
-"""Tests for FlowsAccumulator.on_metrics_frame."""
+"""Tests for CallAccumulator.on_metrics_frame."""
 
 from types import SimpleNamespace
 
-from tuner_pipecat_sdk.accumulator import FlowsAccumulator
+from tuner_pipecat_sdk.accumulator import CallAccumulator
 
 
 def _metric(cls_name, **kwargs):
@@ -29,48 +29,48 @@ def _frame(*data_items):
 
 
 def test_llm_usage_accumulates():
-    acc = FlowsAccumulator()
+    acc = CallAccumulator()
     acc.on_metrics_frame(_frame(_llm_usage(100)))
     acc.on_metrics_frame(_frame(_llm_usage(50)))
     assert acc.get_total_llm_tokens() == 150
 
 
 def test_tts_usage_accumulates():
-    acc = FlowsAccumulator()
+    acc = CallAccumulator()
     acc.on_metrics_frame(_frame(_tts_usage(200)))
     acc.on_metrics_frame(_frame(_tts_usage(75)))
     assert acc.get_total_tts_characters() == 275
 
 
 def test_processing_llm_processor():
-    acc = FlowsAccumulator()
+    acc = CallAccumulator()
     acc.on_metrics_frame(_frame(_processing("OpenAILLMService", 1.2)))
     assert acc._pending_pipecat_llm_processing_s == 1.2
     assert acc._pending_pipecat_tts_processing_s == 0.0
 
 
 def test_processing_tts_processor():
-    acc = FlowsAccumulator()
+    acc = CallAccumulator()
     acc.on_metrics_frame(_frame(_processing("ElevenLabsTTSService", 0.8)))
     assert acc._pending_pipecat_tts_processing_s == 0.8
     assert acc._pending_pipecat_llm_processing_s == 0.0
 
 
 def test_empty_frame_no_crash():
-    acc = FlowsAccumulator()
+    acc = CallAccumulator()
     acc.on_metrics_frame(_frame())
     assert acc.get_total_llm_tokens() == 0
     assert acc.get_total_tts_characters() == 0
 
 
 def test_frame_without_data_attribute_no_crash():
-    acc = FlowsAccumulator()
+    acc = CallAccumulator()
     acc.on_metrics_frame(SimpleNamespace())  # no 'data' attribute
     assert acc.get_total_llm_tokens() == 0
 
 
 def test_multiple_metric_types_in_one_frame():
-    acc = FlowsAccumulator()
+    acc = CallAccumulator()
     acc.on_metrics_frame(_frame(
         _llm_usage(300),
         _tts_usage(120),
@@ -82,7 +82,7 @@ def test_multiple_metric_types_in_one_frame():
 
 
 def test_unknown_metric_type_no_state_change():
-    acc = FlowsAccumulator()
+    acc = CallAccumulator()
     unknown = _metric("UnknownMetricsData")
     acc.on_metrics_frame(_frame(unknown))
     assert acc.get_total_llm_tokens() == 0

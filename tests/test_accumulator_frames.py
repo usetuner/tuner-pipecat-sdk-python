@@ -3,12 +3,12 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from tuner_pipecat_sdk.accumulator import FlowsAccumulator
+from tuner_pipecat_sdk.accumulator import CallAccumulator
 from tuner_pipecat_sdk.models import LatencyTurn
 
 
 def test_on_bot_stopped_updates_last_turn():
-    acc = FlowsAccumulator()
+    acc = CallAccumulator()
     acc.call_start_abs_ns = 1
     acc.latency_turns = [
         LatencyTurn(
@@ -29,7 +29,7 @@ def test_on_bot_stopped_updates_last_turn():
 
 
 def test_on_bot_stopped_no_op_when_done():
-    acc = FlowsAccumulator()
+    acc = CallAccumulator()
     acc.done = True
     acc.latency_turns = [
         LatencyTurn(
@@ -49,7 +49,7 @@ def test_on_bot_stopped_no_op_when_done():
 
 
 def test_on_function_call_in_progress_records_invocation_in_registry():
-    acc = FlowsAccumulator()
+    acc = CallAccumulator()
     acc.call_start_abs_ns = 1_000_000_000
     frame = MagicMock(function_name="add_topping", arguments={}, tool_call_id="tc-xyz")
     acc.on_function_call_in_progress(frame, 1_000_000_000 + 200_000_000)
@@ -57,14 +57,14 @@ def test_on_function_call_in_progress_records_invocation_in_registry():
 
 
 def test_on_function_call_result_records_completion_in_registry():
-    acc = FlowsAccumulator()
+    acc = CallAccumulator()
     acc.call_start_abs_ns = 1_000_000_000
     acc.on_function_call_result("call_abc", 1_000_000_000 + 250_000_000)
     assert acc.get_tool_completion_ms("call_abc") == 250
 
 
 def test_usage_counter_accessors():
-    acc = FlowsAccumulator()
+    acc = CallAccumulator()
     llm_metric = type("LLMUsageMetricsData", (), {"value": SimpleNamespace(total_tokens=42)})
     tts_metric = type("TTSUsageMetricsData", (), {"value": 99})
     acc.on_metrics_frame(SimpleNamespace(data=[llm_metric(), tts_metric()]))
@@ -73,7 +73,7 @@ def test_usage_counter_accessors():
 
 
 def test_on_turn_started_creates_latency_turn():
-    acc = FlowsAccumulator()
+    acc = CallAccumulator()
     acc.call_start_abs_ns = 1_000_000_000
     acc.on_turn_started(1, 1_000_000_000 + 400_000_000)
     assert len(acc.latency_turns) == 1
@@ -86,7 +86,7 @@ def test_on_turn_started_creates_latency_turn():
 
 
 def test_on_bot_started_speaking_sets_bot_started_ms():
-    acc = FlowsAccumulator()
+    acc = CallAccumulator()
     base_ns = 1_000_000_000
     acc.call_start_abs_ns = base_ns
     acc.on_turn_started(1, base_ns + 100_000_000)
@@ -95,7 +95,7 @@ def test_on_bot_started_speaking_sets_bot_started_ms():
 
 
 def test_on_turn_ended_sets_was_interrupted():
-    acc = FlowsAccumulator()
+    acc = CallAccumulator()
     acc.call_start_abs_ns = 1_000_000_000
     acc.on_turn_started(1, 1_000_000_000 + 100_000_000)
     acc.on_turn_ended(1, was_interrupted=True)
@@ -104,7 +104,7 @@ def test_on_turn_ended_sets_was_interrupted():
 
 
 def test_on_latency_breakdown_enriches_existing_turn():
-    acc = FlowsAccumulator()
+    acc = CallAccumulator()
     acc.call_start_abs_ns = 1_000_000_000
     acc._pending_pipecat_llm_processing_s = 0.03
     acc._pending_pipecat_tts_processing_s = 0.07
@@ -132,7 +132,7 @@ def test_on_latency_breakdown_enriches_existing_turn():
 
 
 def test_on_latency_breakdown_keeps_bot_started_unset_when_latency_missing():
-    acc = FlowsAccumulator()
+    acc = CallAccumulator()
     acc.call_start_abs_ns = 1_000_000_000
     acc.on_turn_started(1, 1_000_000_000 + 200_000_000)
     breakdown = SimpleNamespace(
@@ -148,7 +148,7 @@ def test_on_latency_breakdown_keeps_bot_started_unset_when_latency_missing():
 
 def test_on_latency_breakdown_preserves_user_started_ms_when_user_turn_start_time_missing():
     """Keep on_turn_started timestamp when breakdown start time is missing."""
-    acc = FlowsAccumulator()
+    acc = CallAccumulator()
     acc.call_start_abs_ns = 1_000_000_000
     acc.on_turn_started(1, 1_000_000_000 + 500_000_000)  # user_started_ms = 500
     acc.on_latency_measured(0.2)
@@ -170,7 +170,7 @@ def test_on_latency_breakdown_preserves_user_started_ms_when_user_turn_start_tim
 def test_on_latency_breakdown_skips_when_no_active_turn(caplog):
     """on_latency_breakdown logs a warning and skips when no turn is active."""
     import logging
-    acc = FlowsAccumulator()
+    acc = CallAccumulator()
     acc.call_start_abs_ns = 1_000_000_000
     breakdown = SimpleNamespace(
         user_turn_start_time=1.5,
@@ -192,7 +192,7 @@ def test_on_latency_breakdown_skips_overwrite_for_initial_proactive_greeting():
     so the subsequent real-turn breakdown gets the correct value.
     """
     base_ns = 1_000_000_000  # 1.0s unix time
-    acc = FlowsAccumulator()
+    acc = CallAccumulator()
     acc.call_start_abs_ns = base_ns
 
     # on_latency_measured fires for the initial proactive greeting (1132ms latency)
@@ -229,7 +229,7 @@ def test_on_latency_breakdown_skips_overwrite_for_initial_proactive_greeting():
 
 
 def test_on_call_end_marks_done_without_creating_turns():
-    acc = FlowsAccumulator()
+    acc = CallAccumulator()
     acc.call_start_abs_ns = 1_000_000_000
     assert not acc.latency_turns
     acc.on_call_end(1_000_000_000 + 500_000_000)
