@@ -72,7 +72,8 @@ class FlowsObserver(FrameProcessor):
         self._acc.call_start_abs_ns = time.time_ns()  # anchor timeline before pipeline starts
         self._latency_observer = UserBotLatencyObserver()
         self._flushed = False
-        self._flow_manager: Any | None = None
+        self._context_provider: Any | None = None
+
 
         @self._latency_observer.event_handler("on_latency_measured")
         async def _on_latency_measured(_observer: Any, latency: float) -> None:
@@ -82,8 +83,8 @@ class FlowsObserver(FrameProcessor):
         async def _on_latency_breakdown(_observer: Any, breakdown: Any) -> None:
             self._acc.on_latency_breakdown(breakdown)
 
-    def attach_flow_manager(self, flow_manager: Any) -> None:
-        self._flow_manager = flow_manager
+    def attach_context_provider(self, provider: Any) -> None:
+        self._context_provider = provider
 
     def attach_turn_tracking_observer(self, turn_tracker: Any) -> None:
         """Wire TurnTrackingObserver turn lifecycle events to the accumulator."""
@@ -152,10 +153,10 @@ class FlowsObserver(FrameProcessor):
                 asyncio.create_task(self._flush())
 
     async def _flush(self) -> None:
-        if self._flow_manager is None:
-            logger.warning("[flows-tuner] no flow_manager attached — skipping flush")
+        if self._context_provider is None:
+            logger.warning("[flows-tuner] no context_provider attached — skipping flush")
             return
-        transcript = self._flow_manager.get_current_context()
+        transcript = self._context_provider()
         if self._config.debug:
             logger.debug("[flows-tuner] transcript ({} messages): {}", len(transcript), transcript)
         payload = self._acc.build_payload(self._config, transcript)
