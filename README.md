@@ -1,6 +1,6 @@
 # tuner-pipecat-sdk
 
-`tuner-pipecat-sdk` is a lightweight observer SDK for [`pipecat-ai`](https://github.com/pipecat-ai) and [`pipecat-ai-flows`](https://github.com/pipecat-ai/pipecat-flows).
+`tuner-pipecat-sdk` is a lightweight observer SDK for [`pipecat`](https://github.com/pipecat-ai/pipecat) and [`pipecat-flows`](https://github.com/pipecat-ai/pipecat-flows).
 It captures flow transitions, latency signals, transcript segments, and usage metadata,
 then sends a structured `CallPayload` to the Tuner API when a call ends.
 
