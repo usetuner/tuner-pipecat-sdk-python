@@ -1,9 +1,8 @@
 # tuner-pipecat-sdk
 
-`tuner-pipecat-sdk` is a lightweight observer SDK for [`pipecat-flows`](https://github.com/pipecat-ai/pipecat-flows).
+`tuner-pipecat-sdk` is a lightweight observer SDK for [`pipecat-ai`](https://github.com/pipecat-ai) and [`pipecat-ai-flows`](https://github.com/pipecat-ai/pipecat-flows).
 It captures flow transitions, latency signals, transcript segments, and usage metadata,
 then sends a structured `CallPayload` to the Tuner API when a call ends.
-
 
 
 ## Requirements
@@ -20,6 +19,40 @@ pip install tuner-pipecat-sdk
 
 
 ## Quick Start Example
+---
+
+## Plain Pipecat — `Observer`
+
+Use `Observer` when your pipeline manages context directly via `OpenAILLMContext`.
+
+```python
+import uuid
+from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
+from tuner_pipecat_sdk import Observer
+
+context = OpenAILLMContext(messages=[])
+
+observer = Observer(
+    api_key="YOUR_TUNER_API_KEY",
+    workspace_id=42,
+    agent_id="my-agent",
+    call_id=str(uuid.uuid4()),
+    base_url="https://api.usetuner.ai",
+    asr_model="deepgram/nova-3",
+    llm_model="gpt-4o-mini",
+    tts_model="cartesia/sonic",
+)
+
+# Required: attach the LLM context before running the pipeline
+observer.attach_context(context)
+observer.attach_turn_tracking_observer(turn_tracker)
+```
+
+---
+
+## Pipecat Flows — `FlowsObserver`
+
+Use `FlowsObserver` when your pipeline is managed by `pipecat-flows` and a `FlowManager`.
 
 ```python
 import uuid
@@ -30,7 +63,7 @@ observer = FlowsObserver(
     workspace_id=42,
     agent_id="my-agent",
     call_id=str(uuid.uuid4()),
-    base_url="https://app.usetuner.ai",
+    base_url="https://api.usetuner.ai",
     asr_model="deepgram/nova-3",
     llm_model="gpt-4o-mini",
     tts_model="cartesia/sonic",
@@ -41,8 +74,11 @@ observer.attach_flow_manager(flow_manager)
 observer.attach_turn_tracking_observer(turn_tracker)
 ```
 
+---
 
-Place the observer after TTS in your pipeline:
+## Pipeline Setup
+
+Place the observer after TTS in your pipeline (same for both observer types):
 
 ```python
 Pipeline([
@@ -79,7 +115,8 @@ task = PipelineTask(
 Without these flags the observer will log warnings and LLM/TTS metric fields will be absent from the payload.
 For more example check https://github.com/usetuner/tuner-pipecat-sdk-python/tree/main/examples
 
-## FlowsObserver Parameters
+## Observer Parameters
+Both `Observer` and `FlowsObserver` accept the same constructor parameters:
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -97,7 +134,8 @@ For more example check https://github.com/usetuner/tuner-pipecat-sdk-python/tree
 
 ## Public API
 
-- `tuner_pipecat_sdk.FlowsObserver`
+- `tuner_pipecat_sdk.Observer` — for plain pipecat pipelines
+- `tuner_pipecat_sdk.FlowsObserver` — for pipecat-flows pipelines
 - `tuner_pipecat_sdk.TunerConfig`
 
 Payload and transcript schemas are available under `tuner_pipecat_sdk.models`.
