@@ -1,4 +1,4 @@
-"""Tests for TunerFlowsObserver: pipecat-flows pipeline."""
+"""Tests for FlowsObserver: pipecat-flows pipeline."""
 
 import asyncio
 from unittest.mock import AsyncMock, patch
@@ -9,12 +9,12 @@ pytest.importorskip("pipecat", reason="pipecat not installed")
 
 from pipecat.frames.frames import EndFrame
 
-from tuner_pipecat_sdk.flows_observer import TunerFlowsObserver
+from tuner_pipecat_sdk.flows_observer import FlowsObserver
 
 
 @pytest.fixture
 def observer():
-    return TunerFlowsObserver(
+    return FlowsObserver(
         api_key="test-key",
         workspace_id=1,
         agent_id="agent-1",

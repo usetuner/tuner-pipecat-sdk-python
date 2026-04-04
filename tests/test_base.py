@@ -1,4 +1,4 @@
-"""Tests for _BaseTunerObserver: shared frame routing and accumulator wiring."""
+"""Tests for _BaseObserver: shared frame routing and accumulator wiring."""
 
 from typing import Any
 from unittest.mock import patch
@@ -13,17 +13,17 @@ from pipecat.frames.frames import (
     StartFrame,
 )
 
-from tuner_pipecat_sdk.observer import TunerObserver
+from tuner_pipecat_sdk.observer import Observer
 
 # ---------------------------------------------------------------------------
-# Use TunerObserver as the concrete vehicle for testing base behaviour.
-# All assertions here apply equally to TunerFlowsObserver.
+# Use Observer as the concrete vehicle for testing base behaviour.
+# All assertions here apply equally to FlowsObserver.
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture
 def observer():
-    return TunerObserver(
+    return Observer(
         api_key="test-key",
         workspace_id=1,
         agent_id="agent-1",
@@ -34,7 +34,7 @@ def observer():
 
 
 def test_observer_init():
-    o = TunerObserver(api_key="k", workspace_id=2, agent_id="a", call_id="c")
+    o = Observer(api_key="k", workspace_id=2, agent_id="a", call_id="c")
     assert o._config.workspace_id == 2
     assert o._config.base_url == "http://localhost:8000"
     assert o._acc is not None

@@ -28,7 +28,7 @@ from .client import post_call
 from .config import TunerConfig
 
 
-class _BaseTunerObserver(FrameProcessor):
+class _BaseObserver(FrameProcessor):
     """
     Shared frame-processing logic for all Tuner observers.
 

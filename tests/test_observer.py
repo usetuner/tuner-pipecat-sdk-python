@@ -1,4 +1,4 @@
-"""Tests for TunerObserver: plain pipecat pipeline (no pipecat-flows)."""
+"""Tests for Observer: plain pipecat pipeline (no pipecat-flows)."""
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -9,12 +9,12 @@ pytest.importorskip("pipecat", reason="pipecat not installed")
 
 from pipecat.frames.frames import EndFrame
 
-from tuner_pipecat_sdk.observer import TunerObserver
+from tuner_pipecat_sdk.observer import Observer
 
 
 @pytest.fixture
 def observer():
-    return TunerObserver(
+    return Observer(
         api_key="test-key",
         workspace_id=1,
         agent_id="agent-1",

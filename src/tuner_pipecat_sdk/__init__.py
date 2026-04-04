@@ -6,20 +6,20 @@ from typing import TYPE_CHECKING, Any
 
 from .config import TunerConfig
 
-__all__ = ["TunerObserver", "TunerFlowsObserver", "TunerConfig"]
+__all__ = ["Observer", "FlowsObserver", "TunerConfig"]
 
 if TYPE_CHECKING:
-    from .flows_observer import TunerFlowsObserver
-    from .observer import TunerObserver
+    from .flows_observer import FlowsObserver
+    from .observer import Observer
 
 
 def __getattr__(name: str) -> Any:
-    if name == "TunerObserver":
-        from .observer import TunerObserver
+    if name == "Observer":
+        from .observer import Observer
 
-        return TunerObserver
-    if name == "TunerFlowsObserver":
-        from .flows_observer import TunerFlowsObserver
+        return Observer
+    if name == "FlowsObserver":
+        from .flows_observer import FlowsObserver
 
-        return TunerFlowsObserver
+        return FlowsObserver
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
