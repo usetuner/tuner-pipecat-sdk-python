@@ -346,6 +346,15 @@ class FlowsAccumulator:
         self.done = True
         self.call_end_abs_ns = timestamp_ns
 
+        # If the user was still speaking when the call ended, anchor their
+        # stop time to the call end so the last segment gets a valid timestamp.
+        if self._active_turn_number is not None:
+            idx = self._turn_to_latency_idx.get(self._active_turn_number)
+            if idx is not None and idx < len(self.latency_turns):
+                turn = self.latency_turns[idx]
+                if turn.user_started_ms > 0 and turn.user_stopped_ms == 0:
+                    turn.user_stopped_ms = self._rel_ms(timestamp_ns)
+
     def on_metrics_frame(self, frame: Any) -> None:
         for d in getattr(frame, "data", []):
             cls_name = type(d).__name__
