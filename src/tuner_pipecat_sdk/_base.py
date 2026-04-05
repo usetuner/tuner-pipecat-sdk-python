@@ -19,6 +19,7 @@ from pipecat.frames.frames import (
     StartFrame,
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
+    VADUserStoppedSpeakingFrame,
 )
 from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
@@ -138,12 +139,16 @@ class _BaseObserver(FrameProcessor):
 
         elif isinstance(frame, UserStoppedSpeakingFrame):
             self._acc.on_user_stopped_speaking(timestamp_ns)
+            self._acc.on_user_turn_stopped(timestamp_ns)
 
         elif isinstance(frame, BotStartedSpeakingFrame):
             self._acc.on_bot_started_speaking(timestamp_ns)
 
         elif isinstance(frame, BotStoppedSpeakingFrame):
             self._acc.on_bot_stopped(timestamp_ns)
+
+        elif isinstance(frame, VADUserStoppedSpeakingFrame):
+            self._acc.on_vad_stopped(timestamp_ns)
 
         elif isinstance(frame, CancelFrame | EndFrame):
             self._acc.on_call_end(timestamp_ns)

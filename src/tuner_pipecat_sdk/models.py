@@ -15,11 +15,13 @@ class LatencyTurn(BaseModel):
     ttfb_ms: int | None = None
     llm_ms: int | None = None
     tts_ms: int | None = None
+    stt_ms: int | None = None
     bot_started_ms: int = 0
     user_stopped_ms: int = 0
     user_started_ms: int = 0
     bot_stopped_ms: int | None = None
     was_interrupted: bool | None = None
+    vad_stopped_ns: int | None = None
 
 
 class TranscriptWord(BaseModel):

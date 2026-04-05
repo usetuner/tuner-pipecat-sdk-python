@@ -90,6 +90,7 @@ def build_user_segment(
             interrupted=user_interrupted.get(user_index, False),
             node=turn.node if turn else None,
             turn_index=turn.turn_index if turn else None,
+            stt_node_ttfb=turn.stt_ms if turn else None,
             fragments=len(grouped_messages) if len(grouped_messages) > 1 else None,
         ),
     )

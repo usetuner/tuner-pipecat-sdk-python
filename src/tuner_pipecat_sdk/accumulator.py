@@ -277,6 +277,31 @@ class CallAccumulator:
             turn.bot_started_ms = self._rel_ms(timestamp_ns)
         self._bot_turn_idx = idx
 
+    def on_vad_stopped(self, timestamp_ns: int) -> None:
+        if self._active_turn_number is None:
+            logger.warning("[tuner] on_vad_stopped: no active turn")
+            return
+        idx = self._turn_to_latency_idx.get(self._active_turn_number)
+        if idx is None or idx >= len(self.latency_turns):
+            logger.warning("[tuner] on_vad_stopped: active turn not in latency_turns")
+            return
+        self.latency_turns[idx].vad_stopped_ns = timestamp_ns
+
+    def on_user_turn_stopped(self, timestamp_ns: int) -> None:
+        if self._active_turn_number is None:
+            logger.warning("[tuner] on_user_turn_stopped: no active turn")
+            return
+        idx = self._turn_to_latency_idx.get(self._active_turn_number)
+        if idx is None or idx >= len(self.latency_turns):
+            logger.warning("[tuner] on_user_turn_stopped: active turn not in latency_turns")
+            return
+        turn = self.latency_turns[idx]
+        if turn.vad_stopped_ns is None:
+            logger.warning("[tuner] on_user_turn_stopped: vad_stopped_ns not set on turn {}", idx)
+            return
+        gap_ms = (timestamp_ns - turn.vad_stopped_ns) // 1_000_000
+        turn.stt_ms = max(0, gap_ms)
+
     def on_latency_measured(self, latency_secs: float) -> None:
         self._pending_latency_ms_queue.append(max(0, int(latency_secs * 1000)))
 
@@ -369,7 +394,7 @@ class CallAccumulator:
                 if "tts" in processor:
                     self._pending_pipecat_tts_processing_s = val
                 else:
-                    self._pending_pipecat_llm_processing_s = val
+                    self._pending_pipecat_llm_processing_s += val
 
     def build_payload(self, config: Any, transcript: list[dict[str, Any]]) -> CallPayload:
         return build_payload(self, config, transcript)
