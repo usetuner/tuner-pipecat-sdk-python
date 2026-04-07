@@ -231,7 +231,7 @@ class CallAccumulator:
             self._bot_turn_idx = None
         else:
             logger.warning(
-                "[flows-tuner] bot_stopped with no active bot turn index; ignoring event"
+                "[tuner] bot_stopped with no active bot turn index; ignoring event"
             )
 
     def on_function_call_in_progress(self, frame: Any, timestamp_ns: int) -> None:
@@ -330,7 +330,7 @@ class CallAccumulator:
     def on_latency_breakdown(self, breakdown: Any) -> None:
         if self._pending_breakdown_latency_idx is None:
             logger.warning(
-                "[flows-tuner] on_latency_breakdown fired with no pending breakdown idx — skipping"
+                "[tuner] on_latency_breakdown fired with no pending breakdown idx — skipping"
             )
             return
         idx = self._pending_breakdown_latency_idx
@@ -338,7 +338,7 @@ class CallAccumulator:
 
         if idx >= len(self.latency_turns):
             logger.warning(
-                "[flows-tuner] on_latency_breakdown: idx out of range — skipping"
+                "[tuner] on_latency_breakdown: idx out of range — skipping"
             )
             return
 
