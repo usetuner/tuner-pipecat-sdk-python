@@ -2,17 +2,18 @@
 Nova Clinic Voice Assistant — Pipecat + Tuner Demo
 """
 
-import os
-import uuid
 import json
+import os
 import random
-import logging
+import uuid
 
 from dotenv import load_dotenv
 from loguru import logger
-
+from pipecat.adapters.schemas.function_schema import FunctionSchema
+from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.audio.vad.silero import SileroVADAnalyzer
-from pipecat.frames.frames import EndTaskFrame, LLMRunFrame, TTSSpeakFrame
+from pipecat.frames.frames import EndTaskFrame, LLMRunFrame
+from pipecat.observers.turn_tracking_observer import TurnTrackingObserver
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
@@ -22,16 +23,13 @@ from pipecat.processors.aggregators.llm_response_universal import (
     LLMUserAggregatorParams,
 )
 from pipecat.processors.frame_processor import FrameDirection
-from pipecat.observers.turn_tracking_observer import TurnTrackingObserver
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
-from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.cartesia.tts import CartesiaTTSService
+from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.daily.transport import DailyParams
-from pipecat.adapters.schemas.function_schema import FunctionSchema
-from pipecat.adapters.schemas.tools_schema import ToolsSchema
 
 from tuner_pipecat_sdk import Observer
 
@@ -105,6 +103,7 @@ with open(_DATA_PATH) as f:
 # Tools
 # ---------------------------------------------------------------------------
 
+
 async def check_availability(params):
     """Check available appointment slots for a doctor on a given date."""
     date = params.arguments.get("date")
@@ -120,7 +119,9 @@ async def check_availability(params):
     logger.info(f"Found doctor_id: {doctor_id}")
 
     if doctor_id:
-        logger.info(f"Dates available for {doctor_id}: {list(_DB['availability'].get(doctor_id, {}).keys())}")
+        logger.info(
+            f"Dates available for {doctor_id}: {list(_DB['availability'].get(doctor_id, {}).keys())}"
+        )
 
     if not doctor_id:
         result = {
@@ -230,6 +231,7 @@ async def end_call(params):
 # ---------------------------------------------------------------------------
 # Bot entrypoint
 # ---------------------------------------------------------------------------
+
 
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     logger.info("Starting Nova Clinic assistant")
@@ -348,7 +350,10 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     async def on_client_connected(transport, client):
         logger.info("Client connected")
         context.add_message(
-            {"role": "developer", "content": "Greet the caller warmly and ask how you can help them today."}
+            {
+                "role": "developer",
+                "content": "Greet the caller warmly and ask how you can help them today.",
+            }
         )
         await task.queue_frames([LLMRunFrame()])
 
@@ -379,4 +384,5 @@ async def bot(runner_args: RunnerArguments):
 
 if __name__ == "__main__":
     from pipecat.runner.run import main
+
     main()

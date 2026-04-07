@@ -184,7 +184,7 @@ class CallAccumulator:
         # Record when the user started cutting in on the BOT's current turn.
         if self._bot_turn_idx is not None and self._bot_turn_idx < len(self.latency_turns):
             self.latency_turns[self._bot_turn_idx].interrupted_at_ms = self._rel_ms(timestamp_ns)
-            
+
         if self._active_turn_number is None:
             return
         idx = self._turn_to_latency_idx.get(self._active_turn_number)
@@ -230,9 +230,7 @@ class CallAccumulator:
             self.latency_turns[self._bot_turn_idx].bot_stopped_ms = bot_stopped_ms
             self._bot_turn_idx = None
         else:
-            logger.warning(
-                "[tuner] bot_stopped with no active bot turn index; ignoring event"
-            )
+            logger.warning("[tuner] bot_stopped with no active bot turn index; ignoring event")
 
     def on_function_call_in_progress(self, frame: Any, timestamp_ns: int) -> None:
         tool_call_id = getattr(frame, "tool_call_id", None)
@@ -337,9 +335,7 @@ class CallAccumulator:
         self._pending_breakdown_latency_idx = None  # consume immediately
 
         if idx >= len(self.latency_turns):
-            logger.warning(
-                "[tuner] on_latency_breakdown: idx out of range — skipping"
-            )
+            logger.warning("[tuner] on_latency_breakdown: idx out of range — skipping")
             return
 
         turn = self.latency_turns[idx]
