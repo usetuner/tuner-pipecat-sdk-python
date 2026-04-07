@@ -20,8 +20,10 @@ class LatencyTurn(BaseModel):
     user_stopped_ms: int = 0
     user_started_ms: int = 0
     bot_stopped_ms: int | None = None
-    was_interrupted: bool | None = None
     vad_stopped_ns: int | None = None
+    interrupted_at_ms: int | None = None
+    was_interrupted: bool | None = None
+    llm_completed: bool = False
 
 
 class TranscriptWord(BaseModel):

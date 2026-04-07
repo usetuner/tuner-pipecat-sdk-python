@@ -199,6 +199,7 @@ def build_agent_text_segment(
             tts_node_ttfb=turn.ttfb_ms if turn else None,
             node=node,
             turn_index=turn.turn_index if turn else None,
+            interrupted_at_ms=turn.interrupted_at_ms if turn else None,
         ),
     )
 

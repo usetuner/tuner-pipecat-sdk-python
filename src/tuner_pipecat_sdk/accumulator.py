@@ -66,6 +66,10 @@ class CallAccumulator:
     # Processed retroactively in on_start once the reference timestamp is known.
     _pending_turn_starts: list[tuple[int, int]] = field(default_factory=list, repr=False)
 
+    # Stable turn index for on_latency_breakdown, set when bot starts speaking.
+    # Decoupled from _active_turn_number so interruptions don't corrupt the target.
+    _pending_breakdown_latency_idx: int | None = field(default=None, repr=False)
+
     # misc
     done: bool = False
 
@@ -138,7 +142,7 @@ class CallAccumulator:
             idx = self._current_user_turn_latency_idx
             if idx < len(self.latency_turns):
                 current = self.latency_turns[idx]
-                if current.bot_started_ms == 0:
+                if current.bot_started_ms == 0 and not current.llm_completed:
                     if current.user_started_ms == 0:
                         current.user_started_ms = started_ms
                     else:
@@ -176,6 +180,11 @@ class CallAccumulator:
 
     def on_user_started_speaking(self, timestamp_ns: int) -> None:
         """Use frame timestamp as the authoritative user-start anchor for the active turn."""
+        # If bot is currently speaking, this is an interruption.
+        # Record when the user started cutting in on the BOT's current turn.
+        if self._bot_turn_idx is not None and self._bot_turn_idx < len(self.latency_turns):
+            self.latency_turns[self._bot_turn_idx].interrupted_at_ms = self._rel_ms(timestamp_ns)
+            
         if self._active_turn_number is None:
             return
         idx = self._turn_to_latency_idx.get(self._active_turn_number)
@@ -261,6 +270,18 @@ class CallAccumulator:
             and self._current_user_turn_latency_idx < len(self.latency_turns)
         ):
             idx = self._current_user_turn_latency_idx
+        elif not self.latency_turns:
+            # No user has spoken yet — proactive bot greeting.
+            # Create the greeting turn here so it gets real bot_started_ms
+            # and on_latency_breakdown can populate ttfb/llm/tts metrics on it.
+            # This ensures latency_offset=1 in enrich_transcript and keeps
+            # all downstream tool/user turn alignment correct.
+            turn = LatencyTurn(turn_index=0, is_proactive=True)
+            turn.bot_started_ms = self._rel_ms(timestamp_ns)
+            self.latency_turns.append(turn)
+            self._bot_turn_idx = 0
+            self._pending_breakdown_latency_idx = 0
+            return
         else:
             return
 
@@ -276,6 +297,7 @@ class CallAccumulator:
         if turn.bot_started_ms == 0:
             turn.bot_started_ms = self._rel_ms(timestamp_ns)
         self._bot_turn_idx = idx
+        self._pending_breakdown_latency_idx = idx
 
     def on_vad_stopped(self, timestamp_ns: int) -> None:
         if self._active_turn_number is None:
@@ -306,15 +328,17 @@ class CallAccumulator:
         self._pending_latency_ms_queue.append(max(0, int(latency_secs * 1000)))
 
     def on_latency_breakdown(self, breakdown: Any) -> None:
-        if self._active_turn_number is None:
+        if self._pending_breakdown_latency_idx is None:
             logger.warning(
-                "[flows-tuner] on_latency_breakdown fired with no active turn — skipping"
+                "[flows-tuner] on_latency_breakdown fired with no pending breakdown idx — skipping"
             )
             return
-        idx = self._turn_to_latency_idx.get(self._active_turn_number)
-        if idx is None or idx >= len(self.latency_turns):
+        idx = self._pending_breakdown_latency_idx
+        self._pending_breakdown_latency_idx = None  # consume immediately
+
+        if idx >= len(self.latency_turns):
             logger.warning(
-                "[flows-tuner] on_latency_breakdown: active turn mapping invalid — skipping"
+                "[flows-tuner] on_latency_breakdown: idx out of range — skipping"
             )
             return
 
@@ -324,23 +348,17 @@ class CallAccumulator:
 
         is_real_user_turn = True
         if user_start_abs is None:
-            # No user speech before this breakdown → proactive bot greeting.
-            # UserBotLatencyObserver sends user_turn_start_time=None when the bot
-            # speaks first without any prior user utterance.
             is_real_user_turn = False
             turn.is_proactive = True
         else:
             computed_started_ms = self._abs_to_rel_ms(user_start_abs)
             if computed_started_ms == 0:
-                # user_turn_start_time ≈ call start → initial proactive greeting breakdown.
-                # Do not derive bot_started_ms from this latency; on_bot_started_speaking
-                # already captured the correct bot start from the BotStartedSpeakingFrame.
                 is_real_user_turn = False
                 turn.is_proactive = True
 
         if self._pending_latency_ms_queue:
             latency_ms = self._pending_latency_ms_queue.popleft()
-            if is_real_user_turn:
+            if is_real_user_turn and not turn.interrupted_at_ms:
                 turn.bot_started_ms = turn.user_stopped_ms + latency_ms
 
         ttfb_ms: int | None = None
@@ -364,6 +382,7 @@ class CallAccumulator:
 
         self._pending_pipecat_llm_processing_s = 0.0
         self._pending_pipecat_tts_processing_s = 0.0
+        turn.llm_completed = True
 
     def on_call_end(self, timestamp_ns: int) -> None:
         if self.done:
@@ -395,6 +414,14 @@ class CallAccumulator:
                     self._pending_pipecat_tts_processing_s = val
                 else:
                     self._pending_pipecat_llm_processing_s += val
+                    # LLM finished processing — mark current turn as llm_completed
+                    # so the collapse guard knows TTS was supposed to fire,
+                    # preventing user follow-up messages from collapsing into
+                    # the failed turn when bot_started_ms stays 0.
+                    if self._current_user_turn_latency_idx is not None:
+                        idx = self._current_user_turn_latency_idx
+                        if idx < len(self.latency_turns):
+                            self.latency_turns[idx].llm_completed = True
 
     def build_payload(self, config: Any, transcript: list[dict[str, Any]]) -> CallPayload:
         return build_payload(self, config, transcript)
