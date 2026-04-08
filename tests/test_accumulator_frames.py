@@ -252,6 +252,7 @@ def test_on_user_started_speaking_records_interrupted_at_ms():
     acc.on_user_started_speaking(1_000_000_000 + 450_000_000)
     assert acc.latency_turns[0].interrupted_at_ms == 450
 
+
 def test_on_turn_started_collapses_when_llm_not_completed():
     # Second user fragment before bot responds — should collapse into same turn
     acc = CallAccumulator()
@@ -260,6 +261,7 @@ def test_on_turn_started_collapses_when_llm_not_completed():
     acc.on_turn_started(2, 1_000_000_000 + 300_000_000)  # fragment, bot hasn't responded
     assert len(acc.latency_turns) == 1
     assert acc.latency_turns[0].user_started_ms == 200  # keeps earliest
+
 
 def test_on_turn_started_opens_new_turn_when_llm_completed():
     # llm_completed=True means bot already processed — should NOT collapse
@@ -270,12 +272,14 @@ def test_on_turn_started_opens_new_turn_when_llm_completed():
     acc.on_turn_started(2, 1_000_000_000 + 500_000_000)
     assert len(acc.latency_turns) == 2
 
+
 def test_on_vad_stopped_records_timestamp():
     acc = CallAccumulator()
     acc.call_start_abs_ns = 1_000_000_000
     acc.on_turn_started(1, 1_000_000_000 + 100_000_000)
     acc.on_vad_stopped(1_000_000_000 + 400_000_000)
     assert acc.latency_turns[0].vad_stopped_ns == 1_000_000_000 + 400_000_000
+
 
 def test_on_user_turn_stopped_computes_stt_ms():
     acc = CallAccumulator()
@@ -285,6 +289,7 @@ def test_on_user_turn_stopped_computes_stt_ms():
     acc.on_user_turn_stopped(1_000_000_000 + 550_000_000)  # 150ms after vad
     assert acc.latency_turns[0].stt_ms == 150
 
+
 def test_on_call_end_anchors_user_stopped_ms_when_still_speaking():
     acc = CallAccumulator()
     acc.call_start_abs_ns = 1_000_000_000
@@ -293,18 +298,22 @@ def test_on_call_end_anchors_user_stopped_ms_when_still_speaking():
     acc.on_call_end(1_000_000_000 + 600_000_000)
     assert acc.latency_turns[0].user_stopped_ms == 600
 
+
 def test_on_latency_breakdown_marks_proactive_when_no_user_turn_start():
     acc = CallAccumulator()
     acc.call_start_abs_ns = 1_000_000_000
     acc.on_bot_started_speaking(1_000_000_000 + 500_000_000)
-    acc.on_latency_breakdown(SimpleNamespace(
-        user_turn_start_time=None,
-        user_turn_secs=None,
-        ttfb=[SimpleNamespace(duration_secs=0.1)],
-        function_calls=[],
-    ))
+    acc.on_latency_breakdown(
+        SimpleNamespace(
+            user_turn_start_time=None,
+            user_turn_secs=None,
+            ttfb=[SimpleNamespace(duration_secs=0.1)],
+            function_calls=[],
+        )
+    )
     assert acc.latency_turns[0].is_proactive is True
     assert acc.latency_turns[0].ttfb_ms == 100
+
 
 def test_on_bot_started_speaking_creates_proactive_turn():
     acc = CallAccumulator()
@@ -314,6 +323,7 @@ def test_on_bot_started_speaking_creates_proactive_turn():
     assert len(acc.latency_turns) == 1
     assert acc.latency_turns[0].is_proactive is True
     assert acc.latency_turns[0].bot_started_ms == 800
+
 
 def test_on_turn_started_before_on_start_is_replayed():
     acc = CallAccumulator()
@@ -325,13 +335,13 @@ def test_on_turn_started_before_on_start_is_replayed():
     assert len(acc.latency_turns) == 1
     assert acc.latency_turns[0].user_started_ms == 300
 
+
 def test_on_metrics_frame_sets_llm_completed_on_current_turn():
     acc = CallAccumulator()
     acc.call_start_abs_ns = 1_000_000_000
     acc.on_turn_started(1, 1_000_000_000 + 100_000_000)
-    llm_metric = type("ProcessingMetricsData", (), {
-        "processor": "openaillmservice",
-        "value": 0.5
-    })()
+    llm_metric = type(
+        "ProcessingMetricsData", (), {"processor": "openaillmservice", "value": 0.5}
+    )()
     acc.on_metrics_frame(SimpleNamespace(data=[llm_metric]))
     assert acc.latency_turns[0].llm_completed is True
