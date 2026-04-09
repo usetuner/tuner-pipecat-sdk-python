@@ -1,11 +1,13 @@
 """Tests for FlowsObserver: pipecat-flows pipeline."""
 
 import asyncio
+import sys
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-pytest.importorskip("pipecat", reason="pipecat not installed")
+if sys.version_info < (3, 11):
+    pytest.skip("pipecat-flows requires Python 3.11+", allow_module_level=True)
 
 from pipecat.frames.frames import EndFrame
 
