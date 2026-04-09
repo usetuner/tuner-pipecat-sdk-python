@@ -29,24 +29,12 @@ class CallAccumulator:
     _open_latency_idx: int | None = field(default=None, repr=False)
     # Turn index currently speaking; consumed by on_bot_stopped.
     _bot_turn_idx: int | None = field(default=None, repr=False)
+    # Stable anchor for the user turn the bot is currently responding to.
+    # Persists across multiple bot speech segments within the same user turn —
+    # for example when the bot speaks, executes a tool, then speaks again.
+    # Distinct from _bot_turn_idx which tracks only whether the bot is currently
+    # speaking and is cleared on BotStoppedSpeakingFrame.
     _current_user_turn_latency_idx: int | None = field(default=None, repr=False)
-    """Latency turn index for the currently active user turn.
-
-    Distinct from ``_bot_turn_idx`` in both lifetime and purpose:
-
-    - ``_bot_turn_idx`` tracks whether the bot is *currently speaking* and is
-      cleared as soon as ``BotStoppedSpeakingFrame`` arrives.
-    - ``_current_user_turn_latency_idx`` tracks *which user turn the bot is
-      responding to* and persists until the **next user turn begins**.
-
-    A single user turn can produce multiple bot speech segments — for example
-    when the LLM emits a brief spoken acknowledgement before executing a tool
-    call and then speaks again with the tool result, or when a streaming
-    architecture begins speaking speculatively before tool execution completes.
-    Keeping a stable per-user-turn anchor ensures every bot speech segment,
-    regardless of how many there are, maps back to the correct ``LatencyTurn``
-    for timing and latency attribution.
-    """
 
     # Ordered pairing for latency observer callbacks (on_latency_measured then breakdown).
     _pending_latency_ms_queue: deque[int] = field(default_factory=deque, repr=False)
@@ -70,6 +58,8 @@ class CallAccumulator:
     # Decoupled from _active_turn_number so interruptions don't corrupt the target.
     _pending_breakdown_latency_idx: int | None = field(default=None, repr=False)
 
+    # Set to True on the first UserStartedSpeakingFrame — used to distinguish
+    # the proactive bot greeting from mid-conversation tool or node transitions.
     _user_has_spoken: bool = field(default=False, repr=False)
 
     # misc
@@ -101,7 +91,7 @@ class CallAccumulator:
         return self._pipecat_tts_chars
 
     def on_start(self, timestamp_ns: int) -> None:
-        # call_start_abs_ns is pre-initialized in FlowsObserver.__init__ to avoid the
+        # call_start_abs_ns is pre-initialized in the observer __init__ to avoid the
         # StartFrame race condition (TTS queues greeting audio before StartFrame, causing
         # StartFrame to arrive late at the observer). Only fall back to StartFrame time
         # if somehow not yet set.
@@ -243,25 +233,20 @@ class CallAccumulator:
     def on_bot_started_speaking(self, timestamp_ns: int) -> None:
         """Record the start of a bot speech segment and bind it to the active user turn.
 
-        Resolution order for the target ``LatencyTurn``:
+        Resolution order for the target LatencyTurn:
 
-        1. ``_open_latency_idx`` — set when a user turn first opens and cleared
-           after the first bot speech begins.  Handles the common single-speech
-           case and the initial speech of any multi-speech turn.
+        1. _open_latency_idx — set when a user turn opens, consumed by the first bot
+        speech. Handles the common case and the initial speech of multi-speech turns.
 
-        2. ``_current_user_turn_latency_idx`` — stable anchor for the lifetime
-           of the user turn.  Used for every subsequent speech segment within
-           the same user turn after ``_open_latency_idx`` has been consumed.
+        2. _current_user_turn_latency_idx — stable anchor for the lifetime of the user
+        turn. Used for every subsequent speech segment after _open_latency_idx is
+        consumed.
 
-        If the resolved turn already has a complete bot response
-        (``bot_stopped_ms > 0``), a new ``LatencyTurn`` is created.  This
-        handles the case where the bot finishes speaking, the user says
-        something, and the bot responds again — each response cycle gets its
-        own turn for accurate latency attribution.
+        If the resolved turn already has a complete bot response (bot_stopped_ms > 0),
+        a new LatencyTurn is created for the fresh exchange.
 
-        ``bot_started_ms`` is written only once (when it is still zero) so that
-        the timestamp always reflects when the bot *first* began speaking in
-        response to the user, regardless of how many speech segments follow.
+        bot_started_ms is written only once so it always reflects when the bot first
+        began speaking in response to the user, regardless of how many segments follow.
         """
         if self._open_latency_idx is not None and self._open_latency_idx < len(self.latency_turns):
             idx = self._open_latency_idx
@@ -349,17 +334,16 @@ class CallAccumulator:
             is_real_user_turn = False
             if not self._user_has_spoken:
                 turn.is_proactive = True
-            # If _user_has_spoken=True: mid-conversation tool/node transition.
-            # is_real_user_turn=False so bot_started_ms won't be overwritten.
+            # _user_has_spoken=True means this is a mid-conversation tool or node transition,
+            # not a new user utterance. Leave bot_started_ms as captured by on_bot_started_speaking.
         else:
             computed_started_ms = self._abs_to_rel_ms(user_start_abs)
             if computed_started_ms > 0:
                 # Only write if valid — frame events already captured timing
                 # correctly via on_turn_started, so don't overwrite with 0.
                 turn.user_started_ms = computed_started_ms
-            # computed_started_ms == 0: don't write AND don't mark proactive.
-            # Original code marked proactive here — that was the bug causing
-            # early user turns like "Book an appointment" at 27ms to be swallowed.
+            # computed_started_ms == 0: user spoke within the first milliseconds of the call.
+            # Frame events already captured the correct timing via on_turn_started — skip.
 
         if self._pending_latency_ms_queue:
             latency_ms = self._pending_latency_ms_queue.popleft()
