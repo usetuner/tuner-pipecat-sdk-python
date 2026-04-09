@@ -189,47 +189,44 @@ def test_on_latency_breakdown_skips_when_no_active_turn(caplog):
 
 
 def test_on_latency_breakdown_skips_overwrite_for_initial_proactive_greeting():
-    """Initial proactive greeting fires breakdown with user_turn_start_time ≈ call_start.
+    """Initial proactive greeting fires breakdown with user_turn_start_time=None.
 
-    computed_started_ms will be 0 (or very close), which must NOT overwrite the
-    user timing captured by on_turn_started, and must NOT corrupt bot_started_ms
-    by using the initial greeting latency.  The latency IS consumed from the queue
-    so the subsequent real-turn breakdown gets the correct value.
+    is_real_user_turn=False so bot_started_ms must NOT be overwritten by the
+    latency queue, and user timing from on_turn_started must be preserved.
+    The latency IS consumed from the queue so subsequent real-turn breakdowns
+    get the correct value.
     """
-    base_ns = 1_000_000_000  # 1.0s unix time
+    base_ns = 1_000_000_000
     acc = CallAccumulator()
     acc.call_start_abs_ns = base_ns
 
-    # on_latency_measured fires for the initial proactive greeting (1132ms latency)
     acc.on_latency_measured(1.132)
 
-    # User says "Hi." at +1200ms — on_turn_started creates latency_turn[0]
-    acc.on_turn_started(0, base_ns + 1_200_000_000)
-    assert acc.latency_turns[0].user_started_ms == 1200
+    # Ghost turn from pipeline internal frame before user speaks.
+    acc.on_turn_started(0, base_ns + 44_000_000)
+    assert acc.latency_turns[0].user_started_ms == 44
 
-    # Bot says "Hi there!" starts at +2400ms (after the greeting was interrupted)
-    acc.on_bot_started_speaking(base_ns + 2_400_000_000)
-    assert acc.latency_turns[0].bot_started_ms == 2400
+    # Bot greeting starts at +800ms.
+    acc.on_bot_started_speaking(base_ns + 800_000_000)
+    assert acc.latency_turns[0].bot_started_ms == 800
 
-    # Breakdown fires for the initial proactive greeting while user "Hi." is active.
-    # user_turn_start_time ≈ call_start → computed_started_ms = 0 → skip overwrite.
+    # Greeting breakdown fires with user_turn_start_time=None — real production signal.
     acc.on_latency_breakdown(
         SimpleNamespace(
-            user_turn_start_time=1.0,  # ≈ call start → computed_started_ms = 0
-            user_turn_secs=0.0,
+            user_turn_start_time=None,
+            user_turn_secs=None,
             ttfb=[SimpleNamespace(duration_secs=0.769)],
             function_calls=[],
         )
     )
 
     turn = acc.latency_turns[0]
-    # user timing must NOT be overwritten (stays from on_turn_started)
-    assert turn.user_started_ms == 1200
-    # bot_started must NOT be overwritten by the initial greeting latency
-    assert turn.bot_started_ms == 2400
-    # ttfb from the initial greeting breakdown IS captured (useful for "Welcome" segment)
+    assert turn.is_proactive is True
+    # bot_started_ms must NOT be overwritten by latency queue.
+    assert turn.bot_started_ms == 800
+    # ttfb from greeting breakdown is captured.
     assert turn.ttfb_ms == 769
-    # latency was consumed from the queue — verify it's empty now
+    # latency was consumed — queue is empty.
     assert len(acc._pending_latency_ms_queue) == 0
 
 
@@ -345,3 +342,40 @@ def test_on_metrics_frame_sets_llm_completed_on_current_turn():
     )()
     acc.on_metrics_frame(SimpleNamespace(data=[llm_metric]))
     assert acc.latency_turns[0].llm_completed is True
+
+
+def test_proactive_greeting_detected_when_user_has_not_spoken():
+    """Breakdown with user_turn_start_time=None before any user speech → is_proactive=True."""
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = 1_000_000_000
+    acc.on_turn_started(0, 1_000_000_000 + 44_000_000)  # ghost turn from pipeline
+    acc.on_bot_started_speaking(1_000_000_000 + 800_000_000)
+    acc.on_latency_breakdown(
+        SimpleNamespace(
+            user_turn_start_time=None,
+            user_turn_secs=None,
+            ttfb=[SimpleNamespace(duration_secs=0.1)],
+            function_calls=[],
+        )
+    )
+    assert acc.latency_turns[0].is_proactive is True
+    assert acc.latency_turns[0].bot_started_ms == 800
+    assert acc.latency_turns[0].ttfb_ms == 100
+
+
+def test_mid_conversation_breakdown_not_marked_proactive_when_user_has_spoken():
+    """Breakdown with user_turn_start_time=None mid-conversation → is_proactive stays False."""
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = 1_000_000_000
+    acc.on_turn_started(0, 1_000_000_000 + 44_000_000)
+    acc.on_user_started_speaking(1_000_000_000 + 2_000_000_000)  # real user speech
+    acc.on_bot_started_speaking(1_000_000_000 + 3_000_000_000)
+    acc.on_latency_breakdown(
+        SimpleNamespace(
+            user_turn_start_time=None,
+            user_turn_secs=None,
+            ttfb=[SimpleNamespace(duration_secs=0.1)],
+            function_calls=[],
+        )
+    )
+    assert acc.latency_turns[0].is_proactive is False

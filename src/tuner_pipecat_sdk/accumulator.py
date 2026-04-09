@@ -70,6 +70,8 @@ class CallAccumulator:
     # Decoupled from _active_turn_number so interruptions don't corrupt the target.
     _pending_breakdown_latency_idx: int | None = field(default=None, repr=False)
 
+    _user_has_spoken: bool = field(default=False, repr=False)
+
     # misc
     done: bool = False
 
@@ -180,6 +182,7 @@ class CallAccumulator:
 
     def on_user_started_speaking(self, timestamp_ns: int) -> None:
         """Use frame timestamp as the authoritative user-start anchor for the active turn."""
+        self._user_has_spoken = True
         # If bot is currently speaking, this is an interruption.
         # Record when the user started cutting in on the BOT's current turn.
         if self._bot_turn_idx is not None and self._bot_turn_idx < len(self.latency_turns):
@@ -269,11 +272,9 @@ class CallAccumulator:
         ):
             idx = self._current_user_turn_latency_idx
         elif not self.latency_turns:
-            # No user has spoken yet — proactive bot greeting.
-            # Create the greeting turn here so it gets real bot_started_ms
-            # and on_latency_breakdown can populate ttfb/llm/tts metrics on it.
-            # This ensures latency_offset=1 in enrich_transcript and keeps
-            # all downstream tool/user turn alignment correct.
+            # Safety net: if no user turn exists yet, the bot is greeting proactively.
+            # In practice on_turn_started always fires first via pipeline internals,
+            # but if that changes this ensures the greeting is still captured correctly.
             turn = LatencyTurn(turn_index=0, is_proactive=True)
             turn.bot_started_ms = self._rel_ms(timestamp_ns)
             self.latency_turns.append(turn)
@@ -332,6 +333,7 @@ class CallAccumulator:
             )
             return
         idx = self._pending_breakdown_latency_idx
+
         self._pending_breakdown_latency_idx = None  # consume immediately
 
         if idx >= len(self.latency_turns):
@@ -345,12 +347,19 @@ class CallAccumulator:
         is_real_user_turn = True
         if user_start_abs is None:
             is_real_user_turn = False
-            turn.is_proactive = True
+            if not self._user_has_spoken:
+                turn.is_proactive = True
+            # If _user_has_spoken=True: mid-conversation tool/node transition.
+            # is_real_user_turn=False so bot_started_ms won't be overwritten.
         else:
             computed_started_ms = self._abs_to_rel_ms(user_start_abs)
-            if computed_started_ms == 0:
-                is_real_user_turn = False
-                turn.is_proactive = True
+            if computed_started_ms > 0:
+                # Only write if valid — frame events already captured timing
+                # correctly via on_turn_started, so don't overwrite with 0.
+                turn.user_started_ms = computed_started_ms
+            # computed_started_ms == 0: don't write AND don't mark proactive.
+            # Original code marked proactive here — that was the bug causing
+            # early user turns like "Book an appointment" at 27ms to be swallowed.
 
         if self._pending_latency_ms_queue:
             latency_ms = self._pending_latency_ms_queue.popleft()
@@ -394,6 +403,18 @@ class CallAccumulator:
                 turn = self.latency_turns[idx]
                 if turn.user_started_ms > 0 and turn.user_stopped_ms == 0:
                     turn.user_stopped_ms = self._rel_ms(timestamp_ns)
+
+        # BotStartedSpeakingFrame can arrive after BotStoppedSpeakingFrame during
+        # pipeline shutdown, causing bot_started_ms > bot_stopped_ms on the final
+        # bot turn. Fix the inversion on the last turn only.
+        if self.latency_turns:
+            last = self.latency_turns[-1]
+            if (
+                last.bot_stopped_ms is not None
+                and last.bot_started_ms > 0
+                and last.bot_started_ms > last.bot_stopped_ms
+            ):
+                last.bot_started_ms = last.bot_stopped_ms
 
     def on_metrics_frame(self, frame: Any) -> None:
         for d in getattr(frame, "data", []):
