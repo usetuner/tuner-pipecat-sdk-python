@@ -68,6 +68,7 @@ def test_on_user_turn_stopped_no_vad_stop_is_safe():
     turn = acc.latency_turns[0]
     assert turn.stt_ms is None  # or 0, whatever your default is
 
+
 def test_stt_ms_computed_from_vad_gap():
     acc = CallAccumulator()
     acc.call_start_abs_ns = 1_000_000_000_000
@@ -105,4 +106,3 @@ def test_on_user_turn_stopped_before_vad_stopped_warns_and_is_safe():
     acc.on_user_turn_stopped(1_001_500_000)
 
     assert acc.latency_turns[0].stt_ms is None
-

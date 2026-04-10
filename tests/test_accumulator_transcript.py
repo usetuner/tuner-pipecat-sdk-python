@@ -352,6 +352,7 @@ def test_payload_monotonic_guard_corrects_agent_end_before_start(tuner_config):
     assert agent_seg.start_ms == 5000
     assert agent_seg.end_ms == 5000
 
+
 def test_agent_result_with_no_matching_tool_call_has_null_function_name(tuner_config):
     """Tool result with no matching tool call in context — function_name should be None."""
     acc = CallAccumulator()
