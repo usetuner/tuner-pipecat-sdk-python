@@ -37,7 +37,7 @@ def build_payload(
         recording_url=config.recording_url,
         transcript_with_tool_calls=enriched,
         call_status="call_ended",
-        disconnection_reason=acc.disconnection_reason or None,
+        disconnection_reason=acc.disconnection_reason,
         duration_ms=max(0, (acc.call_end_abs_ns - acc.call_start_abs_ns) // 1_000_000),
         general_meta_data_raw=GeneralMetaData(
             ai_models=AiModels(

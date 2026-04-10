@@ -23,3 +23,9 @@ def __getattr__(name: str) -> Any:
 
         return FlowsObserver
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    # Required alongside __getattr__ so that dir() and IDE autocompletion
+    # surface Observer and FlowsObserver even though they are lazily imported.
+    return __all__ + list(globals().keys())

@@ -147,7 +147,7 @@ def test_cancel_frame_without_resolver_leaves_reason_empty(observer):
 
     with patch("tuner_pipecat_sdk._base.asyncio.create_task"):
         observer._handle(CancelFrame(), 1_000_000_000)
-    assert observer._acc.disconnection_reason == ""
+    assert observer._acc.disconnection_reason is None
 
 
 def test_end_frame_with_resolver_sets_reason(observer):
@@ -164,7 +164,7 @@ def test_end_frame_without_resolver_leaves_reason_empty(observer):
 
     with patch("tuner_pipecat_sdk._base.asyncio.create_task"):
         observer._handle(EndFrame(), 1_000_000_000)
-    assert observer._acc.disconnection_reason == ""
+    assert observer._acc.disconnection_reason is None
 
 
 def test_resolver_raising_exception_does_not_crash(observer):
@@ -176,7 +176,7 @@ def test_resolver_raising_exception_does_not_crash(observer):
     observer._disconnection_reason_resolver = bad_resolver
     with patch("tuner_pipecat_sdk._base.asyncio.create_task"):
         observer._handle(CancelFrame(), 1_000_000_000)
-    assert observer._acc.disconnection_reason == ""
+    assert observer._acc.disconnection_reason is None
 
 
 def test_resolver_returning_none_leaves_reason_empty(observer):
@@ -185,4 +185,4 @@ def test_resolver_returning_none_leaves_reason_empty(observer):
     observer._disconnection_reason_resolver = lambda: None
     with patch("tuner_pipecat_sdk._base.asyncio.create_task"):
         observer._handle(CancelFrame(), 1_000_000_000)
-    assert observer._acc.disconnection_reason == ""
+    assert observer._acc.disconnection_reason is None

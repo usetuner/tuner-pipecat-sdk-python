@@ -67,4 +67,3 @@ def test_on_user_turn_stopped_no_vad_stop_is_safe():
 
     turn = acc.latency_turns[0]
     assert turn.stt_ms is None  # or 0, whatever your default is
-    assert turn.vad_stopped_ns is None  # confirm it was never set

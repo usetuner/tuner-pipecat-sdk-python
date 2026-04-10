@@ -58,6 +58,10 @@ class CallAccumulator:
     # Decoupled from _active_turn_number so interruptions don't corrupt the target.
     _pending_breakdown_latency_idx: int | None = field(default=None, repr=False)
 
+    # vad_stopped_ns keyed by turn index — internal timing state kept off the
+    # public LatencyTurn model so it doesn't appear in model_dump() output.
+    _vad_stopped_ns_by_turn: dict[int, int] = field(default_factory=dict, repr=False)
+
     # Set to True on the first UserStartedSpeakingFrame — used to distinguish
     # the proactive bot greeting from mid-conversation tool or node transitions.
     _user_has_spoken: bool = field(default=False, repr=False)
@@ -94,8 +98,8 @@ class CallAccumulator:
         return self._pipecat_tts_chars
 
     @property
-    def disconnection_reason(self) -> str:
-        return self._disconnection_reason
+    def disconnection_reason(self) -> str | None:
+        return self._disconnection_reason or None
 
     def set_disconnection_reason(self, reason: str) -> None:
         """Write-once: first meaningful value wins, subsequent calls are no-ops.
@@ -307,13 +311,15 @@ class CallAccumulator:
 
     def on_vad_stopped(self, timestamp_ns: int) -> None:
         if self._active_turn_number is None:
-            logger.warning("[tuner] on_vad_stopped: no active turn")
+            # VADUserStoppedSpeakingFrame can legitimately fire before any turn
+            # starts (background noise, room ambience at call start) — debug only.
+            logger.debug("[tuner] on_vad_stopped: no active turn")
             return
         idx = self._turn_to_latency_idx.get(self._active_turn_number)
         if idx is None or idx >= len(self.latency_turns):
             logger.warning("[tuner] on_vad_stopped: active turn not in latency_turns")
             return
-        self.latency_turns[idx].vad_stopped_ns = timestamp_ns
+        self._vad_stopped_ns_by_turn[idx] = timestamp_ns
 
     def on_user_turn_stopped(self, timestamp_ns: int) -> None:
         if self._active_turn_number is None:
@@ -324,10 +330,11 @@ class CallAccumulator:
             logger.warning("[tuner] on_user_turn_stopped: active turn not in latency_turns")
             return
         turn = self.latency_turns[idx]
-        if turn.vad_stopped_ns is None:
+        vad_stopped_ns = self._vad_stopped_ns_by_turn.get(idx)
+        if vad_stopped_ns is None:
             logger.warning("[tuner] on_user_turn_stopped: vad_stopped_ns not set on turn {}", idx)
             return
-        gap_ms = (timestamp_ns - turn.vad_stopped_ns) // 1_000_000
+        gap_ms = (timestamp_ns - vad_stopped_ns) // 1_000_000
         turn.stt_ms = max(0, gap_ms)
 
     def on_latency_measured(self, latency_secs: float) -> None:
@@ -369,7 +376,7 @@ class CallAccumulator:
 
         if self._pending_latency_ms_queue:
             latency_ms = self._pending_latency_ms_queue.popleft()
-            if is_real_user_turn and not turn.interrupted_at_ms:
+            if is_real_user_turn and not turn.interrupted_at_ms and turn.user_stopped_ms > 0:
                 turn.bot_started_ms = turn.user_stopped_ms + latency_ms
 
         ttfb_ms: int | None = None
@@ -410,18 +417,6 @@ class CallAccumulator:
                 if turn.user_started_ms > 0 and turn.user_stopped_ms == 0:
                     turn.user_stopped_ms = self._rel_ms(timestamp_ns)
 
-        # BotStartedSpeakingFrame can arrive after BotStoppedSpeakingFrame during
-        # pipeline shutdown, causing bot_started_ms > bot_stopped_ms on the final
-        # bot turn. Fix the inversion on the last turn only.
-        if self.latency_turns:
-            last = self.latency_turns[-1]
-            if (
-                last.bot_stopped_ms is not None
-                and last.bot_started_ms > 0
-                and last.bot_started_ms > last.bot_stopped_ms
-            ):
-                last.bot_started_ms = last.bot_stopped_ms
-
     def on_metrics_frame(self, frame: Any) -> None:
         for d in getattr(frame, "data", []):
             cls_name = type(d).__name__
@@ -434,6 +429,9 @@ class CallAccumulator:
                 processor = str(getattr(d, "processor", "")).lower()
                 val = getattr(d, "value", 0) or 0
                 if "tts" in processor:
+                    # Assignment (not +=): only one TTS job runs per turn, so the latest
+                    # value is always the correct one. Multiple LLM steps can fire in a
+                    # single turn (e.g. parallel tool calls), so LLM uses accumulation.
                     self._pending_pipecat_tts_processing_s = val
                 else:
                     self._pending_pipecat_llm_processing_s += val

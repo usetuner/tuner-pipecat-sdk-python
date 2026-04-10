@@ -275,7 +275,7 @@ def test_on_vad_stopped_records_timestamp():
     acc.call_start_abs_ns = 1_000_000_000
     acc.on_turn_started(1, 1_000_000_000 + 100_000_000)
     acc.on_vad_stopped(1_000_000_000 + 400_000_000)
-    assert acc.latency_turns[0].vad_stopped_ns == 1_000_000_000 + 400_000_000
+    assert acc._vad_stopped_ns_by_turn[0] == 1_000_000_000 + 400_000_000
 
 
 def test_on_user_turn_stopped_computes_stt_ms():
@@ -397,9 +397,9 @@ def test_set_disconnection_reason_write_once():
 def test_set_disconnection_reason_ignores_empty_string():
     acc = CallAccumulator()
     acc.set_disconnection_reason("")
-    assert acc.disconnection_reason == ""
+    assert acc.disconnection_reason is None
 
 
 def test_disconnection_reason_default_is_empty():
     acc = CallAccumulator()
-    assert acc.disconnection_reason == ""
+    assert acc.disconnection_reason is None

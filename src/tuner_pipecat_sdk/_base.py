@@ -116,6 +116,12 @@ class _BaseObserver(FrameProcessor):
     def _handle(self, frame: Any, timestamp_ns: int) -> None:
         if isinstance(frame, StartFrame):
             self._acc.on_start(timestamp_ns)
+            if self._context_provider is None:
+                logger.warning(
+                    "[tuner] no context_provider attached at pipeline start — "
+                    "call attach_context() or attach_flow_manager() before starting "
+                    "the pipeline or call data will be lost at flush"
+                )
             if not getattr(frame, "enable_metrics", False):
                 logger.warning(
                     "[tuner] enable_metrics=False — latency breakdown will be absent. "

@@ -78,9 +78,12 @@ async def test_handle_end_frame_triggers_flush(observer, mock_flow_manager):
     observer._acc.done = True
     observer._acc.latency_turns = []
 
-    with patch("tuner_pipecat_sdk._base.post_call", new_callable=AsyncMock) as post_mock:
+    with (
+        patch("tuner_pipecat_sdk._base.post_call", new_callable=AsyncMock) as post_mock,
+        patch("tuner_pipecat_sdk._base.asyncio.create_task", side_effect=asyncio.ensure_future),
+    ):
         observer._handle(EndFrame(), 1_000_000_000)
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0)
         post_mock.assert_called_once()
         payload = post_mock.call_args[0][1]
         assert payload.call_id == "call-1"
