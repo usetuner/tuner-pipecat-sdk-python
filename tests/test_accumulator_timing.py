@@ -52,3 +52,19 @@ def test_on_call_end_idempotent_when_done():
     acc.call_end_abs_ns = 100
     acc.on_call_end(999)
     assert acc.call_end_abs_ns == 100
+
+
+def test_on_user_turn_stopped_no_vad_stop_is_safe():
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = 1_000_000_000
+
+    # Set up a turn without ever firing on_vad_stopped
+    acc.on_turn_started(turn_number=1, timestamp_ns=1_001_000_000)
+    acc._active_turn_number = 1
+
+    # Should log a warning and return — not crash
+    acc.on_user_turn_stopped(timestamp_ns=1_002_000_000)
+
+    turn = acc.latency_turns[0]
+    assert turn.stt_ms is None  # or 0, whatever your default is
+    assert turn.vad_stopped_ns is None  # confirm it was never set

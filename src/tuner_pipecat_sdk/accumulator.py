@@ -100,7 +100,6 @@ class CallAccumulator:
     def set_disconnection_reason(self, reason: str) -> None:
         """Write-once: first meaningful value wins, subsequent calls are no-ops.
 
-        CancelFrame sets this to ERROR automatically via _base_observer._handle().
         The disconnection_reason_resolver on the observer also calls this at flush time.
         """
         if not self._disconnection_reason and reason:
@@ -141,11 +140,18 @@ class CallAccumulator:
         started_ms = self._rel_ms(timestamp_ns)
 
         # ── Collapse guard ────────────────────────────────────────────────────
-        # Only collapse into the existing turn when the bot has not yet started
+        # Collapse into the existing turn only when the bot has not yet started
         # speaking (bot_started_ms == 0). This covers mid-sentence pauses where
         # the user briefly stops and then continues before the bot responds.
         # Interruptions are excluded because bot_started_ms > 0 by that point,
         # and they correctly open a new LatencyTurn.
+        #
+        # Both conditions are intentionally checked and are not redundant:
+        # - bot_started_ms == 0: bot hasn't spoken yet for this turn
+        # - not llm_completed: in async pipelines the LLM can finish and set
+        #   llm_completed=True before TTS fires and bot_started_ms is written.
+        #   Without this check, a user follow-up during that gap would collapse
+        #   into the stale turn instead of opening a fresh one.
         if self._current_user_turn_latency_idx is not None:
             idx = self._current_user_turn_latency_idx
             if idx < len(self.latency_turns):
