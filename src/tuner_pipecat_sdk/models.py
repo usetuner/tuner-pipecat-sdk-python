@@ -93,6 +93,27 @@ class GeneralMetaData(BaseModel):
     usage_token: UsageToken
 
 
+class DisconnectReason:
+    """Well-known call ended-reason strings.
+
+    Plain string constants (not an Enum) so callers can pass custom values
+    without casting, while still getting IDE autocompletion.
+
+    Usage::
+
+        FlowsObserver(
+            ...
+            disconnection_reason_resolver=lambda: DisconnectReason.USER_HANGUP
+        )
+    """
+
+    USER_HANGUP: str = "user_hangup"  # User closed / hung up the call.
+    AGENT_HANGUP: str = "agent_hangup"  # Bot ended the call programmatically.
+    ERROR: str = "error"  # Pipeline or transport error.
+    TIMEOUT: str = "timeout"  # Call exceeded a time limit.
+    UNKNOWN: str = "unknown"  # Reason could not be determined.
+
+
 class CallPayload(BaseModel):
     call_id: str
     call_type: str
@@ -103,6 +124,7 @@ class CallPayload(BaseModel):
     call_status: str
     duration_ms: int
     general_meta_data_raw: GeneralMetaData
+    disconnection_reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize payload to a JSON-ready dict."""
@@ -119,4 +141,5 @@ __all__ = [
     "UsageToken",
     "GeneralMetaData",
     "CallPayload",
+    "DisconnectReason",
 ]

@@ -65,6 +65,9 @@ class CallAccumulator:
     # misc
     done: bool = False
 
+    # ended reason (write-once: first meaningful value wins)
+    _disconnection_reason: str = field(default="", repr=False)
+
     def _rel_ms(self, abs_ns: int) -> int:
         if self.call_start_abs_ns == 0 or abs_ns == 0:
             return 0
@@ -89,6 +92,19 @@ class CallAccumulator:
 
     def get_total_tts_characters(self) -> int:
         return self._pipecat_tts_chars
+
+    @property
+    def disconnection_reason(self) -> str:
+        return self._disconnection_reason
+
+    def set_disconnection_reason(self, reason: str) -> None:
+        """Write-once: first meaningful value wins, subsequent calls are no-ops.
+
+        CancelFrame sets this to ERROR automatically via _base_observer._handle().
+        The disconnection_reason_resolver on the observer also calls this at flush time.
+        """
+        if not self._disconnection_reason and reason:
+            self._disconnection_reason = reason
 
     def on_start(self, timestamp_ns: int) -> None:
         # call_start_abs_ns is pre-initialized in the observer __init__ to avoid the

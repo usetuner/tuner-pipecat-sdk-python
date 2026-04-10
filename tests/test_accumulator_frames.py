@@ -379,3 +379,27 @@ def test_mid_conversation_breakdown_not_marked_proactive_when_user_has_spoken():
         )
     )
     assert acc.latency_turns[0].is_proactive is False
+
+
+def test_set_disconnection_reason_stores_value():
+    acc = CallAccumulator()
+    acc.set_disconnection_reason("user_hangup")
+    assert acc.disconnection_reason == "user_hangup"
+
+
+def test_set_disconnection_reason_write_once():
+    acc = CallAccumulator()
+    acc.set_disconnection_reason("user_hangup")
+    acc.set_disconnection_reason("agent_ended")
+    assert acc.disconnection_reason == "user_hangup"
+
+
+def test_set_disconnection_reason_ignores_empty_string():
+    acc = CallAccumulator()
+    acc.set_disconnection_reason("")
+    assert acc.disconnection_reason == ""
+
+
+def test_disconnection_reason_default_is_empty():
+    acc = CallAccumulator()
+    assert acc.disconnection_reason == ""

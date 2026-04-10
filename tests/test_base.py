@@ -131,3 +131,58 @@ async def test_attach_turn_tracking_observer_wiring(observer):
     await handlers["on_turn_ended"](None, 1, 2.5, True)
     assert observer._acc.latency_turns[0].was_interrupted is True
     assert observer._acc._active_turn_number is None
+
+
+def test_cancel_frame_with_resolver_sets_reason(observer):
+    from pipecat.frames.frames import CancelFrame
+
+    observer._disconnection_reason_resolver = lambda: "user_hangup"
+    with patch("tuner_pipecat_sdk._base.asyncio.create_task"):
+        observer._handle(CancelFrame(), 1_000_000_000)
+    assert observer._acc.disconnection_reason == "user_hangup"
+
+
+def test_cancel_frame_without_resolver_leaves_reason_empty(observer):
+    from pipecat.frames.frames import CancelFrame
+
+    with patch("tuner_pipecat_sdk._base.asyncio.create_task"):
+        observer._handle(CancelFrame(), 1_000_000_000)
+    assert observer._acc.disconnection_reason == ""
+
+
+def test_end_frame_with_resolver_sets_reason(observer):
+    from pipecat.frames.frames import EndFrame
+
+    observer._disconnection_reason_resolver = lambda: "agent_ended"
+    with patch("tuner_pipecat_sdk._base.asyncio.create_task"):
+        observer._handle(EndFrame(), 1_000_000_000)
+    assert observer._acc.disconnection_reason == "agent_ended"
+
+
+def test_end_frame_without_resolver_leaves_reason_empty(observer):
+    from pipecat.frames.frames import EndFrame
+
+    with patch("tuner_pipecat_sdk._base.asyncio.create_task"):
+        observer._handle(EndFrame(), 1_000_000_000)
+    assert observer._acc.disconnection_reason == ""
+
+
+def test_resolver_raising_exception_does_not_crash(observer):
+    from pipecat.frames.frames import CancelFrame
+
+    def bad_resolver():
+        raise RuntimeError("oops")
+
+    observer._disconnection_reason_resolver = bad_resolver
+    with patch("tuner_pipecat_sdk._base.asyncio.create_task"):
+        observer._handle(CancelFrame(), 1_000_000_000)
+    assert observer._acc.disconnection_reason == ""
+
+
+def test_resolver_returning_none_leaves_reason_empty(observer):
+    from pipecat.frames.frames import CancelFrame
+
+    observer._disconnection_reason_resolver = lambda: None
+    with patch("tuner_pipecat_sdk._base.asyncio.create_task"):
+        observer._handle(CancelFrame(), 1_000_000_000)
+    assert observer._acc.disconnection_reason == ""

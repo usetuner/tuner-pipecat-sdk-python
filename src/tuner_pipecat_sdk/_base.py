@@ -50,6 +50,7 @@ class _BaseObserver(FrameProcessor):
         asr_model: str = "",
         llm_model: str = "",
         tts_model: str = "",
+        disconnection_reason_resolver: Callable[[], str | None] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -70,6 +71,7 @@ class _BaseObserver(FrameProcessor):
         self._acc.call_start_abs_ns = time.time_ns()
         self._flushed = False
         self._context_provider: Callable[[], list] | None = None
+        self._disconnection_reason_resolver = disconnection_reason_resolver
 
         self._latency_observer = UserBotLatencyObserver()
 
@@ -151,6 +153,16 @@ class _BaseObserver(FrameProcessor):
             self._acc.on_vad_stopped(timestamp_ns)
 
         elif isinstance(frame, CancelFrame | EndFrame):
+            if self._disconnection_reason_resolver is not None:
+                try:
+                    reason = self._disconnection_reason_resolver()
+                    if reason:
+                        self._acc.set_disconnection_reason(reason)
+                except Exception:
+                    logger.exception(
+                        "[tuner] disconnection_reason_resolver raised an exception — ignoring"
+                    )
+
             self._acc.on_call_end(timestamp_ns)
             if not self._flushed:
                 self._flushed = True

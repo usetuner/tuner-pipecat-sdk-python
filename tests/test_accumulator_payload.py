@@ -198,3 +198,31 @@ def test_payload_keeps_initial_greeting_before_first_user(tuner_config):
     assert greeting.text == "Welcome to Pipecat Pizza!"
     assert greeting.start_ms == 0
     assert greeting.end_ms == 0
+
+
+def test_build_payload_includes_disconnection_reason(tuner_config):
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = 1_000_000_000
+    acc.call_end_abs_ns = 2_000_000_000
+    acc.done = True
+    acc.set_disconnection_reason("user_hangup")
+    payload = acc.build_payload(tuner_config, [])
+    assert payload.disconnection_reason == "user_hangup"
+
+
+def test_build_payload_disconnection_reason_none_when_unset(tuner_config):
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = 1_000_000_000
+    acc.call_end_abs_ns = 2_000_000_000
+    acc.done = True
+    payload = acc.build_payload(tuner_config, [])
+    assert payload.disconnection_reason is None
+
+
+def test_build_payload_disconnection_reason_omitted_from_dict_when_none(tuner_config):
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = 1_000_000_000
+    acc.call_end_abs_ns = 2_000_000_000
+    acc.done = True
+    payload = acc.build_payload(tuner_config, [])
+    assert "disconnection_reason" not in payload.to_dict()
