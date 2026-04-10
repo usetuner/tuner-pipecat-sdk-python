@@ -28,4 +28,6 @@ def __getattr__(name: str) -> Any:
 def __dir__() -> list[str]:
     # Required alongside __getattr__ so that dir() and IDE autocompletion
     # surface Observer and FlowsObserver even though they are lazily imported.
-    return __all__ + list(globals().keys())
+    # Return only __all__ — globals() would expose implementation details
+    # like TYPE_CHECKING and Any, cluttering IDE autocompletion.
+    return list(__all__)

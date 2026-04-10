@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
-
 
 class LatencyTurn(BaseModel):
     turn_index: int
@@ -82,7 +82,7 @@ class AiModels(BaseModel):
 
 
 class UsageToken(BaseModel):
-    asr_duration: int
+    asr_duration: int  # seconds (call wall-clock duration: end_ts - start_ts)
     llm_token: int | None = None
     tts_character_count: int | None = None
 
@@ -92,11 +92,12 @@ class GeneralMetaData(BaseModel):
     usage_token: UsageToken
 
 
-class DisconnectReason:
+class DisconnectReason(str, Enum):
     """Well-known call ended-reason strings.
 
-    Plain string constants (not an Enum) so callers can pass custom values
-    without casting, while still getting IDE autocompletion.
+    Extends str so values compare equal to their string representations —
+    DisconnectReason.USER_HANGUP == "user_hangup" is True — meaning no
+    casting is needed when passing to disconnection_reason_resolver.
 
     Usage::
 
@@ -106,11 +107,11 @@ class DisconnectReason:
         )
     """
 
-    USER_HANGUP: str = "user_hangup"  # User closed / hung up the call.
-    AGENT_HANGUP: str = "agent_hangup"  # Bot ended the call programmatically.
-    ERROR: str = "error"  # Pipeline or transport error.
-    TIMEOUT: str = "timeout"  # Call exceeded a time limit.
-    UNKNOWN: str = "unknown"  # Reason could not be determined.
+    USER_HANGUP = "user_hangup"
+    AGENT_HANGUP = "agent_hangup"
+    ERROR = "error"
+    TIMEOUT = "timeout"
+    UNKNOWN = "unknown"
 
 
 class CallPayload(BaseModel):

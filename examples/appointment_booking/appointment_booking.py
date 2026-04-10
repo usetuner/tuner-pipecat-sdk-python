@@ -39,7 +39,7 @@ from pipecat.observers.turn_tracking_observer import TurnTrackingObserver
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
-from pipecat.processors.aggregators.llm_context import LLMContext
+from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
 from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
     LLMUserAggregatorParams,
@@ -380,7 +380,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     )
     llm = OpenAILLMService(api_key=os.getenv("OPENAI_API_KEY"))
 
-    context = LLMContext()
+    context = OpenAILLMContext(tools=tools)
     context_aggregator = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(

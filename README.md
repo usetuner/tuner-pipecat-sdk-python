@@ -132,6 +132,44 @@ Both `Observer` and `FlowsObserver` accept the same constructor parameters:
 | `tts_model` | `str` | `""` | TTS model name (e.g. `cartesia/sonic`) |
 | `debug` | `bool` | `False` | Log full transcript at flush |
 
+## Disconnection Reason
+
+Pass a `disconnection_reason_resolver` callable to the observer to record why a call ended.
+The resolver is called at flush time and should return a string or `None`.
+
+```python
+from tuner_pipecat_sdk.models import DisconnectReason
+
+observer = Observer(
+    ...
+    disconnection_reason_resolver=lambda: DisconnectReason.USER_HANGUP,
+)
+```
+
+Use the built-in constants from `DisconnectReason` or pass a custom string:
+
+| Constant | Value |
+|----------|-------|
+| `DisconnectReason.USER_HANGUP` | `"user_hangup"` |
+| `DisconnectReason.AGENT_HANGUP` | `"agent_hangup"` |
+| `DisconnectReason.ERROR` | `"error"` |
+| `DisconnectReason.TIMEOUT` | `"timeout"` |
+| `DisconnectReason.UNKNOWN` | `"unknown"` |
+
+For dynamic resolution (e.g. when the reason is only known at call end):
+
+```python
+_reason = None
+
+def resolve_reason() -> str | None:
+    return _reason
+
+observer = Observer(..., disconnection_reason_resolver=resolve_reason)
+
+# Later, when you know the reason:
+_reason = DisconnectReason.AGENT_HANGUP
+```
+
 ## Public API
 
 - `tuner_pipecat_sdk.Observer` — for plain pipecat pipelines

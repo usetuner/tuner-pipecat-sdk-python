@@ -316,7 +316,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         workspace_id=int(os.getenv("TUNER_WORKSPACE_ID", "0")),
         agent_id=os.getenv("TUNER_AGENT_ID", "nova-clinic-pipecat"),
         call_id=str(uuid.uuid4()),
-        base_url=os.getenv("TUNER_BASE_URL", "https://voice-api.staging.ginni.ai"),
+        base_url=os.getenv("TUNER_BASE_URL", "https://api.usetuner.ai),
         asr_model="deepgram/nova-3",
         llm_model="gpt-4o",
         tts_model="cartesia",

@@ -351,3 +351,27 @@ def test_payload_monotonic_guard_corrects_agent_end_before_start(tuner_config):
     agent_seg = next(s for s in payload.transcript_with_tool_calls if s.role == "agent")
     assert agent_seg.start_ms == 5000
     assert agent_seg.end_ms == 5000
+
+def test_agent_result_with_no_matching_tool_call_has_null_function_name(tuner_config):
+    """Tool result with no matching tool call in context — function_name should be None."""
+    acc = CallAccumulator()
+    base_ns = 1_000_000_000
+    acc.call_start_abs_ns = base_ns
+    acc.call_end_abs_ns = base_ns + 2_000_000_000
+    acc.done = True
+    acc.registry.record_completion_ns("orphan-id", base_ns + 200_000_000)
+
+    # Transcript has a tool result but no assistant tool_calls entry —
+    # simulates a pruned/truncated LLM context.
+    transcript = [
+        {"role": "user", "content": "hello"},
+        {"role": "tool", "tool_call_id": "orphan-id", "content": '{"ok": true}'},
+        {"role": "assistant", "content": "Done!"},
+    ]
+
+    payload = acc.build_payload(tuner_config, transcript)
+    result_segs = [s for s in payload.transcript_with_tool_calls if s.role == "agent_result"]
+    assert len(result_segs) == 1
+    assert result_segs[0].tool is not None
+    assert result_segs[0].tool.name is None  # no matched tool call
+    assert result_segs[0].start_ms == 200
