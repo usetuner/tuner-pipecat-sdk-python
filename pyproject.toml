@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tuner-pipecat-sdk"
-version = "0.1.0"
+version = "0.1.1"
 description = "Pipecat observer SDK for capturing latency, transcript, and usage data from pipecat and pipecat-flows pipelines."
 readme = "README.md"
 authors = [
