@@ -38,23 +38,25 @@ uv run <script>.py
 Then open http://localhost:7860 where applicable.
 
 ## Publish to Pypi
-1. Install tools (one-time)
+1. Install tools (one-time) in a virtual env.
 
 uv sync --extra dev
 
-2. Build the package
+2. Clean old build artifacts
 
-cd src/tuner_pipecat_sdk
+rm -rf dist/
+
+3. Build the package (from project root)
+
 hatch build
 
-
-3. Validate before uploading
+4. Validate before uploading
 
 twine check dist/*
 
-4. (Optional) Test on TestPyPI first
+5. (Optional) Test on TestPyPI first
 
 twine upload --repository testpypi dist/*
 
-5. Upload to PyPI
+6. Upload to PyPI
 twine upload dist/*
