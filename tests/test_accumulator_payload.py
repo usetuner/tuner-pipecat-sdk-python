@@ -2,7 +2,7 @@
 
 from types import SimpleNamespace
 
-from tuner_pipecat_sdk.accumulator import FlowsAccumulator
+from tuner_pipecat_sdk.accumulator import CallAccumulator
 from tuner_pipecat_sdk.models import LatencyTurn
 
 
@@ -11,7 +11,7 @@ def _metric(cls_name: str, **kwargs):
 
 
 def test_build_payload_basic(tuner_config):
-    acc = FlowsAccumulator()
+    acc = CallAccumulator()
     acc.call_start_abs_ns = 1_000_000_000
     acc.call_end_abs_ns = 2_000_000_000
     acc.done = True
@@ -33,7 +33,7 @@ def test_build_payload_basic(tuner_config):
 
 
 def test_llm_token_uses_pipecat_value(tuner_config):
-    acc = FlowsAccumulator()
+    acc = CallAccumulator()
     acc.call_start_abs_ns = 0
     acc.call_end_abs_ns = 1_000_000_000
     acc.done = True
@@ -47,7 +47,7 @@ def test_llm_token_uses_pipecat_value(tuner_config):
 
 
 def test_llm_token_is_none_when_pipecat_zero(tuner_config):
-    acc = FlowsAccumulator()
+    acc = CallAccumulator()
     acc.call_start_abs_ns = 0
     acc.call_end_abs_ns = 1_000_000_000
     acc.done = True
@@ -56,7 +56,7 @@ def test_llm_token_is_none_when_pipecat_zero(tuner_config):
 
 
 def test_tts_char_count_uses_pipecat_value(tuner_config):
-    acc = FlowsAccumulator()
+    acc = CallAccumulator()
     acc.call_start_abs_ns = 0
     acc.call_end_abs_ns = 1_000_000_000
     acc.done = True
@@ -66,7 +66,7 @@ def test_tts_char_count_uses_pipecat_value(tuner_config):
 
 
 def test_tts_char_count_is_none_when_pipecat_zero(tuner_config):
-    acc = FlowsAccumulator()
+    acc = CallAccumulator()
     acc.call_start_abs_ns = 0
     acc.call_end_abs_ns = 1_000_000_000
     acc.done = True
@@ -75,7 +75,7 @@ def test_tts_char_count_is_none_when_pipecat_zero(tuner_config):
 
 
 def test_enrich_transcript_user_and_assistant(tuner_config):
-    acc = FlowsAccumulator()
+    acc = CallAccumulator()
     acc.call_start_abs_ns = 0
     acc.call_end_abs_ns = 1_000_000_000
     acc.done = True
@@ -103,7 +103,7 @@ def test_enrich_transcript_user_and_assistant(tuner_config):
 
 
 def test_enrich_transcript_skips_system(tuner_config):
-    acc = FlowsAccumulator()
+    acc = CallAccumulator()
     acc.call_start_abs_ns = 0
     acc.call_end_abs_ns = 1_000_000_000
     acc.done = True
@@ -131,7 +131,7 @@ def test_enrich_transcript_skips_system(tuner_config):
 
 
 def test_payload_transcript_preserves_conversation_order(tuner_config):
-    acc = FlowsAccumulator()
+    acc = CallAccumulator()
     base_ns = 1_000_000_000
     acc.call_start_abs_ns = base_ns
     acc.call_end_abs_ns = base_ns + 10_000_000_000
@@ -155,9 +155,7 @@ def test_payload_transcript_preserves_conversation_order(tuner_config):
         {"role": "user", "content": "Hi"},
         {
             "role": "assistant",
-            "tool_calls": [
-                {"id": "tc-1", "function": {"name": "transfer", "arguments": "{}"}}
-            ],
+            "tool_calls": [{"id": "tc-1", "function": {"name": "transfer", "arguments": "{}"}}],
         },
         {"role": "tool", "tool_call_id": "tc-1", "content": '{"ok": true}'},
         {"role": "assistant", "content": "Done"},
@@ -168,9 +166,8 @@ def test_payload_transcript_preserves_conversation_order(tuner_config):
     assert roles == ["user", "agent_function", "agent_result", "agent"]
 
 
-
 def test_payload_keeps_initial_greeting_before_first_user(tuner_config):
-    acc = FlowsAccumulator()
+    acc = CallAccumulator()
     base_ns = 1_000_000_000
     acc.call_start_abs_ns = base_ns
     acc.call_end_abs_ns = base_ns + 5_000_000_000
@@ -203,3 +200,29 @@ def test_payload_keeps_initial_greeting_before_first_user(tuner_config):
     assert greeting.end_ms == 0
 
 
+def test_build_payload_includes_disconnection_reason(tuner_config):
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = 1_000_000_000
+    acc.call_end_abs_ns = 2_000_000_000
+    acc.done = True
+    acc.set_disconnection_reason("user_hangup")
+    payload = acc.build_payload(tuner_config, [])
+    assert payload.disconnection_reason == "user_hangup"
+
+
+def test_build_payload_disconnection_reason_none_when_unset(tuner_config):
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = 1_000_000_000
+    acc.call_end_abs_ns = 2_000_000_000
+    acc.done = True
+    payload = acc.build_payload(tuner_config, [])
+    assert payload.disconnection_reason is None
+
+
+def test_build_payload_disconnection_reason_omitted_from_dict_when_none(tuner_config):
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = 1_000_000_000
+    acc.call_end_abs_ns = 2_000_000_000
+    acc.done = True
+    payload = acc.build_payload(tuner_config, [])
+    assert "disconnection_reason" not in payload.to_dict()

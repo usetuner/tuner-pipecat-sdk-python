@@ -8,7 +8,7 @@ from .models import AiModels, CallPayload, GeneralMetaData, UsageToken
 from .transcript_enricher import enrich_transcript
 
 if TYPE_CHECKING:
-    from .accumulator import FlowsAccumulator
+    from .accumulator import CallAccumulator
     from .config import TunerConfig
 
 
@@ -21,7 +21,7 @@ def _ensure_monotonic_bounds(segments: list[Any]) -> list[Any]:
 
 
 def build_payload(
-    acc: FlowsAccumulator,
+    acc: CallAccumulator,
     config: TunerConfig,
     transcript: list[dict[str, Any]],
 ) -> CallPayload:
@@ -37,6 +37,7 @@ def build_payload(
         recording_url=config.recording_url,
         transcript_with_tool_calls=enriched,
         call_status="call_ended",
+        disconnection_reason=acc.disconnection_reason,
         duration_ms=max(0, (acc.call_end_abs_ns - acc.call_start_abs_ns) // 1_000_000),
         general_meta_data_raw=GeneralMetaData(
             ai_models=AiModels(

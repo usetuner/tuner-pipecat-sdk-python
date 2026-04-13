@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 from .models import ToolInfo, TranscriptSegment
 
 if TYPE_CHECKING:
-    from .accumulator import FlowsAccumulator
+    from .accumulator import CallAccumulator
 
 
 def build_segment_metadata(*, interrupted: bool = False, **extra: Any) -> dict[str, Any]:
@@ -27,7 +27,7 @@ def parse_json_value(value: Any) -> Any:
         return value
 
 
-def calculate_user_interruptions(acc: FlowsAccumulator) -> dict[int, bool]:
+def calculate_user_interruptions(acc: CallAccumulator) -> dict[int, bool]:
     """User turn idx is an interruption if the previous turn was_interrupted by the user."""
     interrupted: dict[int, bool] = {}
     for idx in range(len(acc.latency_turns)):
@@ -39,7 +39,7 @@ def calculate_user_interruptions(acc: FlowsAccumulator) -> dict[int, bool]:
     return interrupted
 
 
-def calculate_agent_interruptions(acc: FlowsAccumulator) -> dict[int, bool]:
+def calculate_agent_interruptions(acc: CallAccumulator) -> dict[int, bool]:
     """Agent turn idx was interrupted if TurnTrackingObserver reported was_interrupted=True."""
     interrupted: dict[int, bool] = {}
     for idx, turn in enumerate(acc.latency_turns):
@@ -90,6 +90,7 @@ def build_user_segment(
             interrupted=user_interrupted.get(user_index, False),
             node=turn.node if turn else None,
             turn_index=turn.turn_index if turn else None,
+            stt_node_ttfb=turn.stt_ms if turn else None,
             fragments=len(grouped_messages) if len(grouped_messages) > 1 else None,
         ),
     )
@@ -135,7 +136,7 @@ def find_matching_tool_call(
 
 
 def build_agent_result_segment(
-    acc: FlowsAccumulator,
+    acc: CallAccumulator,
     message: dict[str, Any],
     messages: list[dict[str, Any]],
     tool_turn: Any | None = None,
@@ -147,8 +148,7 @@ def build_agent_result_segment(
     completion_ms = acc.get_tool_completion_ms(tool_call_id) if tool_call_id else None
     result_ms = completion_ms if completion_ms is not None else 0
     if tool_turn and (
-        result_ms == 0
-        or (tool_turn.bot_started_ms > 0 and result_ms > tool_turn.bot_started_ms)
+        result_ms == 0 or (tool_turn.bot_started_ms > 0 and result_ms > tool_turn.bot_started_ms)
     ):
         result_ms = tool_turn.user_stopped_ms
 
@@ -164,11 +164,7 @@ def build_agent_result_segment(
         tool=ToolInfo(
             name=function_name,
             request_id=tool_call_id or None,
-            result=(
-                parsed_result
-                if isinstance(parsed_result, dict)
-                else {"value": parsed_result}
-            ),
+            result=(parsed_result if isinstance(parsed_result, dict) else {"value": parsed_result}),
             start_ms=result_ms,
         ),
         metadata=build_segment_metadata(),
@@ -176,7 +172,7 @@ def build_agent_result_segment(
 
 
 def build_agent_text_segment(
-    acc: FlowsAccumulator,
+    acc: CallAccumulator,
     messages: list[dict[str, Any]],
     turn: Any | None,
     assistant_index: int,
@@ -196,15 +192,14 @@ def build_agent_text_segment(
         end_ms=turn.bot_stopped_ms if turn and turn.bot_stopped_ms is not None else 0,
         metadata=build_segment_metadata(
             e2e_latency=(
-                end_to_end_latency
-                if end_to_end_latency and end_to_end_latency > 0
-                else None
+                end_to_end_latency if end_to_end_latency and end_to_end_latency > 0 else None
             ),
             interrupted=agent_interrupted.get(assistant_index, False),
             llm_node_ttft=turn.llm_ms if turn else None,
             tts_node_ttfb=turn.ttfb_ms if turn else None,
             node=node,
             turn_index=turn.turn_index if turn else None,
+            interrupted_at_ms=turn.interrupted_at_ms if turn else None,
         ),
     )
 
@@ -245,7 +240,7 @@ def find_spoken_assistant_message_indices(messages: list[dict[str, Any]]) -> set
 
 
 def enrich_transcript(
-    acc: FlowsAccumulator, messages: list[dict[str, Any]]
+    acc: CallAccumulator, messages: list[dict[str, Any]]
 ) -> list[TranscriptSegment]:
     user_interrupted = calculate_user_interruptions(acc)
     agent_interrupted = calculate_agent_interruptions(acc)
@@ -258,7 +253,7 @@ def enrich_transcript(
     message_idx = 0
     user_idx = 0
     assistant_idx = 0
-    proactive_turn_idx = 0       # cursor into proactive turns (0..latency_offset-1)
+    proactive_turn_idx = 0  # cursor into proactive turns (0..latency_offset-1)
     latency_turn_idx = latency_offset
     tool_turn: Any | None = None
     spoken_indices = find_spoken_assistant_message_indices(messages)
@@ -275,9 +270,7 @@ def enrich_transcript(
             grouped_messages, message_idx = collect_consecutive_user_messages(messages, message_idx)
             real_user_idx = user_idx + latency_offset
             user_turn = (
-                acc.latency_turns[real_user_idx]
-                if real_user_idx < len(acc.latency_turns)
-                else None
+                acc.latency_turns[real_user_idx] if real_user_idx < len(acc.latency_turns) else None
             )
             result.append(
                 build_user_segment(grouped_messages, user_turn, real_user_idx, user_interrupted)
@@ -299,9 +292,7 @@ def enrich_transcript(
             )
             for tool_call in message.get("tool_calls", []):
                 tool_call_id = tool_call.get("id")
-                invocation_ms = (
-                    acc.get_tool_invocation_ms(tool_call_id) or 0 if tool_call_id else 0
-                )
+                invocation_ms = acc.get_tool_invocation_ms(tool_call_id) or 0 if tool_call_id else 0
                 if tool_turn and (
                     invocation_ms == 0
                     or (tool_turn.bot_started_ms > 0 and invocation_ms > tool_turn.bot_started_ms)

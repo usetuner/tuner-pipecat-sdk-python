@@ -222,5 +222,3 @@ def test_call_payload_to_dict():
     assert d["general_meta_data_raw"]["ai_models"]["asr_model"] == "dg"
     assert d["general_meta_data_raw"]["usage_token"]["llm_token"] == 50
     assert "transcript_with_tool_calls" in d
-
-

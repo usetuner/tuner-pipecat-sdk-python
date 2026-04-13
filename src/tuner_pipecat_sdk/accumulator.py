@@ -12,7 +12,7 @@ from .tool_timing_registry import ToolTimingRegistry
 
 
 @dataclass
-class FlowsAccumulator:
+class CallAccumulator:
     """Collects runtime events and produces a final call payload."""
 
     # call-level timing
@@ -29,6 +29,12 @@ class FlowsAccumulator:
     _open_latency_idx: int | None = field(default=None, repr=False)
     # Turn index currently speaking; consumed by on_bot_stopped.
     _bot_turn_idx: int | None = field(default=None, repr=False)
+    # Stable anchor for the user turn the bot is currently responding to.
+    # Persists across multiple bot speech segments within the same user turn —
+    # for example when the bot speaks, executes a tool, then speaks again.
+    # Distinct from _bot_turn_idx which tracks only whether the bot is currently
+    # speaking and is cleared on BotStoppedSpeakingFrame.
+    _current_user_turn_latency_idx: int | None = field(default=None, repr=False)
 
     # Ordered pairing for latency observer callbacks (on_latency_measured then breakdown).
     _pending_latency_ms_queue: deque[int] = field(default_factory=deque, repr=False)
@@ -48,8 +54,23 @@ class FlowsAccumulator:
     # Processed retroactively in on_start once the reference timestamp is known.
     _pending_turn_starts: list[tuple[int, int]] = field(default_factory=list, repr=False)
 
+    # Stable turn index for on_latency_breakdown, set when bot starts speaking.
+    # Decoupled from _active_turn_number so interruptions don't corrupt the target.
+    _pending_breakdown_latency_idx: int | None = field(default=None, repr=False)
+
+    # vad_stopped_ns keyed by turn index — internal timing state kept off the
+    # public LatencyTurn model so it doesn't appear in model_dump() output.
+    _vad_stopped_ns_by_turn: dict[int, int] = field(default_factory=dict, repr=False)
+
+    # Set to True on the first UserStartedSpeakingFrame — used to distinguish
+    # the proactive bot greeting from mid-conversation tool or node transitions.
+    _user_has_spoken: bool = field(default=False, repr=False)
+
     # misc
     done: bool = False
+
+    # ended reason (write-once: first meaningful value wins)
+    _disconnection_reason: str = field(default="", repr=False)
 
     def _rel_ms(self, abs_ns: int) -> int:
         if self.call_start_abs_ns == 0 or abs_ns == 0:
@@ -76,8 +97,20 @@ class FlowsAccumulator:
     def get_total_tts_characters(self) -> int:
         return self._pipecat_tts_chars
 
+    @property
+    def disconnection_reason(self) -> str | None:
+        return self._disconnection_reason or None
+
+    def set_disconnection_reason(self, reason: str) -> None:
+        """Write-once: first meaningful value wins, subsequent calls are no-ops.
+
+        The disconnection_reason_resolver on the observer also calls this at flush time.
+        """
+        if not self._disconnection_reason and reason:
+            self._disconnection_reason = reason
+
     def on_start(self, timestamp_ns: int) -> None:
-        # call_start_abs_ns is pre-initialized in FlowsObserver.__init__ to avoid the
+        # call_start_abs_ns is pre-initialized in the observer __init__ to avoid the
         # StartFrame race condition (TTS queues greeting audio before StartFrame, causing
         # StartFrame to arrive late at the observer). Only fall back to StartFrame time
         # if somehow not yet set.
@@ -89,44 +122,70 @@ class FlowsAccumulator:
         self._pending_turn_starts.clear()
 
     def on_turn_started(self, turn_number: int, timestamp_ns: int) -> None:
-        """Called by TurnTrackingObserver when the user starts speaking.
+        """Open or extend a LatencyTurn for an incoming user speech segment.
 
-        If the previous turn has not yet received a bot response (breakdown not fired),
-        we collapse this into the existing LatencyTurn rather than creating a new one.
-        This handles users who pause briefly and speak again before the bot replies.
-        The breakdown fires once per bot response, so one LatencyTurn must match it.
-        
-        If StartFrame hasn't been processed yet (call_start_abs_ns == 0), the call is
-        deferred and replayed once on_start fires with the correct reference timestamp.
+        A new LatencyTurn is created only when the bot has already started
+        responding to the previous turn (``bot_started_ms > 0``).  Until that
+        point every new user speech segment — whether it is a mid-sentence
+        pause continuation — is collapsed into the existing turn.
+
+        Interruptions (user speaks while bot is speaking) correctly open a new
+        turn because ``bot_started_ms > 0`` at that point.
+
+        This ensures that a single logical user→bot exchange always maps to
+        exactly one LatencyTurn regardless of how many VAD/turn-detection
+        events fire during that exchange, which in turn keeps tool call
+        timestamps, latency breakdowns, and bot speech attribution consistent.
         """
-        
         if self.call_start_abs_ns == 0:
             self._pending_turn_starts.append((turn_number, timestamp_ns))
             return
 
-        if self._open_latency_idx is not None and self._open_latency_idx < len(self.latency_turns):
-            # Collapse consecutive user fragments before bot starts speaking.
-            active_turn = self.latency_turns[self._open_latency_idx]
-            if active_turn.bot_started_ms == 0:
-                started_ms = self._rel_ms(timestamp_ns)
-                if active_turn.user_started_ms == 0:
-                    active_turn.user_started_ms = started_ms
-                else:
-                    active_turn.user_started_ms = min(
-                        active_turn.user_started_ms, started_ms
-                    )
-                self._turn_to_latency_idx[turn_number] = self._open_latency_idx
-                self._active_turn_number = turn_number
-                return
+        started_ms = self._rel_ms(timestamp_ns)
 
+        # ── Collapse guard ────────────────────────────────────────────────────
+        # Collapse into the existing turn only when the bot has not yet started
+        # speaking (bot_started_ms == 0). This covers mid-sentence pauses where
+        # the user briefly stops and then continues before the bot responds.
+        # Interruptions are excluded because bot_started_ms > 0 by that point,
+        # and they correctly open a new LatencyTurn.
+        #
+        # Both conditions are intentionally checked and are not redundant:
+        # - bot_started_ms == 0: bot hasn't spoken yet for this turn
+        # - not llm_completed: in async pipelines the LLM can finish and set
+        #   llm_completed=True before TTS fires and bot_started_ms is written.
+        #   Without this check, a user follow-up during that gap would collapse
+        #   into the stale turn instead of opening a fresh one.
+        if self._current_user_turn_latency_idx is not None:
+            idx = self._current_user_turn_latency_idx
+            if idx < len(self.latency_turns):
+                current = self.latency_turns[idx]
+                if current.bot_started_ms == 0 and not current.llm_completed:
+                    if current.user_started_ms == 0:
+                        current.user_started_ms = started_ms
+                    else:
+                        current.user_started_ms = min(current.user_started_ms, started_ms)
+                    self._turn_to_latency_idx[turn_number] = idx
+                    self._active_turn_number = turn_number
+                    # Keep _open_latency_idx pointed at this turn if it was
+                    # already cleared — restoring it ensures on_bot_started_speaking
+                    # can still find its primary anchor.
+                    if self._open_latency_idx is None:
+                        self._open_latency_idx = idx
+                    return
+
+        # ── New turn ──────────────────────────────────────────────────────────
+        # The bot has already started or finished responding, or there is no
+        # previous turn.  Open a fresh LatencyTurn.
         new_idx = len(self.latency_turns)
         self._open_latency_idx = new_idx
+        self._current_user_turn_latency_idx = new_idx
         self._turn_to_latency_idx[turn_number] = new_idx
         self._active_turn_number = turn_number
         self.latency_turns.append(
             LatencyTurn(
                 turn_index=new_idx,
-                user_started_ms=self._rel_ms(timestamp_ns),
+                user_started_ms=started_ms,
             )
         )
 
@@ -139,6 +198,12 @@ class FlowsAccumulator:
 
     def on_user_started_speaking(self, timestamp_ns: int) -> None:
         """Use frame timestamp as the authoritative user-start anchor for the active turn."""
+        self._user_has_spoken = True
+        # If bot is currently speaking, this is an interruption.
+        # Record when the user started cutting in on the BOT's current turn.
+        if self._bot_turn_idx is not None and self._bot_turn_idx < len(self.latency_turns):
+            self.latency_turns[self._bot_turn_idx].interrupted_at_ms = self._rel_ms(timestamp_ns)
+
         if self._active_turn_number is None:
             return
         idx = self._turn_to_latency_idx.get(self._active_turn_number)
@@ -170,18 +235,21 @@ class FlowsAccumulator:
         self.registry.record_completion_ns(tool_call_id, timestamp_ns)
 
     def on_bot_stopped(self, timestamp_ns: int) -> None:
+        """Record the end of a bot speech segment.
+
+        Clears ``_bot_turn_idx`` to signal that the bot is no longer speaking,
+        but deliberately preserves ``_current_user_turn_latency_idx`` so that
+        any subsequent speech segment within the same user turn can still locate
+        its ``LatencyTurn`` via ``on_bot_started_speaking``.
+        """
         if self.done:
             return
         bot_stopped_ms = self._rel_ms(timestamp_ns)
         if self._bot_turn_idx is not None and self._bot_turn_idx < len(self.latency_turns):
-            # Keep bot stop anchored to the same turn chosen at breakdown time,
-            # even if a new user turn started meanwhile (interruption case).
             self.latency_turns[self._bot_turn_idx].bot_stopped_ms = bot_stopped_ms
             self._bot_turn_idx = None
         else:
-            logger.warning(
-                "[flows-tuner] bot_stopped with no active bot turn index; ignoring event"
-            )
+            logger.warning("[tuner] bot_stopped with no active bot turn index; ignoring event")
 
     def on_function_call_in_progress(self, frame: Any, timestamp_ns: int) -> None:
         tool_call_id = getattr(frame, "tool_call_id", None)
@@ -189,65 +257,126 @@ class FlowsAccumulator:
             self.registry.record_invocation_ns(tool_call_id, timestamp_ns)
 
     def on_bot_started_speaking(self, timestamp_ns: int) -> None:
-        if self._open_latency_idx is None or self._open_latency_idx >= len(self.latency_turns):
+        """Record the start of a bot speech segment and bind it to the active user turn.
+
+        Resolution order for the target LatencyTurn:
+
+        1. _open_latency_idx — set when a user turn opens, consumed by the first bot
+        speech. Handles the common case and the initial speech of multi-speech turns.
+
+        2. _current_user_turn_latency_idx — stable anchor for the lifetime of the user
+        turn. Used for every subsequent speech segment after _open_latency_idx is
+        consumed.
+
+        If the resolved turn already has a complete bot response (bot_stopped_ms > 0),
+        a new LatencyTurn is created for the fresh exchange.
+
+        bot_started_ms is written only once so it always reflects when the bot first
+        began speaking in response to the user, regardless of how many segments follow.
+        """
+        if self._open_latency_idx is not None and self._open_latency_idx < len(self.latency_turns):
+            idx = self._open_latency_idx
+            self._open_latency_idx = None
+        elif (
+            self._current_user_turn_latency_idx is not None
+            and self._current_user_turn_latency_idx < len(self.latency_turns)
+        ):
+            idx = self._current_user_turn_latency_idx
+        elif not self.latency_turns:
+            # Safety net: if no user turn exists yet, the bot is greeting proactively.
+            # In practice on_turn_started always fires first via pipeline internals,
+            # but if that changes this ensures the greeting is still captured correctly.
+            turn = LatencyTurn(turn_index=0, is_proactive=True)
+            turn.bot_started_ms = self._rel_ms(timestamp_ns)
+            self.latency_turns.append(turn)
+            self._bot_turn_idx = 0
+            self._pending_breakdown_latency_idx = 0
             return
-        turn = self.latency_turns[self._open_latency_idx]
-        turn.bot_started_ms = self._rel_ms(timestamp_ns)
-        self._bot_turn_idx = self._open_latency_idx
-        self._open_latency_idx = None
+        else:
+            return
+
+        # If the resolved turn already has a complete bot response, this
+        # new speech is a fresh exchange — create a new LatencyTurn for it.
+        if self.latency_turns[idx].bot_stopped_ms is not None:
+            new_idx = len(self.latency_turns)
+            self.latency_turns.append(LatencyTurn(turn_index=new_idx))
+            self._current_user_turn_latency_idx = new_idx
+            idx = new_idx
+
+        turn = self.latency_turns[idx]
+        if turn.bot_started_ms == 0:
+            turn.bot_started_ms = self._rel_ms(timestamp_ns)
+        self._bot_turn_idx = idx
+        self._pending_breakdown_latency_idx = idx
+
+    def on_vad_stopped(self, timestamp_ns: int) -> None:
+        if self._active_turn_number is None:
+            # VADUserStoppedSpeakingFrame can legitimately fire before any turn
+            # starts (background noise, room ambience at call start) — debug only.
+            logger.debug("[tuner] on_vad_stopped: no active turn")
+            return
+        idx = self._turn_to_latency_idx.get(self._active_turn_number)
+        if idx is None or idx >= len(self.latency_turns):
+            logger.warning("[tuner] on_vad_stopped: active turn not in latency_turns")
+            return
+        self._vad_stopped_ns_by_turn[idx] = timestamp_ns
+
+    def on_user_turn_stopped(self, timestamp_ns: int) -> None:
+        if self._active_turn_number is None:
+            logger.warning("[tuner] on_user_turn_stopped: no active turn")
+            return
+        idx = self._turn_to_latency_idx.get(self._active_turn_number)
+        if idx is None or idx >= len(self.latency_turns):
+            logger.warning("[tuner] on_user_turn_stopped: active turn not in latency_turns")
+            return
+        turn = self.latency_turns[idx]
+        vad_stopped_ns = self._vad_stopped_ns_by_turn.get(idx)
+        if vad_stopped_ns is None:
+            logger.warning("[tuner] on_user_turn_stopped: vad_stopped_ns not set on turn {}", idx)
+            return
+        gap_ms = (timestamp_ns - vad_stopped_ns) // 1_000_000
+        turn.stt_ms = max(0, gap_ms)
 
     def on_latency_measured(self, latency_secs: float) -> None:
         self._pending_latency_ms_queue.append(max(0, int(latency_secs * 1000)))
 
     def on_latency_breakdown(self, breakdown: Any) -> None:
-        if self._active_turn_number is None:
+        if self._pending_breakdown_latency_idx is None:
             logger.warning(
-                "[flows-tuner] on_latency_breakdown fired with no active turn — skipping"
+                "[tuner] on_latency_breakdown fired with no pending breakdown idx — skipping"
             )
             return
-        idx = self._turn_to_latency_idx.get(self._active_turn_number)
-        if idx is None or idx >= len(self.latency_turns):
-            logger.warning(
-                "[flows-tuner] on_latency_breakdown: active turn mapping invalid — skipping"
-            )
+        idx = self._pending_breakdown_latency_idx
+
+        self._pending_breakdown_latency_idx = None  # consume immediately
+
+        if idx >= len(self.latency_turns):
+            logger.warning("[tuner] on_latency_breakdown: idx out of range — skipping")
             return
 
         turn = self.latency_turns[idx]
 
         user_start_abs = getattr(breakdown, "user_turn_start_time", None)
-        user_turn_secs = getattr(breakdown, "user_turn_secs", None)
-        user_stop_abs = (
-            (user_start_abs + user_turn_secs)
-            if user_start_abs is not None and user_turn_secs is not None
-            else None
-        )
+
         is_real_user_turn = True
         if user_start_abs is None:
-            # No user speech before this breakdown → proactive bot greeting.
-            # UserBotLatencyObserver sends user_turn_start_time=None when the bot
-            # speaks first without any prior user utterance.
             is_real_user_turn = False
-            turn.is_proactive = True
+            if not self._user_has_spoken:
+                turn.is_proactive = True
+            # _user_has_spoken=True means this is a mid-conversation tool or node transition,
+            # not a new user utterance. Leave bot_started_ms as captured by on_bot_started_speaking.
         else:
             computed_started_ms = self._abs_to_rel_ms(user_start_abs)
             if computed_started_ms > 0:
-                # Prefer breakdown timestamps when available, but only when they represent
-                # a real user utterance (> 0ms from call start). For the initial proactive
-                # bot greeting the breakdown fires with user_turn_start_time ≈ call start,
-                # which would wrongly overwrite the user-turn timing captured by
-                # on_turn_started with 0.
+                # Only write if valid — frame events already captured timing
+                # correctly via on_turn_started, so don't overwrite with 0.
                 turn.user_started_ms = computed_started_ms
-                turn.user_stopped_ms = self._abs_to_rel_ms(user_stop_abs)
-            else:
-                # user_turn_start_time ≈ call start → initial proactive greeting breakdown.
-                # Do not derive bot_started_ms from this latency; on_bot_started_speaking
-                # already captured the correct bot start from the BotStartedSpeakingFrame.
-                is_real_user_turn = False
-                turn.is_proactive = True
+            # computed_started_ms == 0: user spoke within the first milliseconds of the call.
+            # Frame events already captured the correct timing via on_turn_started — skip.
 
         if self._pending_latency_ms_queue:
             latency_ms = self._pending_latency_ms_queue.popleft()
-            if is_real_user_turn:
+            if is_real_user_turn and not turn.interrupted_at_ms and turn.user_stopped_ms > 0:
                 turn.bot_started_ms = turn.user_stopped_ms + latency_ms
 
         ttfb_ms: int | None = None
@@ -269,19 +398,24 @@ class FlowsAccumulator:
             else None
         )
 
-        # Preserve the bot-side turn mapping across interruptions.
-        self._bot_turn_idx = idx
-        if self._open_latency_idx == idx:
-            self._open_latency_idx = None
-
         self._pending_pipecat_llm_processing_s = 0.0
         self._pending_pipecat_tts_processing_s = 0.0
+        turn.llm_completed = True
 
     def on_call_end(self, timestamp_ns: int) -> None:
         if self.done:
             return
         self.done = True
         self.call_end_abs_ns = timestamp_ns
+
+        # If the user was still speaking when the call ended, anchor their
+        # stop time to the call end so the last segment gets a valid timestamp.
+        if self._active_turn_number is not None:
+            idx = self._turn_to_latency_idx.get(self._active_turn_number)
+            if idx is not None and idx < len(self.latency_turns):
+                turn = self.latency_turns[idx]
+                if turn.user_started_ms > 0 and turn.user_stopped_ms == 0:
+                    turn.user_stopped_ms = self._rel_ms(timestamp_ns)
 
     def on_metrics_frame(self, frame: Any) -> None:
         for d in getattr(frame, "data", []):
@@ -295,9 +429,20 @@ class FlowsAccumulator:
                 processor = str(getattr(d, "processor", "")).lower()
                 val = getattr(d, "value", 0) or 0
                 if "tts" in processor:
+                    # Assignment (not +=): only one TTS job runs per turn, so the latest
+                    # value is always the correct one. Multiple LLM steps can fire in a
+                    # single turn (e.g. parallel tool calls), so LLM uses accumulation.
                     self._pending_pipecat_tts_processing_s = val
                 else:
-                    self._pending_pipecat_llm_processing_s = val
+                    self._pending_pipecat_llm_processing_s += val
+                    # LLM finished processing — mark current turn as llm_completed
+                    # so the collapse guard knows TTS was supposed to fire,
+                    # preventing user follow-up messages from collapsing into
+                    # the failed turn when bot_started_ms stays 0.
+                    if self._current_user_turn_latency_idx is not None:
+                        idx = self._current_user_turn_latency_idx
+                        if idx < len(self.latency_turns):
+                            self.latency_turns[idx].llm_completed = True
 
     def build_payload(self, config: Any, transcript: list[dict[str, Any]]) -> CallPayload:
         return build_payload(self, config, transcript)

@@ -1,0 +1,36 @@
+{
+  "doctors": [
+    {
+      "id": "dr_patel",
+      "name": "Dr. Sarah Patel",
+      "specialty": "General Practice"
+    },
+    {
+      "id": "dr_lee",
+      "name": "Dr. James Lee",
+      "specialty": "General Practice"
+    }
+  ],
+  "availability": {
+    "dr_patel": {
+      "2026-04-01": ["09:00", "10:30", "14:00", "15:30"],
+      "2026-04-02": ["09:00", "11:00", "13:30"],
+      "2026-04-03": ["10:00", "14:00", "16:00"]
+    },
+    "dr_lee": {
+      "2026-04-01": ["08:30", "11:00", "13:00", "16:30"],
+      "2026-04-02": ["09:30", "12:00", "15:00"],
+      "2026-04-03": ["08:30", "11:30", "14:30"]
+    }
+  },
+  "existing_appointments": {
+    "alex johnson": {
+      "appointment_id": "APT-1042",
+      "patient_name": "Alex Johnson",
+      "doctor": "Dr. Sarah Patel",
+      "date": "2026-04-01",
+      "time": "10:30",
+      "reason": "Annual checkup"
+    }
+  }
+}

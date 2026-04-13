@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
@@ -15,11 +16,14 @@ class LatencyTurn(BaseModel):
     ttfb_ms: int | None = None
     llm_ms: int | None = None
     tts_ms: int | None = None
+    stt_ms: int | None = None
     bot_started_ms: int = 0
     user_stopped_ms: int = 0
     user_started_ms: int = 0
     bot_stopped_ms: int | None = None
+    interrupted_at_ms: int | None = None
     was_interrupted: bool | None = None
+    llm_completed: bool = False
 
 
 class TranscriptWord(BaseModel):
@@ -79,7 +83,7 @@ class AiModels(BaseModel):
 
 
 class UsageToken(BaseModel):
-    asr_duration: int
+    asr_duration: int  # seconds (call wall-clock duration: end_ts - start_ts)
     llm_token: int | None = None
     tts_character_count: int | None = None
 
@@ -87,6 +91,28 @@ class UsageToken(BaseModel):
 class GeneralMetaData(BaseModel):
     ai_models: AiModels
     usage_token: UsageToken
+
+
+class DisconnectReason(str, Enum):
+    """Well-known call ended-reason strings.
+
+    Extends str so values compare equal to their string representations —
+    DisconnectReason.USER_HANGUP == "user_hangup" is True — meaning no
+    casting is needed when passing to disconnection_reason_resolver.
+
+    Usage::
+
+        FlowsObserver(
+            ...
+            disconnection_reason_resolver=lambda: DisconnectReason.USER_HANGUP
+        )
+    """
+
+    USER_HANGUP = "user_hangup"
+    AGENT_HANGUP = "agent_hangup"
+    ERROR = "error"
+    TIMEOUT = "timeout"
+    UNKNOWN = "unknown"
 
 
 class CallPayload(BaseModel):
@@ -99,6 +125,7 @@ class CallPayload(BaseModel):
     call_status: str
     duration_ms: int
     general_meta_data_raw: GeneralMetaData
+    disconnection_reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize payload to a JSON-ready dict."""
@@ -115,4 +142,5 @@ __all__ = [
     "UsageToken",
     "GeneralMetaData",
     "CallPayload",
+    "DisconnectReason",
 ]

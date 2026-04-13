@@ -1800,71 +1800,17 @@ wheels = [
 ]
 
 [[package]]
-name = "pipecat-flows-tuner"
-version = "0.1.0"
-source = { editable = "." }
+name = "pipecat-ai-flows"
+version = "0.0.24"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "httpx" },
+    { name = "docstring-parser" },
     { name = "loguru" },
     { name = "pipecat-ai" },
-    { name = "pydantic" },
 ]
-
-[package.optional-dependencies]
-dev = [
-    { name = "hatch" },
-    { name = "mypy" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "pytest-cov" },
-    { name = "ruff" },
-    { name = "twine" },
-]
-lint = [
-    { name = "ruff" },
-]
-publish = [
-    { name = "hatch" },
-    { name = "twine" },
-]
-test = [
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "pytest-cov" },
-]
-type = [
-    { name = "mypy" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "pytest-cov" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "hatch", marker = "extra == 'publish'", specifier = ">=1.12" },
-    { name = "httpx", specifier = ">=0.27" },
-    { name = "loguru", specifier = "~=0.7.2" },
-    { name = "mypy", marker = "extra == 'type'", specifier = ">=1.10" },
-    { name = "pipecat-ai", specifier = ">=0.0.105" },
-    { name = "pipecat-flows-tuner", extras = ["test", "lint", "type", "publish"], marker = "extra == 'dev'" },
-    { name = "pydantic", specifier = ">=2.0" },
-    { name = "pytest", marker = "extra == 'test'", specifier = ">=8.0" },
-    { name = "pytest-asyncio", marker = "extra == 'test'", specifier = ">=0.24" },
-    { name = "pytest-cov", marker = "extra == 'test'", specifier = ">=5.0" },
-    { name = "ruff", marker = "extra == 'lint'", specifier = ">=0.6" },
-    { name = "twine", marker = "extra == 'publish'", specifier = ">=5.0" },
-]
-provides-extras = ["test", "lint", "type", "publish", "dev"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest", specifier = ">=9.0.2" },
-    { name = "pytest-asyncio", specifier = ">=1.3.0" },
-    { name = "pytest-cov", specifier = ">=7.0.0" },
+sdist = { url = "https://files.pythonhosted.org/packages/2d/a5/ced96c03eb7c696330dbc6e318dee60346975d4001906827f46def13f09e/pipecat_ai_flows-0.0.24.tar.gz", hash = "sha256:05d63d763e8235e56c6b797b997cf9a41c7194de3f5e491dca58d598fa7403ec", size = 4988350, upload-time = "2026-03-20T21:07:08.116Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/58/19/9db846f1fa978a31297de83f79a8cd6559eacf6e7a242ff70be2ccf20585/pipecat_ai_flows-0.0.24-py3-none-any.whl", hash = "sha256:5174e6efd4a38125be283edf5ee4cd2ccab1af3205f4b8a826a26137ff400e35", size = 31103, upload-time = "2026-03-20T21:07:06.359Z" },
 ]
 
 [[package]]
@@ -2787,6 +2733,79 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/d8/43/7935f8ea93fcb6680bc10a6fdbf534075c198eeead59150dd5ed68449642/trove_classifiers-2026.1.14.14.tar.gz", hash = "sha256:00492545a1402b09d4858605ba190ea33243d361e2b01c9c296ce06b5c3325f3", size = 16997, upload-time = "2026-01-14T14:54:50.526Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/bb/4a/2e5583e544bc437d5e8e54b47db87430df9031b29b48d17f26d129fa60c0/trove_classifiers-2026.1.14.14-py3-none-any.whl", hash = "sha256:1f9553927f18d0513d8e5ff80ab8980b8202ce37ecae0e3274ed2ef11880e74d", size = 14197, upload-time = "2026-01-14T14:54:49.067Z" },
+]
+
+[[package]]
+name = "tuner-pipecat-sdk"
+version = "0.1.1"
+source = { editable = "." }
+dependencies = [
+    { name = "httpx" },
+    { name = "loguru" },
+    { name = "pipecat-ai" },
+    { name = "pydantic" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "hatch" },
+    { name = "mypy" },
+    { name = "pipecat-ai-flows" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "pytest-cov" },
+    { name = "ruff" },
+    { name = "twine" },
+]
+flows = [
+    { name = "pipecat-ai-flows" },
+]
+lint = [
+    { name = "ruff" },
+]
+publish = [
+    { name = "hatch" },
+    { name = "twine" },
+]
+test = [
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "pytest-cov" },
+]
+type = [
+    { name = "mypy" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "pytest-cov" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "hatch", marker = "extra == 'publish'", specifier = ">=1.12" },
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "loguru", specifier = "~=0.7.2" },
+    { name = "mypy", marker = "extra == 'type'", specifier = ">=1.10" },
+    { name = "pipecat-ai", specifier = ">=0.0.105" },
+    { name = "pipecat-ai-flows", marker = "extra == 'flows'", specifier = ">=0.0.24" },
+    { name = "pydantic", specifier = ">=2.0" },
+    { name = "pytest", marker = "extra == 'test'", specifier = ">=8.0" },
+    { name = "pytest-asyncio", marker = "extra == 'test'", specifier = ">=0.24" },
+    { name = "pytest-cov", marker = "extra == 'test'", specifier = ">=5.0" },
+    { name = "ruff", marker = "extra == 'lint'", specifier = ">=0.6" },
+    { name = "tuner-pipecat-sdk", extras = ["test", "lint", "type", "publish", "flows"], marker = "extra == 'dev'" },
+    { name = "twine", marker = "extra == 'publish'", specifier = ">=5.0" },
+]
+provides-extras = ["flows", "test", "lint", "type", "publish", "dev"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=9.0.2" },
+    { name = "pytest-asyncio", specifier = ">=1.3.0" },
+    { name = "pytest-cov", specifier = ">=7.0.0" },
 ]
 
 [[package]]

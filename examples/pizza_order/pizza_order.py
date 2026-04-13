@@ -43,13 +43,13 @@ from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.deepgram.tts import DeepgramTTSService
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.transports.base_transport import BaseTransport, TransportParams
-
 from pipecat_flows import (
     FlowArgs,
     FlowManager,
     FlowsFunctionSchema,
     NodeConfig,
 )
+
 from tuner_pipecat_sdk import FlowsObserver
 
 load_dotenv(override=True)
@@ -234,7 +234,9 @@ def create_farewell_node(confirmed: bool = True) -> NodeConfig:
             "and wish them a great meal. Then end the conversation."
         )
     else:
-        content = "Apologise politely, tell them they can call back anytime, and end the conversation."
+        content = (
+            "Apologise politely, tell them they can call back anytime, and end the conversation."
+        )
 
     node = NodeConfig(
         name="farewell",
