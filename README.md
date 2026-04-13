@@ -17,6 +17,11 @@ then sends a structured `CallPayload` to the Tuner API when a call ends.
 pip install tuner-pipecat-sdk
 ```
 
+To use pipecat-flows, install with the `flows` extra:
+
+```bash
+pip install tuner-pipecat-sdk[flows]
+```
 
 ## Quick Start Example
 ---
@@ -27,10 +32,10 @@ Use `Observer` when your pipeline manages context directly via `OpenAILLMContext
 
 ```python
 import uuid
-from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
+from pipecat.processors.aggregators.llm_context import LLMContext
 from tuner_pipecat_sdk import Observer
 
-context = OpenAILLMContext(messages=[])
+context = LLMContext()
 
 observer = Observer(
     api_key="YOUR_TUNER_API_KEY",
