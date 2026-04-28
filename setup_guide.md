@@ -15,6 +15,8 @@ pip install -e ".[dev]"
 
 **Examples** under `examples/` depend on this SDK via a **local path** (`tool.uv.sources`). Use **`uv sync`** inside each example directory, or install the SDK from the repo root with `pip install -e .` first, then `pip install -e .` in the example (plain `pip` does not read `uv.sources`).
 
+** Run Tests **
+uv run pytest tests/ -v
 
 ## Examples
 

@@ -6,9 +6,6 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-if sys.version_info < (3, 11):
-    pytest.skip("pipecat-flows requires Python 3.11+", allow_module_level=True)
-
 from pipecat.frames.frames import EndFrame
 
 from tuner_pipecat_sdk.flows_observer import FlowsObserver

@@ -42,18 +42,12 @@ def test_full_call_flow_single_turn(config):
 
     # Runtime observer data
     acc.on_latency_measured(0.15)
-    acc.on_metrics_frame(SimpleNamespace(data=[_metric("TTSUsageMetricsData", value=11)]))
-    acc._pending_pipecat_llm_processing_s = 0.05
-    acc._pending_pipecat_tts_processing_s = 0.05
+    acc.on_metrics_frame(SimpleNamespace(data=[
+        _metric("TTSUsageMetricsData", value=11),
+        _metric("TTFBMetricsData", processor="openaillmservice", value=0.06),
+        _metric("TTFBMetricsData", processor="cartesiattsservice", value=0.1),
+    ]))
     acc.on_bot_started_speaking(base_ns + 250_000_000)
-    acc.on_latency_breakdown(
-        SimpleNamespace(
-            user_turn_start_time=1.05,
-            user_turn_secs=0.05,
-            ttfb=[SimpleNamespace(duration_secs=0.1)],
-            function_calls=[],
-        )
-    )
     acc.on_bot_stopped(base_ns + 400_000_000)
 
     assert len(acc.latency_turns) == 1
@@ -63,6 +57,7 @@ def test_full_call_flow_single_turn(config):
     assert turn.bot_started_ms == 250
     assert turn.bot_stopped_ms == 400
     assert turn.ttfb_ms == 100
+    assert turn.llm_ms == 60
 
     # End
     acc.on_call_end(base_ns + 500_000_000)
@@ -100,17 +95,10 @@ def test_full_call_flow_with_tool_call(config):
 
     acc.on_turn_started(1, base_ns + 10_000_000)  # user started speaking at +10ms
     acc.on_latency_measured(0.15)
+    acc.on_metrics_frame(SimpleNamespace(data=[
+        _metric("TTFBMetricsData", processor="openaillmservice", value=0.07),
+    ]))
     acc.on_bot_started_speaking(base_ns + 150_000_000)
-    acc.on_latency_breakdown(
-        SimpleNamespace(
-            user_turn_start_time=2.01,
-            user_turn_secs=0.04,
-            ttfb=[SimpleNamespace(duration_secs=0.07)],
-            function_calls=[
-                SimpleNamespace(function_name="transfer", start_time=2.1, duration_secs=0.02)
-            ],
-        )
-    )
     acc.on_bot_stopped(base_ns + 350_000_000)
     acc.on_call_end(base_ns + 400_000_000)
 

@@ -13,3 +13,4 @@ dist/
 .env
 settings.json
 settings.local.json
+.vscode/

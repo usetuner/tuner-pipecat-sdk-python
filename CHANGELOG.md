@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - **Breaking:** minimum `pipecat-ai` version bumped to `>=1.0.0`
+- Dropped support for python 3.10
 - Updated `Observer.attach_context` to use `LLMContext` (replaces `OpenAILLMContext` removed in pipecat 1.0.0)
 
 ---
