@@ -102,132 +102,65 @@ def test_on_turn_ended_sets_was_interrupted():
     assert acc._active_turn_number is None
 
 
-def test_on_latency_breakdown_enriches_existing_turn():
+def test_on_metrics_frame_captures_llm_ttfb():
+    """TTFBMetricsData from LLM is stored in _pending_llm_ttfb_ms."""
     acc = CallAccumulator()
     acc.call_start_abs_ns = 1_000_000_000
-    acc._pending_pipecat_llm_processing_s = 0.03
-    acc._pending_pipecat_tts_processing_s = 0.07
-    acc.on_latency_measured(0.2)
+    llm_ttfb = type("TTFBMetricsData", (), {"processor": "openaillmservice", "value": 0.05})()
+    acc.on_metrics_frame(SimpleNamespace(data=[llm_ttfb]))
+    assert acc._pending_llm_ttfb_ms == 50
 
-    # Turn must already exist (created by on_turn_started)
+
+def test_on_metrics_frame_captures_tts_ttfb():
+    """TTFBMetricsData from TTS is stored in _pending_tts_ttfb_ms."""
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = 1_000_000_000
+    tts_ttfb = type("TTFBMetricsData", (), {"processor": "cartesiattsservice", "value": 0.03})()
+    acc.on_metrics_frame(SimpleNamespace(data=[tts_ttfb]))
+    assert acc._pending_tts_ttfb_ms == 30
+
+
+def test_on_bot_started_speaking_applies_pending_ttfb():
+    """Pending TTFB values are written to the turn when bot starts speaking."""
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = 1_000_000_000
     acc.on_turn_started(1, 1_000_000_000 + 500_000_000)
 
-    # user_turn_start_time=1.5, user_turn_secs=0.2 → stopped at 1.7s → 700ms
-    acc.on_user_stopped_speaking(1_000_000_000 + 700_000_000)
+    llm_ttfb = type("TTFBMetricsData", (), {"processor": "openaillmservice", "value": 0.06})()
+    tts_ttfb = type("TTFBMetricsData", (), {"processor": "cartesiattsservice", "value": 0.04})()
+    acc.on_metrics_frame(SimpleNamespace(data=[llm_ttfb, tts_ttfb]))
+
     acc.on_bot_started_speaking(1_000_000_000 + 900_000_000)
-    breakdown = SimpleNamespace(
-        user_turn_start_time=1.5,
-        user_turn_secs=0.2,
-        ttfb=[SimpleNamespace(duration_secs=0.05)],
-        function_calls=[],
-    )
-    acc.on_latency_breakdown(breakdown)
-
-    assert len(acc.latency_turns) == 1
-    turn = acc.latency_turns[0]
-    assert turn.user_started_ms == 500
-    assert turn.user_stopped_ms == 700
-    assert turn.bot_started_ms == 900
-    assert turn.ttfb_ms == 50
-    assert turn.llm_ms == 30
-    assert turn.tts_ms == 70
-
-
-def test_on_latency_breakdown_keeps_bot_started_unset_when_latency_missing():
-    acc = CallAccumulator()
-    acc.call_start_abs_ns = 1_000_000_000
-    acc.on_turn_started(1, 1_000_000_000 + 200_000_000)
-    acc.on_user_stopped_speaking(1_000_000_000 + 400_000_000)  # user stopped at +400ms
-    acc.on_bot_started_speaking(1_000_000_000 + 600_000_000)
-    breakdown = SimpleNamespace(
-        user_turn_start_time=1.2,
-        user_turn_secs=0.2,
-        ttfb=[SimpleNamespace(duration_secs=0.04)],
-        function_calls=[],
-    )
-    acc.on_latency_breakdown(breakdown)
-    assert acc.latency_turns[0].bot_started_ms == 600
-    assert acc.latency_turns[0].ttfb_ms == 40
-
-
-def test_on_latency_breakdown_preserves_user_started_ms_when_user_turn_start_time_missing():
-    """Keep on_turn_started timestamp when breakdown start time is missing."""
-    acc = CallAccumulator()
-    acc.call_start_abs_ns = 1_000_000_000
-    acc.on_turn_started(1, 1_000_000_000 + 500_000_000)  # user_started_ms = 500
-    acc.on_latency_measured(0.2)
-
-    breakdown = SimpleNamespace(
-        user_turn_start_time=None,
-        user_turn_secs=None,
-        ttfb=[SimpleNamespace(duration_secs=0.05)],
-        function_calls=[],
-    )
-    acc.on_latency_breakdown(breakdown)
 
     turn = acc.latency_turns[0]
-    assert turn.user_started_ms == 500  # preserved from on_turn_started
-    assert turn.user_stopped_ms == 0  # unknown (no fallback)
-    assert turn.bot_started_ms == 0  # not set for proactive breakdown (is_real_user_turn=False)
+    assert turn.llm_ms == 60
+    assert turn.ttfb_ms == 40
+    # pending fields consumed
+    assert acc._pending_llm_ttfb_ms is None
+    assert acc._pending_tts_ttfb_ms is None
 
 
-def test_on_latency_breakdown_skips_when_no_active_turn(caplog):
-    """on_latency_breakdown logs a warning and skips when no turn is active."""
-    import logging
-
-    acc = CallAccumulator()
-    acc.call_start_abs_ns = 1_000_000_000
-    breakdown = SimpleNamespace(
-        user_turn_start_time=1.5,
-        user_turn_secs=0.2,
-        ttfb=[],
-        function_calls=[],
-    )
-    with caplog.at_level(logging.WARNING):
-        acc.on_latency_breakdown(breakdown)
-    assert not acc.latency_turns
-
-
-def test_on_latency_breakdown_skips_overwrite_for_initial_proactive_greeting():
-    """Initial proactive greeting fires breakdown with user_turn_start_time=None.
-
-    is_real_user_turn=False so bot_started_ms must NOT be overwritten by the
-    latency queue, and user timing from on_turn_started must be preserved.
-    The latency IS consumed from the queue so subsequent real-turn breakdowns
-    get the correct value.
-    """
+def test_proactive_turn_ttfb_from_metrics_frame():
+    """TTFB from MetricsFrame before bot's first speech is applied to the proactive turn."""
     base_ns = 1_000_000_000
     acc = CallAccumulator()
     acc.call_start_abs_ns = base_ns
-
-    acc.on_latency_measured(1.132)
 
     # Ghost turn from pipeline internal frame before user speaks.
     acc.on_turn_started(0, base_ns + 44_000_000)
     assert acc.latency_turns[0].user_started_ms == 44
 
-    # Bot greeting starts at +800ms.
-    acc.on_bot_started_speaking(base_ns + 800_000_000)
-    assert acc.latency_turns[0].bot_started_ms == 800
+    # LLM+TTS TTFB metrics arrive before bot starts speaking
+    llm_ttfb = type("TTFBMetricsData", (), {"processor": "openaillmservice", "value": 0.769})()
+    tts_ttfb = type("TTFBMetricsData", (), {"processor": "cartesiattsservice", "value": 0.12})()
+    acc.on_metrics_frame(SimpleNamespace(data=[llm_ttfb, tts_ttfb]))
 
-    # Greeting breakdown fires with user_turn_start_time=None — real production signal.
-    acc.on_latency_breakdown(
-        SimpleNamespace(
-            user_turn_start_time=None,
-            user_turn_secs=None,
-            ttfb=[SimpleNamespace(duration_secs=0.769)],
-            function_calls=[],
-        )
-    )
+    acc.on_bot_started_speaking(base_ns + 800_000_000)
 
     turn = acc.latency_turns[0]
-    assert turn.is_proactive is True
-    # bot_started_ms must NOT be overwritten by latency queue.
     assert turn.bot_started_ms == 800
-    # ttfb from greeting breakdown is captured.
-    assert turn.ttfb_ms == 769
-    # latency was consumed — queue is empty.
-    assert len(acc._pending_latency_ms_queue) == 0
+    assert turn.llm_ms == 769
+    assert turn.ttfb_ms == 120
 
 
 def test_on_call_end_marks_done_without_creating_turns():
@@ -296,18 +229,15 @@ def test_on_call_end_anchors_user_stopped_ms_when_still_speaking():
     assert acc.latency_turns[0].user_stopped_ms == 600
 
 
-def test_on_latency_breakdown_marks_proactive_when_no_user_turn_start():
+def test_on_bot_started_speaking_safety_net_marks_proactive():
+    """Bot speaks before any user turn → safety net creates proactive turn."""
     acc = CallAccumulator()
     acc.call_start_abs_ns = 1_000_000_000
+
+    tts_ttfb = type("TTFBMetricsData", (), {"processor": "cartesiattsservice", "value": 0.1})()
+    acc.on_metrics_frame(SimpleNamespace(data=[tts_ttfb]))
+
     acc.on_bot_started_speaking(1_000_000_000 + 500_000_000)
-    acc.on_latency_breakdown(
-        SimpleNamespace(
-            user_turn_start_time=None,
-            user_turn_secs=None,
-            ttfb=[SimpleNamespace(duration_secs=0.1)],
-            function_calls=[],
-        )
-    )
     assert acc.latency_turns[0].is_proactive is True
     assert acc.latency_turns[0].ttfb_ms == 100
 
@@ -345,39 +275,27 @@ def test_on_metrics_frame_sets_llm_completed_on_current_turn():
 
 
 def test_proactive_greeting_detected_when_user_has_not_spoken():
-    """Breakdown with user_turn_start_time=None before any user speech → is_proactive=True."""
+    """Ghost turn before any user speech: bot responds → is_proactive stays False on the turn
+    (is_proactive is True only on the safety-net path, not on the ghost-turn path)."""
     acc = CallAccumulator()
     acc.call_start_abs_ns = 1_000_000_000
     acc.on_turn_started(0, 1_000_000_000 + 44_000_000)  # ghost turn from pipeline
+
+    tts_ttfb = type("TTFBMetricsData", (), {"processor": "cartesiattsservice", "value": 0.1})()
+    acc.on_metrics_frame(SimpleNamespace(data=[tts_ttfb]))
+
     acc.on_bot_started_speaking(1_000_000_000 + 800_000_000)
-    acc.on_latency_breakdown(
-        SimpleNamespace(
-            user_turn_start_time=None,
-            user_turn_secs=None,
-            ttfb=[SimpleNamespace(duration_secs=0.1)],
-            function_calls=[],
-        )
-    )
-    assert acc.latency_turns[0].is_proactive is True
     assert acc.latency_turns[0].bot_started_ms == 800
     assert acc.latency_turns[0].ttfb_ms == 100
 
 
-def test_mid_conversation_breakdown_not_marked_proactive_when_user_has_spoken():
-    """Breakdown with user_turn_start_time=None mid-conversation → is_proactive stays False."""
+def test_mid_conversation_bot_response_not_marked_proactive():
+    """Mid-conversation bot response (after user speech) is not proactive."""
     acc = CallAccumulator()
     acc.call_start_abs_ns = 1_000_000_000
     acc.on_turn_started(0, 1_000_000_000 + 44_000_000)
     acc.on_user_started_speaking(1_000_000_000 + 2_000_000_000)  # real user speech
     acc.on_bot_started_speaking(1_000_000_000 + 3_000_000_000)
-    acc.on_latency_breakdown(
-        SimpleNamespace(
-            user_turn_start_time=None,
-            user_turn_secs=None,
-            ttfb=[SimpleNamespace(duration_secs=0.1)],
-            function_calls=[],
-        )
-    )
     assert acc.latency_turns[0].is_proactive is False
 
 
@@ -425,15 +343,6 @@ def test_user_started_speaking_before_on_turn_started_creates_turn():
     acc.on_bot_started_speaking(base_ns + 500_000_000)
     assert acc.latency_turns[0].is_proactive is True
 
-    # on_latency_breakdown marks turn 0 as proactive
-    acc.on_latency_breakdown(
-        SimpleNamespace(
-            user_turn_start_time=None,
-            user_turn_secs=None,
-            ttfb=[SimpleNamespace(duration_secs=0.3)],
-            function_calls=[],
-        )
-    )
     acc.on_bot_stopped(base_ns + 1_000_000_000)
 
     # Now: on_user_started_speaking fires inline (before on_turn_started async task)
@@ -463,11 +372,6 @@ def test_user_stopped_and_vad_stopped_work_before_on_turn_started_fires():
 
     # Proactive greeting completes
     acc.on_bot_started_speaking(base_ns + 300_000_000)
-    acc.on_latency_breakdown(
-        SimpleNamespace(
-            user_turn_start_time=None, user_turn_secs=None, ttfb=[], function_calls=[]
-        )
-    )
     acc.on_bot_stopped(base_ns + 800_000_000)
 
     # User speaks — on_user_started_speaking inline
@@ -498,11 +402,6 @@ def test_full_proactive_plus_user_turn_flow():
     # Turn 1: proactive (on_turn_started via StartFrame)
     acc.on_turn_started(1, base_ns + 10_000_000)
     acc.on_bot_started_speaking(base_ns + 500_000_000)
-    acc.on_latency_breakdown(
-        SimpleNamespace(
-            user_turn_start_time=None, user_turn_secs=None, ttfb=[], function_calls=[]
-        )
-    )
     acc.on_bot_stopped(base_ns + 1_200_000_000)
 
     assert acc.latency_turns[0].is_proactive is True
@@ -521,16 +420,9 @@ def test_full_proactive_plus_user_turn_flow():
     # User stops, bot responds
     acc.on_vad_stopped(base_ns + 2_700_000_000)
     acc.on_user_stopped_speaking(base_ns + 2_800_000_000)
+    llm_ttfb = type("TTFBMetricsData", (), {"processor": "openaillmservice", "value": 0.25})()
+    acc.on_metrics_frame(SimpleNamespace(data=[llm_ttfb]))
     acc.on_bot_started_speaking(base_ns + 3_100_000_000)
-    acc.on_latency_measured(0.3)
-    acc.on_latency_breakdown(
-        SimpleNamespace(
-            user_turn_start_time=2.0,
-            user_turn_secs=0.8,
-            ttfb=[SimpleNamespace(duration_secs=0.25)],
-            function_calls=[],
-        )
-    )
     acc.on_bot_stopped(base_ns + 4_000_000_000)
 
     # latency_offset == 1 (one proactive turn)
@@ -539,5 +431,6 @@ def test_full_proactive_plus_user_turn_flow():
     user_turn = acc.latency_turns[1]
     assert user_turn.user_started_ms == 2000
     assert user_turn.user_stopped_ms == 2800
-    assert user_turn.bot_started_ms > 0
+    assert user_turn.bot_started_ms == 3100
     assert user_turn.bot_stopped_ms == 4000
+    assert user_turn.llm_ms == 250
