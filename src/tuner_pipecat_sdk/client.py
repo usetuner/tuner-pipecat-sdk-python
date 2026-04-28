@@ -22,7 +22,7 @@ async def post_call(config: TunerConfig, payload: CallPayload) -> None:
     headers = {"Authorization": f"Bearer {config.api_key}"}
 
     logger.info(
-        "[flows-tuner] sending call  call_id={}  transcript_messages={}  url={}",
+        "[tuner] sending call  call_id={}  transcript_messages={}  url={}",
         payload.call_id,
         len(payload.transcript_with_tool_calls),
         url,
@@ -31,9 +31,9 @@ async def post_call(config: TunerConfig, payload: CallPayload) -> None:
     payload_dict = payload.to_dict()
 
     if config.debug:
-        print("[flows-tuner] --- request payload ---")
+        print("[tuner] --- request payload ---")
         print(json.dumps(payload_dict, indent=2, default=str))
-        print("[flows-tuner] --- end payload ---")
+        print("[tuner] --- end payload ---")
 
     try:
         async with httpx.AsyncClient(timeout=10) as client:
@@ -41,7 +41,7 @@ async def post_call(config: TunerConfig, payload: CallPayload) -> None:
 
         if response.status_code == 409:
             logger.info(
-                "[flows-tuner] call {} already exists (409) — skipping",
+                "[tuner] call {} already exists (409) — skipping",
                 config.call_id,
             )
             return
@@ -52,15 +52,15 @@ async def post_call(config: TunerConfig, payload: CallPayload) -> None:
             try:
                 data = response.json()
                 print(
-                    f"[flows-tuner] POST → {response.status_code} "
+                    f"[tuner] POST → {response.status_code} "
                     f"id={data.get('id')} call_id={config.call_id}"
                 )
             except Exception:
-                print(f"[flows-tuner] POST → {response.status_code}")
+                print(f"[tuner] POST → {response.status_code}")
 
     except (httpx.HTTPStatusError, httpx.RequestError) as exc:
         logger.error(
-            "[flows-tuner] failed to deliver call {}: {}",
+            "[tuner] failed to deliver call {}: {}",
             config.call_id,
             exc,
         )

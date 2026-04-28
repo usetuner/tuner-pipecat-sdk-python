@@ -403,3 +403,141 @@ def test_set_disconnection_reason_ignores_empty_string():
 def test_disconnection_reason_default_is_empty():
     acc = CallAccumulator()
     assert acc.disconnection_reason is None
+
+
+# ---------------------------------------------------------------------------
+# Async-task ordering regression tests
+#
+# TurnTrackingObserver fires on_turn_started as an asyncio task, meaning it
+# runs *after* on_user_started_speaking (which fires inline from process_frame).
+# These tests assert that timestamps are captured correctly even when
+# on_user_started_speaking fires before on_turn_started.
+# ---------------------------------------------------------------------------
+
+
+def test_user_started_speaking_before_on_turn_started_creates_turn():
+    """on_user_started_speaking creates the LatencyTurn before on_turn_started fires."""
+    base_ns = 1_000_000_000_000
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = base_ns
+
+    # Simulate proactive greeting (safety-net path): bot speaks, no prior on_turn_started
+    acc.on_bot_started_speaking(base_ns + 500_000_000)
+    assert acc.latency_turns[0].is_proactive is True
+
+    # on_latency_breakdown marks turn 0 as proactive
+    acc.on_latency_breakdown(
+        SimpleNamespace(
+            user_turn_start_time=None,
+            user_turn_secs=None,
+            ttfb=[SimpleNamespace(duration_secs=0.3)],
+            function_calls=[],
+        )
+    )
+    acc.on_bot_stopped(base_ns + 1_000_000_000)
+
+    # Now: on_user_started_speaking fires inline (before on_turn_started async task)
+    user_start_ns = base_ns + 2_000_000_000
+    acc.on_user_started_speaking(user_start_ns)
+
+    assert len(acc.latency_turns) == 2
+    assert acc.latency_turns[1].user_started_ms == 2000
+    assert acc.latency_turns[1].is_proactive is False
+
+    # Simulate on_turn_started arriving late (asyncio task)
+    acc.on_turn_started(2, user_start_ns + 5_000_000)  # 5ms later
+
+    # Must not create a third turn
+    assert len(acc.latency_turns) == 2
+    # _active_turn_number must be set so stopped-speaking helpers work
+    assert acc._active_turn_number == 2
+    assert acc._turn_to_latency_idx[2] == 1
+
+
+def test_user_stopped_and_vad_stopped_work_before_on_turn_started_fires():
+    """Stopped-speaking helpers find the turn via _current_user_turn_latency_idx
+    even before the on_turn_started async task sets _active_turn_number."""
+    base_ns = 1_000_000_000_000
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = base_ns
+
+    # Proactive greeting completes
+    acc.on_bot_started_speaking(base_ns + 300_000_000)
+    acc.on_latency_breakdown(
+        SimpleNamespace(
+            user_turn_start_time=None, user_turn_secs=None, ttfb=[], function_calls=[]
+        )
+    )
+    acc.on_bot_stopped(base_ns + 800_000_000)
+
+    # User speaks — on_user_started_speaking inline
+    user_start_ns = base_ns + 1_500_000_000
+    acc.on_user_started_speaking(user_start_ns)
+
+    # on_turn_started hasn't fired yet → _active_turn_number is still None
+    assert acc._active_turn_number is None
+
+    # VAD stopped and user stopped fire inline BEFORE on_turn_started
+    vad_ns = base_ns + 2_200_000_000
+    acc.on_vad_stopped(vad_ns)
+    acc.on_user_stopped_speaking(base_ns + 2_300_000_000)
+    acc.on_user_turn_stopped(base_ns + 2_400_000_000)
+
+    turn = acc.latency_turns[1]
+    assert turn.user_started_ms == 1500
+    assert turn.user_stopped_ms == 2300
+    assert turn.stt_ms == 200  # 2400 - 2200 ms
+
+
+def test_full_proactive_plus_user_turn_flow():
+    """Full realistic flow: proactive greeting → user turn → bot response."""
+    base_ns = 1_000_000_000_000
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = base_ns
+
+    # Turn 1: proactive (on_turn_started via StartFrame)
+    acc.on_turn_started(1, base_ns + 10_000_000)
+    acc.on_bot_started_speaking(base_ns + 500_000_000)
+    acc.on_latency_breakdown(
+        SimpleNamespace(
+            user_turn_start_time=None, user_turn_secs=None, ttfb=[], function_calls=[]
+        )
+    )
+    acc.on_bot_stopped(base_ns + 1_200_000_000)
+
+    assert acc.latency_turns[0].is_proactive is True
+
+    # Turn 2: user speaks — on_user_started_speaking fires first (inline)
+    user_start_ns = base_ns + 2_000_000_000
+    acc.on_user_started_speaking(user_start_ns)
+    assert len(acc.latency_turns) == 2
+    assert acc.latency_turns[1].user_started_ms == 2000
+
+    # on_turn_started fires late (async task)
+    acc.on_turn_started(2, user_start_ns + 3_000_000)
+    assert len(acc.latency_turns) == 2  # no extra turn
+    assert acc._active_turn_number == 2
+
+    # User stops, bot responds
+    acc.on_vad_stopped(base_ns + 2_700_000_000)
+    acc.on_user_stopped_speaking(base_ns + 2_800_000_000)
+    acc.on_bot_started_speaking(base_ns + 3_100_000_000)
+    acc.on_latency_measured(0.3)
+    acc.on_latency_breakdown(
+        SimpleNamespace(
+            user_turn_start_time=2.0,
+            user_turn_secs=0.8,
+            ttfb=[SimpleNamespace(duration_secs=0.25)],
+            function_calls=[],
+        )
+    )
+    acc.on_bot_stopped(base_ns + 4_000_000_000)
+
+    # latency_offset == 1 (one proactive turn)
+    assert sum(1 for t in acc.latency_turns if t.is_proactive) == 1
+
+    user_turn = acc.latency_turns[1]
+    assert user_turn.user_started_ms == 2000
+    assert user_turn.user_stopped_ms == 2800
+    assert user_turn.bot_started_ms > 0
+    assert user_turn.bot_stopped_ms == 4000
