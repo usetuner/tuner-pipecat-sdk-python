@@ -1,9 +1,9 @@
 [project]
 name = "pizza-order-bot"
 version = "0.1.0"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
-    "pipecat-ai[webrtc,silero,deepgram,cartesia,openai,runner]>=0.0.104",
+    "pipecat-ai[webrtc,silero,deepgram,cartesia,openai,runner]>=1.0.0",
     "pipecat-ai-flows>=0.0.23",
     "pipecat-flows-tuner",
     "python-dotenv>=1.0.1",

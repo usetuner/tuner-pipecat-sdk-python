@@ -9,7 +9,7 @@ then sends a structured `CallPayload` to the Tuner API when a call ends.
 
 - Python **3.10–3.13**. 
 - **Do not use Python 3.14** for installs yet: Pipecat pulls **`onnxruntime~=1.23.2`** and **`numba`** without 3.14 wheels → errors like *No matching distribution found for onnxruntime*.
-- This SDK depends on **`pipecat-ai>=0.0.105`**.
+- This SDK depends on **`pipecat-ai>=1.0.0`**.
 
 ## Installation
 

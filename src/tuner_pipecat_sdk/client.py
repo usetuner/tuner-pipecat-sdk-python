@@ -35,9 +35,9 @@ async def post_call(config: TunerConfig, payload: CallPayload) -> None:
     logger.info("[flows-tuner] request body: {}", payload_json)
 
     if config.debug:
-        print("[flows-tuner] --- request payload ---")
+        print("[tuner] --- request payload ---")
         print(json.dumps(payload_dict, indent=2, default=str))
-        print("[flows-tuner] --- end payload ---")
+        print("[tuner] --- end payload ---")
 
     try:
         async with httpx.AsyncClient(timeout=10) as client:
@@ -45,7 +45,7 @@ async def post_call(config: TunerConfig, payload: CallPayload) -> None:
 
         if response.status_code == 409:
             logger.info(
-                "[flows-tuner] call {} already exists (409) — skipping",
+                "[tuner] call {} already exists (409) — skipping",
                 config.call_id,
             )
             return
@@ -68,7 +68,7 @@ async def post_call(config: TunerConfig, payload: CallPayload) -> None:
 
     except (httpx.HTTPStatusError, httpx.RequestError) as exc:
         logger.error(
-            "[flows-tuner] failed to deliver call {}: {}",
+            "[tuner] failed to deliver call {}: {}",
             config.call_id,
             exc,
         )

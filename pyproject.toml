@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tuner-pipecat-sdk"
-version = "0.1.1"
+version = "0.2.0"
 description = "Pipecat observer SDK for capturing latency, transcript, and usage data from pipecat and pipecat-flows pipelines."
 readme = "README.md"
 authors = [
@@ -26,7 +26,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "pipecat-ai>=0.0.105",
+    "pipecat-ai>=1.0.0",
     "pydantic>=2.0",
     "loguru~=0.7.2",
     "httpx>=0.27",

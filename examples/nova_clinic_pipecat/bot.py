@@ -370,7 +370,7 @@ async def run_bot(
         logger.info("Client connected")
         context.add_message(
             {
-                "role": "developer",
+                "role": "assistant",
                 "content": "Greet the caller warmly and ask how you can help them today.",
             }
         )
