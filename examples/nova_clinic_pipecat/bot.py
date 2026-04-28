@@ -237,7 +237,10 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     logger.info("Starting Nova Clinic assistant")
 
     stt = DeepgramSTTService(api_key=os.getenv("DEEPGRAM_API_KEY"))
-    tts = CartesiaTTSService(api_key=os.getenv("CARTESIA_API_KEY"))
+    tts = CartesiaTTSService(
+        api_key=os.getenv("CARTESIA_API_KEY"),
+        voice_id=os.getenv("CARTESIA_VOICE_ID", "79a125e8-cd45-4c13-8a67-188112f4dd22"),
+    )
 
     tools = ToolsSchema(
         standard_tools=[
@@ -351,7 +354,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         logger.info("Client connected")
         context.add_message(
             {
-                "role": "developer",
+                "role": "assistant",
                 "content": "Greet the caller warmly and ask how you can help them today.",
             }
         )

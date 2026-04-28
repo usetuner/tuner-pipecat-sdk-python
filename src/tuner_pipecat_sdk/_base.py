@@ -79,10 +79,6 @@ class _BaseObserver(FrameProcessor):
         async def _on_latency_measured(_observer: Any, latency: float) -> None:
             self._acc.on_latency_measured(latency)
 
-        @self._latency_observer.event_handler("on_latency_breakdown")
-        async def _on_latency_breakdown(_observer: Any, breakdown: Any) -> None:
-            self._acc.on_latency_breakdown(breakdown)
-
     # ------------------------------------------------------------------
     # Public helpers
     # ------------------------------------------------------------------
