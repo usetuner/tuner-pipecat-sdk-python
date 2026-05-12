@@ -135,7 +135,72 @@ Both `Observer` and `FlowsObserver` accept the same constructor parameters:
 | `asr_model` | `str` | `""` | ASR model name (e.g. `deepgram/nova-3`) |
 | `llm_model` | `str` | `""` | LLM model name (e.g. `gpt-4o-mini`) |
 | `tts_model` | `str` | `""` | TTS model name (e.g. `cartesia/sonic`) |
+| `sip_call_id` | `str \| None` | `None` | SIP provider call identifier (see SIP section below) |
+| `sip_headers` | `dict[str, str] \| None` | `None` | SIP INVITE headers as a flat dict |
 | `debug` | `bool` | `False` | Log full transcript at flush |
+
+## SIP / Telephony Calls
+
+The observer can capture the SIP call identifier and SIP headers and forward
+them to Tuner. This works with any Pipecat SIP/telephony provider — Daily
+PSTN, Twilio, Telnyx, Plivo, Exotel, or a custom SIP trunk.
+
+There are three equivalent ways to supply the info:
+
+**1. At construction** (when you already know it):
+
+```python
+observer = Observer(
+    api_key="...", workspace_id=42, agent_id="...", call_id="...",
+    sip_call_id="CA-xxxxxxxx",
+    sip_headers={"X-Caller-Region": "us-east", "From": "sip:+1...@trunk"},
+)
+```
+
+**2. Late-bound via `attach_sip_info()`** (when the ID arrives in the
+WebSocket "start" message — Twilio/Telnyx/Plivo/Exotel):
+
+```python
+from pipecat.runner.utils import parse_telephony_websocket
+
+transport_type, call_data = await parse_telephony_websocket(websocket)
+observer.attach_sip_info(
+    sip_call_id=call_data.get("call_id") or call_data.get("call_control_id"),
+)
+```
+
+Or use the provider-shape-aware helper:
+
+```python
+observer.attach_sip_from_telephony(call_data)
+# Optionally pass headers obtained out-of-band:
+observer.attach_sip_from_telephony(call_data, sip_headers={"X-Trunk": "A"})
+```
+
+**3. From Daily `DialinSettings`** (PSTN/SIP dial-in):
+
+```python
+from pipecat.runner.types import DialinSettings, DailyDialinRequest
+
+req = DailyDialinRequest.model_validate(runner_args.body)
+observer.attach_sip_from_dialin(req.dialin_settings)
+# or pass the dict directly:
+observer.attach_sip_from_dialin(runner_args.body["dialin_settings"])
+```
+
+Provider → call-id field mapping:
+
+| Provider | Call ID source | SIP headers |
+|----------|----------------|-------------|
+| Daily PSTN/SIP | `DialinSettings.call_id` | `DialinSettings.sip_headers` |
+| Twilio Media Streams | `call_data["call_id"]` (Twilio `callSid`) | not in WS protocol — pass out-of-band |
+| Telnyx | `call_data["call_control_id"]` | not in WS protocol — pass out-of-band |
+| Plivo | `call_data["call_id"]` | not in WS protocol — pass out-of-band |
+| Exotel | `call_data["call_id"]` (`call_sid`) | not in WS protocol — pass out-of-band |
+| Custom SIP trunk | whatever your stack exposes | whatever your stack exposes |
+
+Both fields are optional. When omitted they are excluded from the payload so
+non-SIP web calls remain unaffected.
 
 ## Disconnection Reason
 

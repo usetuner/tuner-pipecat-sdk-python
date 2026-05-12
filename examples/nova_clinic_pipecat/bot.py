@@ -25,11 +25,11 @@ from pipecat.processors.aggregators.llm_response_universal import (
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
-from pipecat.services.cartesia.tts import CartesiaTTSService
-from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.openai.llm import OpenAILLMService
+from pipecat.services.openai.stt import OpenAISTTService
+from pipecat.services.openai.tts import OpenAITTSService
 from pipecat.transports.base_transport import BaseTransport, TransportParams
-from pipecat.transports.daily.transport import DailyParams
+from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams
 
 from tuner_pipecat_sdk import Observer
 
@@ -236,8 +236,8 @@ async def end_call(params):
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     logger.info("Starting Nova Clinic assistant")
 
-    stt = DeepgramSTTService(api_key=os.getenv("DEEPGRAM_API_KEY"))
-    tts = CartesiaTTSService(api_key=os.getenv("CARTESIA_API_KEY"))
+    stt = OpenAISTTService(api_key=os.getenv("OPENAI_API_KEY"))
+    tts = OpenAITTSService(api_key=os.getenv("OPENAI_API_KEY"), voice="alloy")
 
     tools = ToolsSchema(
         standard_tools=[
@@ -317,9 +317,9 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         agent_id=os.getenv("TUNER_AGENT_ID", "nova-clinic-pipecat"),
         call_id=str(uuid.uuid4()),
         base_url=os.getenv("TUNER_BASE_URL", "https://api.usetuner.ai"),
-        asr_model="deepgram/nova-3",
+        asr_model="openai/gpt-4o-transcribe",
         llm_model="gpt-4o",
-        tts_model="cartesia",
+        tts_model="openai/tts-1",
     )
     observer.attach_turn_tracking_observer(turn_tracker)
 
@@ -367,18 +367,33 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
 
 
 async def bot(runner_args: RunnerArguments):
-    transport_params = {
-        "daily": lambda: DailyParams(
-            audio_in_enabled=True,
-            audio_out_enabled=True,
-        ),
-        "webrtc": lambda: TransportParams(
-            audio_in_enabled=True,
-            audio_out_enabled=True,
-        ),
-    }
+    from pipecat.runner.types import WebSocketRunnerArguments
 
-    transport = await create_transport(runner_args, transport_params)
+    if isinstance(runner_args, WebSocketRunnerArguments):
+        from pipecat.runner.utils import parse_telephony_websocket
+        from pipecat.serializers.twilio import TwilioFrameSerializer
+        from pipecat.transports.websocket.fastapi import FastAPIWebsocketTransport
+
+        _, call_data = await parse_telephony_websocket(runner_args.websocket)
+        params = FastAPIWebsocketParams(
+            audio_in_enabled=True,
+            audio_out_enabled=True,
+            serializer=TwilioFrameSerializer(
+                stream_sid=call_data["stream_id"],
+                call_sid=call_data["call_id"],
+                params=TwilioFrameSerializer.InputParams(auto_hang_up=False),
+            ),
+        )
+        transport = FastAPIWebsocketTransport(websocket=runner_args.websocket, params=params)
+    else:
+        transport_params = {
+            "webrtc": lambda: TransportParams(
+                audio_in_enabled=True,
+                audio_out_enabled=True,
+            ),
+        }
+        transport = await create_transport(runner_args, transport_params)
+
     await run_bot(transport, runner_args)
 
 

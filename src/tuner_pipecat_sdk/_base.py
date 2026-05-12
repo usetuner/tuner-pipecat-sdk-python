@@ -29,6 +29,19 @@ from .client import post_call
 from .config import TunerConfig
 
 
+def _get(obj: Any, key: str) -> Any:
+    """Read ``key`` from either a mapping or an object with attributes.
+
+    Lets the SIP helpers accept ``DialinSettings`` instances, plain dicts,
+    or any duck-typed equivalent without the caller pre-converting.
+    """
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        return obj.get(key)
+    return getattr(obj, key, None)
+
+
 class _BaseObserver(FrameProcessor):
     """
     Shared frame-processing logic for all Tuner observers.
@@ -50,6 +63,8 @@ class _BaseObserver(FrameProcessor):
         asr_model: str = "",
         llm_model: str = "",
         tts_model: str = "",
+        sip_call_id: str | None = None,
+        sip_headers: dict[str, str] | None = None,
         disconnection_reason_resolver: Callable[[], str | None] | None = None,
         **kwargs: Any,
     ) -> None:
@@ -66,6 +81,8 @@ class _BaseObserver(FrameProcessor):
             asr_model=asr_model,
             llm_model=llm_model,
             tts_model=tts_model,
+            sip_call_id=sip_call_id,
+            sip_headers=sip_headers,
         )
         self._acc = CallAccumulator()
         self._acc.call_start_abs_ns = time.time_ns()
@@ -99,6 +116,58 @@ class _BaseObserver(FrameProcessor):
             _tracker: Any, turn_number: int, _duration: float, was_interrupted: bool
         ) -> None:
             self._acc.on_turn_ended(turn_number, was_interrupted)
+
+    def attach_sip_info(
+        self,
+        sip_call_id: str | None = None,
+        sip_headers: dict[str, str] | None = None,
+    ) -> None:
+        """Attach SIP metadata captured from any Pipecat SIP/telephony source.
+
+        Provider-agnostic — pass whichever identifier your provider exposes:
+
+        * Daily PSTN/SIP: ``DialinSettings.call_id`` + ``sip_headers``
+        * Twilio Media Streams: ``callSid``
+        * Telnyx: ``call_control_id``
+        * Plivo: ``callId``
+        * Exotel: ``call_sid``
+        * Any other provider: the unique call identifier and (optionally) the
+          SIP INVITE headers as a flat string-to-string dict.
+
+        Call this once the SIP info is known. For Daily, info arrives in
+        ``runner_args.body``; for Twilio/Telnyx/Plivo/Exotel it arrives in the
+        first WebSocket "start" message — call after
+        ``parse_telephony_websocket`` returns.
+        """
+        if sip_call_id is not None:
+            self._config.sip_call_id = sip_call_id
+        if sip_headers is not None:
+            self._config.sip_headers = dict(sip_headers)
+
+    def attach_sip_from_dialin(self, dialin_settings: Any) -> None:
+        """Populate SIP metadata from Pipecat's ``DialinSettings`` (Daily PSTN).
+
+        Accepts either a ``DialinSettings`` instance or the equivalent dict
+        (e.g. ``runner_args.body["dialin_settings"]``).
+        """
+        call_id = _get(dialin_settings, "call_id")
+        headers = _get(dialin_settings, "sip_headers")
+        self.attach_sip_info(sip_call_id=call_id, sip_headers=headers)
+
+    def attach_sip_from_telephony(
+        self,
+        call_data: dict[str, Any],
+        sip_headers: dict[str, str] | None = None,
+    ) -> None:
+        """Populate SIP metadata from ``parse_telephony_websocket`` output.
+
+        Twilio/Plivo/Exotel expose ``call_id``; Telnyx exposes
+        ``call_control_id``. SIP headers are not provided by these WebSocket
+        protocols — pass them via ``sip_headers`` if obtained out-of-band
+        (e.g. from your own SIP trunk or webhook).
+        """
+        call_id = call_data.get("call_id") or call_data.get("call_control_id")
+        self.attach_sip_info(sip_call_id=call_id, sip_headers=sip_headers)
 
     @property
     def latency_observer(self) -> UserBotLatencyObserver:
