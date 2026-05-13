@@ -29,7 +29,6 @@ from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.services.openai.stt import OpenAISTTService
 from pipecat.services.openai.tts import OpenAITTSService
 from pipecat.transports.base_transport import BaseTransport, TransportParams
-from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams
 
 from tuner_pipecat_sdk import Observer
 
@@ -233,7 +232,11 @@ async def end_call(params):
 # ---------------------------------------------------------------------------
 
 
-async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
+async def run_bot(
+    transport: BaseTransport,
+    runner_args: RunnerArguments,
+    sip_call_data: dict | None = None,
+):
     logger.info("Starting Nova Clinic assistant")
 
     stt = OpenAISTTService(api_key=os.getenv("OPENAI_API_KEY"))
@@ -323,6 +326,17 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     )
     observer.attach_turn_tracking_observer(turn_tracker)
 
+    # Forward SIP-layer Call-ID + headers when the call arrived over SIP.
+    # For Twilio, this only resolves to the real SipCallId if your TwiML
+    # webhook adds <Parameter name="SipCallId" .../> tags — otherwise the
+    # SDK falls back to Twilio's CallSid. See README "SIP / Telephony Calls".
+    if sip_call_data is not None:
+        observer.attach_sip_from_telephony(sip_call_data)
+    elif isinstance(getattr(runner_args, "body", None), dict):
+        dialin = runner_args.body.get("dialin_settings")
+        if dialin:
+            observer.attach_sip_from_dialin(dialin)
+
     pipeline = Pipeline(
         [
             transport.input(),
@@ -367,33 +381,19 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
 
 
 async def bot(runner_args: RunnerArguments):
-    from pipecat.runner.types import WebSocketRunnerArguments
+    """Pipecat dev-runner entrypoint — used for non-telephony transports (webrtc).
 
-    if isinstance(runner_args, WebSocketRunnerArguments):
-        from pipecat.runner.utils import parse_telephony_websocket
-        from pipecat.serializers.twilio import TwilioFrameSerializer
-        from pipecat.transports.websocket.fastapi import FastAPIWebsocketTransport
-
-        _, call_data = await parse_telephony_websocket(runner_args.websocket)
-        params = FastAPIWebsocketParams(
+    Telephony providers (Twilio, Telnyx, …) have their own server scripts that
+    build the transport and call ``run_bot`` directly. Keeping this entrypoint
+    means ``python bot.py -t webrtc`` still works for local development.
+    """
+    transport_params = {
+        "webrtc": lambda: TransportParams(
             audio_in_enabled=True,
             audio_out_enabled=True,
-            serializer=TwilioFrameSerializer(
-                stream_sid=call_data["stream_id"],
-                call_sid=call_data["call_id"],
-                params=TwilioFrameSerializer.InputParams(auto_hang_up=False),
-            ),
-        )
-        transport = FastAPIWebsocketTransport(websocket=runner_args.websocket, params=params)
-    else:
-        transport_params = {
-            "webrtc": lambda: TransportParams(
-                audio_in_enabled=True,
-                audio_out_enabled=True,
-            ),
-        }
-        transport = await create_transport(runner_args, transport_params)
-
+        ),
+    }
+    transport = await create_transport(runner_args, transport_params)
     await run_bot(transport, runner_args)
 
 

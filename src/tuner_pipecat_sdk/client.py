@@ -21,14 +21,18 @@ async def post_call(config: TunerConfig, payload: CallPayload) -> None:
     )
     headers = {"Authorization": f"Bearer {config.api_key}"}
 
+    payload_dict = payload.to_dict()
+    payload_json = json.dumps(payload_dict, default=str)
+
     logger.info(
-        "[flows-tuner] sending call  call_id={}  transcript_messages={}  url={}",
+        "[flows-tuner] sending call  call_id={}  transcript_messages={}  url={}  "
+        "payload_bytes={}",
         payload.call_id,
         len(payload.transcript_with_tool_calls),
         url,
+        len(payload_json),
     )
-
-    payload_dict = payload.to_dict()
+    logger.info("[flows-tuner] request body: {}", payload_json)
 
     if config.debug:
         print("[flows-tuner] --- request payload ---")
@@ -46,17 +50,21 @@ async def post_call(config: TunerConfig, payload: CallPayload) -> None:
             )
             return
 
+        if response.status_code >= 400:
+            logger.error(
+                "[flows-tuner] POST → {}  call_id={}  response_body={}",
+                response.status_code,
+                config.call_id,
+                response.text[:2000],
+            )
+
         response.raise_for_status()
 
-        if config.debug:
-            try:
-                data = response.json()
-                print(
-                    f"[flows-tuner] POST → {response.status_code} "
-                    f"id={data.get('id')} call_id={config.call_id}"
-                )
-            except Exception:
-                print(f"[flows-tuner] POST → {response.status_code}")
+        logger.info(
+            "[flows-tuner] POST → {}  call_id={}",
+            response.status_code,
+            config.call_id,
+        )
 
     except (httpx.HTTPStatusError, httpx.RequestError) as exc:
         logger.error(

@@ -42,6 +42,46 @@ def _get(obj: Any, key: str) -> Any:
     return getattr(obj, key, None)
 
 
+# Provider-specific keys that hold customParameters / extra_headers in the
+# WebSocket "start" payload parsed by ``parse_telephony_websocket``:
+#   Twilio  → ``body``   (TwiML ``<Parameter>`` tags)
+#   Telnyx  → ``customParameters``
+#   Exotel  → ``custom_parameters``
+_CUSTOMPARAMS_KEYS: tuple[str, ...] = ("body", "customParameters", "custom_parameters")
+
+# Case-insensitive aliases the SIP-layer Call-ID is commonly forwarded under.
+_SIP_CALL_ID_ALIASES: tuple[str, ...] = (
+    "sipcallid",
+    "sip_call_id",
+    "sip-call-id",
+    "x-sip-call-id",
+)
+
+
+def _collect_customparams(call_data: dict[str, Any]) -> dict[str, Any]:
+    """Merge every customParameters-like dict found on ``call_data``."""
+    out: dict[str, Any] = {}
+    if not isinstance(call_data, dict):
+        return out
+    for key in _CUSTOMPARAMS_KEYS:
+        v = call_data.get(key)
+        if isinstance(v, dict) and v:
+            out.update(v)
+    return out
+
+
+def _find_sip_call_id(params: dict[str, Any]) -> str | None:
+    """Case-insensitive lookup for the SIP-layer Call-ID across known aliases."""
+    if not params:
+        return None
+    lowered = {str(k).lower(): v for k, v in params.items()}
+    for alias in _SIP_CALL_ID_ALIASES:
+        v = lowered.get(alias)
+        if v:
+            return str(v)
+    return None
+
+
 class _BaseObserver(FrameProcessor):
     """
     Shared frame-processing logic for all Tuner observers.
@@ -161,13 +201,32 @@ class _BaseObserver(FrameProcessor):
     ) -> None:
         """Populate SIP metadata from ``parse_telephony_websocket`` output.
 
-        Twilio/Plivo/Exotel expose ``call_id``; Telnyx exposes
-        ``call_control_id``. SIP headers are not provided by these WebSocket
-        protocols — pass them via ``sip_headers`` if obtained out-of-band
-        (e.g. from your own SIP trunk or webhook).
+        Resolution order for ``sip_call_id``:
+
+        1. **SIP-layer Call-ID** found in any nested customParameters dict
+           (``call_data["body"]`` for Twilio, ``customParameters`` /
+           ``custom_parameters`` for other providers) under a case-insensitive
+           alias: ``SipCallId``, ``sip_call_id``, ``sip-call-id``,
+           ``X-Sip-Call-Id``. This is the actual SIP Call-ID set by the trunk.
+        2. **Provider native call id**: ``call_id`` (Twilio/Plivo/Exotel) or
+           ``call_control_id`` (Telnyx). Used as a fallback.
+
+        When ``sip_headers`` is not passed explicitly and the call_data carries
+        customParameters, those parameters are used as the headers dict.
+
+        For SIP-layer fields to actually appear, your trunk/webhook must
+        forward them. With Twilio: add ``<Parameter name="SipCallId" .../>``
+        to your TwiML response. See README "SIP / Telephony Calls" section.
         """
-        call_id = call_data.get("call_id") or call_data.get("call_control_id")
-        self.attach_sip_info(sip_call_id=call_id, sip_headers=sip_headers)
+        nested = _collect_customparams(call_data)
+        sip_layer_call_id = _find_sip_call_id(nested)
+        provider_call_id = call_data.get("call_id") or call_data.get("call_control_id")
+        resolved = sip_layer_call_id or provider_call_id
+
+        if sip_headers is None and nested:
+            sip_headers = {str(k): str(v) for k, v in nested.items()}
+
+        self.attach_sip_info(sip_call_id=resolved, sip_headers=sip_headers)
 
     @property
     def latency_observer(self) -> UserBotLatencyObserver:
