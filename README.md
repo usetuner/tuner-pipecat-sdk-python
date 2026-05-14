@@ -138,6 +138,32 @@ Both `Observer` and `FlowsObserver` accept the same constructor parameters:
 | `sip_call_id` | `str \| None` | `None` | SIP provider call identifier (see SIP section below) |
 | `sip_headers` | `dict[str, str] \| None` | `None` | SIP INVITE headers as a flat dict |
 | `debug` | `bool` | `False` | Log full transcript at flush |
+| `agent_version` | `int \| None` | `None` | Deployment version number — overrides `APP_VERSION` env var |
+
+## Agent Version Tracking
+
+Set `APP_VERSION` in your environment to track which version of your agent handled each call:
+
+```bash
+APP_VERSION=42 python agent.py start
+```
+
+Tuner reads it automatically — bump the number on every deployment.
+
+**Using GitHub Actions or CircleCI?** No setup needed — Tuner reads the build number from `GITHUB_RUN_NUMBER` / `CIRCLE_BUILD_NUM` automatically.
+
+**Manual override** — takes priority over all env vars:
+
+```python
+Observer(
+    ...
+    agent_version=42,
+)
+```
+
+`agent_version` is omitted from the payload entirely when no value is found.
+
+---
 
 ## SIP / Telephony Calls
 

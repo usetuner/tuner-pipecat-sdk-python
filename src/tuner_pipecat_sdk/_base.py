@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from collections.abc import Callable
 from typing import Any
@@ -28,6 +29,23 @@ from ._providers import PROVIDER_EXTRACTORS, ProviderExtractor
 from .accumulator import CallAccumulator
 from .client import post_call
 from .config import TunerConfig
+
+
+_CI_VERSION_VARS = ("GITHUB_RUN_NUMBER", "CIRCLE_BUILD_NUM", "BUILD_NUMBER")
+
+
+def resolve_agent_version(explicit: int | None) -> int | None:
+    """Return agent version in priority order: explicit param → APP_VERSION → CI env vars."""
+    if explicit is not None:
+        return explicit
+    for var in ("APP_VERSION", *_CI_VERSION_VARS):
+        raw = os.environ.get(var)
+        if raw:
+            try:
+                return int(raw)
+            except ValueError:
+                pass
+    return None
 
 
 def _get(obj: Any, key: str) -> Any:
@@ -67,6 +85,7 @@ class _BaseObserver(FrameProcessor):
         sip_call_id: str | None = None,
         sip_headers: dict[str, str] | None = None,
         disconnection_reason_resolver: Callable[[], str | None] | None = None,
+        agent_version: int | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -84,6 +103,7 @@ class _BaseObserver(FrameProcessor):
             tts_model=tts_model,
             sip_call_id=sip_call_id,
             sip_headers=sip_headers,
+            agent_version=resolve_agent_version(agent_version),
         )
         self._acc = CallAccumulator()
         self._acc.call_start_abs_ns = time.time_ns()
