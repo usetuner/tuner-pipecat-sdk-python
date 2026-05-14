@@ -15,6 +15,9 @@ class TunerConfig(BaseModel):
     asr_model: str = ""
     llm_model: str = ""
     tts_model: str = ""
+    sip_call_id: str | None = None
+    sip_headers: dict[str, str] | None = None
+    agent_version: int | None = None
 
     @field_validator("api_key", "call_id", "agent_id")
     @classmethod

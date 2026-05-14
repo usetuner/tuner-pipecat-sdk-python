@@ -126,6 +126,9 @@ class CallPayload(BaseModel):
     duration_ms: int
     general_meta_data_raw: GeneralMetaData
     disconnection_reason: str | None = None
+    sip_call_id: str | None = None
+    sip_headers: dict[str, str] | None = None
+    agent_version: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize payload to a JSON-ready dict."""

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
+from pipecat.processors.aggregators.llm_context import LLMContext as OpenAILLMContext
 
 from ._base import _BaseObserver
 

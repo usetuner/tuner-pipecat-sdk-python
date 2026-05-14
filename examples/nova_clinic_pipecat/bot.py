@@ -25,11 +25,10 @@ from pipecat.processors.aggregators.llm_response_universal import (
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
-from pipecat.services.cartesia.tts import CartesiaTTSService
-from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.openai.llm import OpenAILLMService
+from pipecat.services.openai.stt import OpenAISTTService
+from pipecat.services.openai.tts import OpenAITTSService
 from pipecat.transports.base_transport import BaseTransport, TransportParams
-from pipecat.transports.daily.transport import DailyParams
 
 from tuner_pipecat_sdk import Observer
 
@@ -233,11 +232,17 @@ async def end_call(params):
 # ---------------------------------------------------------------------------
 
 
-async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
+async def run_bot(
+    transport: BaseTransport,
+    runner_args: RunnerArguments,
+    sip_call_data: dict | None = None,
+    sip_provider: str | None = None,
+    sip_context: object | None = None,
+):
     logger.info("Starting Nova Clinic assistant")
 
-    stt = DeepgramSTTService(api_key=os.getenv("DEEPGRAM_API_KEY"))
-    tts = CartesiaTTSService(api_key=os.getenv("CARTESIA_API_KEY"))
+    stt = OpenAISTTService(api_key=os.getenv("OPENAI_API_KEY"))
+    tts = OpenAITTSService(api_key=os.getenv("OPENAI_API_KEY"), voice="alloy")
 
     tools = ToolsSchema(
         standard_tools=[
@@ -317,11 +322,25 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         agent_id=os.getenv("TUNER_AGENT_ID", "nova-clinic-pipecat"),
         call_id=str(uuid.uuid4()),
         base_url=os.getenv("TUNER_BASE_URL", "https://api.usetuner.ai"),
-        asr_model="deepgram/nova-3",
+        asr_model="openai/gpt-4o-transcribe",
         llm_model="gpt-4o",
-        tts_model="cartesia",
+        tts_model="openai/tts-1",
     )
     observer.attach_turn_tracking_observer(turn_tracker)
+
+    # Forward SIP-layer Call-ID + headers when the call arrived over SIP.
+    # Preferred path: a typed provider context (e.g. JambonzCallContext) the
+    # server built and handed in. Legacy path: ``sip_call_data + sip_provider``
+    # for providers without a typed context yet. See README
+    # "SIP / Telephony Calls".
+    if sip_context is not None:
+        observer.attach_sip_from_context(sip_context)
+    elif sip_call_data is not None and sip_provider is not None:
+        observer.attach_sip_from_telephony(sip_call_data, provider=sip_provider)
+    elif isinstance(getattr(runner_args, "body", None), dict):
+        dialin = runner_args.body.get("dialin_settings")
+        if dialin:
+            observer.attach_sip_from_dialin(dialin)
 
     pipeline = Pipeline(
         [
@@ -367,17 +386,18 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
 
 
 async def bot(runner_args: RunnerArguments):
+    """Pipecat dev-runner entrypoint — used for non-telephony transports (webrtc).
+
+    Telephony providers (Twilio, Telnyx, …) have their own server scripts that
+    build the transport and call ``run_bot`` directly. Keeping this entrypoint
+    means ``python bot.py -t webrtc`` still works for local development.
+    """
     transport_params = {
-        "daily": lambda: DailyParams(
-            audio_in_enabled=True,
-            audio_out_enabled=True,
-        ),
         "webrtc": lambda: TransportParams(
             audio_in_enabled=True,
             audio_out_enabled=True,
         ),
     }
-
     transport = await create_transport(runner_args, transport_params)
     await run_bot(transport, runner_args)
 

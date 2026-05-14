@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from collections.abc import Callable
 from typing import Any
@@ -24,9 +25,40 @@ from pipecat.frames.frames import (
 from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
+from ._providers import PROVIDER_EXTRACTORS, ProviderExtractor
 from .accumulator import CallAccumulator
 from .client import post_call
 from .config import TunerConfig
+
+
+_CI_VERSION_VARS = ("GITHUB_RUN_NUMBER", "CIRCLE_BUILD_NUM", "BUILD_NUMBER")
+
+
+def resolve_agent_version(explicit: int | None) -> int | None:
+    """Return agent version in priority order: explicit param → APP_VERSION → CI env vars."""
+    if explicit is not None:
+        return explicit
+    for var in ("APP_VERSION", *_CI_VERSION_VARS):
+        raw = os.environ.get(var)
+        if raw:
+            try:
+                return int(raw)
+            except ValueError:
+                pass
+    return None
+
+
+def _get(obj: Any, key: str) -> Any:
+    """Read ``key`` from either a mapping or an object with attributes.
+
+    Lets the SIP helpers accept ``DialinSettings`` instances, plain dicts,
+    or any duck-typed equivalent without the caller pre-converting.
+    """
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        return obj.get(key)
+    return getattr(obj, key, None)
 
 
 class _BaseObserver(FrameProcessor):
@@ -50,7 +82,10 @@ class _BaseObserver(FrameProcessor):
         asr_model: str = "",
         llm_model: str = "",
         tts_model: str = "",
+        sip_call_id: str | None = None,
+        sip_headers: dict[str, str] | None = None,
         disconnection_reason_resolver: Callable[[], str | None] | None = None,
+        agent_version: int | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -66,6 +101,9 @@ class _BaseObserver(FrameProcessor):
             asr_model=asr_model,
             llm_model=llm_model,
             tts_model=tts_model,
+            sip_call_id=sip_call_id,
+            sip_headers=sip_headers,
+            agent_version=resolve_agent_version(agent_version),
         )
         self._acc = CallAccumulator()
         self._acc.call_start_abs_ns = time.time_ns()
@@ -99,6 +137,107 @@ class _BaseObserver(FrameProcessor):
             _tracker: Any, turn_number: int, _duration: float, was_interrupted: bool
         ) -> None:
             self._acc.on_turn_ended(turn_number, was_interrupted)
+
+    def attach_sip_info(
+        self,
+        sip_call_id: str | None = None,
+        sip_headers: dict[str, str] | None = None,
+    ) -> None:
+        """Attach SIP metadata captured from any Pipecat SIP/telephony source.
+
+        Provider-agnostic — pass whichever identifier your provider exposes:
+
+        * Daily PSTN/SIP: ``DialinSettings.call_id`` + ``sip_headers``
+        * Twilio Media Streams: ``callSid``
+        * Telnyx: ``call_control_id``
+        * Plivo: ``callId``
+        * Exotel: ``call_sid``
+        * Any other provider: the unique call identifier and (optionally) the
+          SIP INVITE headers as a flat string-to-string dict.
+
+        Call this once the SIP info is known. For Daily, info arrives in
+        ``runner_args.body``; for Twilio/Telnyx/Plivo/Exotel it arrives in the
+        first WebSocket "start" message — call after
+        ``parse_telephony_websocket`` returns.
+        """
+        if sip_call_id is not None:
+            self._config.sip_call_id = sip_call_id
+        if sip_headers is not None:
+            self._config.sip_headers = dict(sip_headers)
+
+    def attach_sip_from_context(self, ctx: Any) -> None:
+        """Attach SIP metadata from a typed provider context.
+
+        Duck-typed: accepts any object exposing the attributes
+        ``sip_call_id: str | None`` and ``raw_headers: dict[str, str]``.
+        The canonical implementation is
+        :class:`tuner_pipecat_sdk.providers.jambonz.JambonzCallContext`,
+        but any equivalent dataclass (your own custom provider context)
+        works the same way.
+        """
+        headers = getattr(ctx, "raw_headers", None) or None
+        self.attach_sip_info(
+            sip_call_id=getattr(ctx, "sip_call_id", None),
+            sip_headers=dict(headers) if headers else None,
+        )
+
+    def attach_sip_from_dialin(self, dialin_settings: Any) -> None:
+        """Populate SIP metadata from Pipecat's ``DialinSettings`` (Daily PSTN).
+
+        Accepts either a ``DialinSettings`` instance or the equivalent dict
+        (e.g. ``runner_args.body["dialin_settings"]``).
+        """
+        call_id = _get(dialin_settings, "call_id")
+        headers = _get(dialin_settings, "sip_headers")
+        self.attach_sip_info(sip_call_id=call_id, sip_headers=headers)
+
+    def attach_sip_from_telephony(
+        self,
+        payload: dict[str, Any],
+        *,
+        provider: str | ProviderExtractor,
+        sip_headers: dict[str, str] | None = None,
+    ) -> None:
+        """Populate SIP metadata from a provider's raw call payload.
+
+        ``provider`` is required. Pass one of the built-in names —
+        ``"twilio"``, ``"telnyx"``, ``"plivo"``, ``"exotel"``,
+        ``"jambonz"`` — or a callable
+        ``(payload) -> (sip_call_id, sip_headers)`` for any other provider.
+
+        The expected ``payload`` is whatever the provider's server-side
+        integration naturally produces:
+
+        * Twilio / Telnyx / Plivo / Exotel: the ``call_data`` dict returned
+          by Pipecat's ``parse_telephony_websocket``.
+        * Jambonz: the JSON body of the call-hook webhook
+          (``POST /``) — cache it on the server side and forward it to the
+          bot when the WebSocket opens.
+
+        When ``sip_headers`` is passed explicitly it overrides whatever the
+        extractor derived from ``payload``.
+
+        For SIP-layer fields to actually appear in the final Tuner record,
+        your trunk/webhook must forward them. See README
+        "SIP / Telephony Calls" for per-provider configuration.
+        """
+        if callable(provider):
+            extractor = provider
+        else:
+            extractor = PROVIDER_EXTRACTORS.get(provider.lower())
+            if extractor is None:
+                raise ValueError(
+                    f"unknown provider {provider!r}. "
+                    f"Built-in: {sorted(PROVIDER_EXTRACTORS)}. "
+                    f"Pass a callable (payload -> (call_id, headers)) "
+                    f"to use a custom extractor."
+                )
+
+        resolved, derived_headers = extractor(payload)
+        self.attach_sip_info(
+            sip_call_id=resolved,
+            sip_headers=sip_headers if sip_headers is not None else derived_headers,
+        )
 
     @property
     def latency_observer(self) -> UserBotLatencyObserver:

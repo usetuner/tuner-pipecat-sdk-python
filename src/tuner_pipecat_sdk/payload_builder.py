@@ -51,4 +51,7 @@ def build_payload(
                 tts_character_count=acc.get_total_tts_characters() or None,
             ),
         ),
+        sip_call_id=config.sip_call_id,
+        sip_headers=config.sip_headers,
+        agent_version=config.agent_version,
     )
