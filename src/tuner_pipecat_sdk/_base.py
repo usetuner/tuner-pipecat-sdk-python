@@ -24,6 +24,7 @@ from pipecat.frames.frames import (
 from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
+from ._providers import PROVIDER_EXTRACTORS, ProviderExtractor
 from .accumulator import CallAccumulator
 from .client import post_call
 from .config import TunerConfig
@@ -40,46 +41,6 @@ def _get(obj: Any, key: str) -> Any:
     if isinstance(obj, dict):
         return obj.get(key)
     return getattr(obj, key, None)
-
-
-# Provider-specific keys that hold customParameters / extra_headers in the
-# WebSocket "start" payload parsed by ``parse_telephony_websocket``:
-#   Twilio  → ``body``   (TwiML ``<Parameter>`` tags)
-#   Telnyx  → ``customParameters``
-#   Exotel  → ``custom_parameters``
-_CUSTOMPARAMS_KEYS: tuple[str, ...] = ("body", "customParameters", "custom_parameters")
-
-# Case-insensitive aliases the SIP-layer Call-ID is commonly forwarded under.
-_SIP_CALL_ID_ALIASES: tuple[str, ...] = (
-    "sipcallid",
-    "sip_call_id",
-    "sip-call-id",
-    "x-sip-call-id",
-)
-
-
-def _collect_customparams(call_data: dict[str, Any]) -> dict[str, Any]:
-    """Merge every customParameters-like dict found on ``call_data``."""
-    out: dict[str, Any] = {}
-    if not isinstance(call_data, dict):
-        return out
-    for key in _CUSTOMPARAMS_KEYS:
-        v = call_data.get(key)
-        if isinstance(v, dict) and v:
-            out.update(v)
-    return out
-
-
-def _find_sip_call_id(params: dict[str, Any]) -> str | None:
-    """Case-insensitive lookup for the SIP-layer Call-ID across known aliases."""
-    if not params:
-        return None
-    lowered = {str(k).lower(): v for k, v in params.items()}
-    for alias in _SIP_CALL_ID_ALIASES:
-        v = lowered.get(alias)
-        if v:
-            return str(v)
-    return None
 
 
 class _BaseObserver(FrameProcessor):
@@ -184,6 +145,22 @@ class _BaseObserver(FrameProcessor):
         if sip_headers is not None:
             self._config.sip_headers = dict(sip_headers)
 
+    def attach_sip_from_context(self, ctx: Any) -> None:
+        """Attach SIP metadata from a typed provider context.
+
+        Duck-typed: accepts any object exposing the attributes
+        ``sip_call_id: str | None`` and ``raw_headers: dict[str, str]``.
+        The canonical implementation is
+        :class:`tuner_pipecat_sdk.providers.jambonz.JambonzCallContext`,
+        but any equivalent dataclass (your own custom provider context)
+        works the same way.
+        """
+        headers = getattr(ctx, "raw_headers", None) or None
+        self.attach_sip_info(
+            sip_call_id=getattr(ctx, "sip_call_id", None),
+            sip_headers=dict(headers) if headers else None,
+        )
+
     def attach_sip_from_dialin(self, dialin_settings: Any) -> None:
         """Populate SIP metadata from Pipecat's ``DialinSettings`` (Daily PSTN).
 
@@ -196,37 +173,51 @@ class _BaseObserver(FrameProcessor):
 
     def attach_sip_from_telephony(
         self,
-        call_data: dict[str, Any],
+        payload: dict[str, Any],
+        *,
+        provider: str | ProviderExtractor,
         sip_headers: dict[str, str] | None = None,
     ) -> None:
-        """Populate SIP metadata from ``parse_telephony_websocket`` output.
+        """Populate SIP metadata from a provider's raw call payload.
 
-        Resolution order for ``sip_call_id``:
+        ``provider`` is required. Pass one of the built-in names —
+        ``"twilio"``, ``"telnyx"``, ``"plivo"``, ``"exotel"``,
+        ``"jambonz"`` — or a callable
+        ``(payload) -> (sip_call_id, sip_headers)`` for any other provider.
 
-        1. **SIP-layer Call-ID** found in any nested customParameters dict
-           (``call_data["body"]`` for Twilio, ``customParameters`` /
-           ``custom_parameters`` for other providers) under a case-insensitive
-           alias: ``SipCallId``, ``sip_call_id``, ``sip-call-id``,
-           ``X-Sip-Call-Id``. This is the actual SIP Call-ID set by the trunk.
-        2. **Provider native call id**: ``call_id`` (Twilio/Plivo/Exotel) or
-           ``call_control_id`` (Telnyx). Used as a fallback.
+        The expected ``payload`` is whatever the provider's server-side
+        integration naturally produces:
 
-        When ``sip_headers`` is not passed explicitly and the call_data carries
-        customParameters, those parameters are used as the headers dict.
+        * Twilio / Telnyx / Plivo / Exotel: the ``call_data`` dict returned
+          by Pipecat's ``parse_telephony_websocket``.
+        * Jambonz: the JSON body of the call-hook webhook
+          (``POST /``) — cache it on the server side and forward it to the
+          bot when the WebSocket opens.
 
-        For SIP-layer fields to actually appear, your trunk/webhook must
-        forward them. With Twilio: add ``<Parameter name="SipCallId" .../>``
-        to your TwiML response. See README "SIP / Telephony Calls" section.
+        When ``sip_headers`` is passed explicitly it overrides whatever the
+        extractor derived from ``payload``.
+
+        For SIP-layer fields to actually appear in the final Tuner record,
+        your trunk/webhook must forward them. See README
+        "SIP / Telephony Calls" for per-provider configuration.
         """
-        nested = _collect_customparams(call_data)
-        sip_layer_call_id = _find_sip_call_id(nested)
-        provider_call_id = call_data.get("call_id") or call_data.get("call_control_id")
-        resolved = sip_layer_call_id or provider_call_id
+        if callable(provider):
+            extractor = provider
+        else:
+            extractor = PROVIDER_EXTRACTORS.get(provider.lower())
+            if extractor is None:
+                raise ValueError(
+                    f"unknown provider {provider!r}. "
+                    f"Built-in: {sorted(PROVIDER_EXTRACTORS)}. "
+                    f"Pass a callable (payload -> (call_id, headers)) "
+                    f"to use a custom extractor."
+                )
 
-        if sip_headers is None and nested:
-            sip_headers = {str(k): str(v) for k, v in nested.items()}
-
-        self.attach_sip_info(sip_call_id=resolved, sip_headers=sip_headers)
+        resolved, derived_headers = extractor(payload)
+        self.attach_sip_info(
+            sip_call_id=resolved,
+            sip_headers=sip_headers if sip_headers is not None else derived_headers,
+        )
 
     @property
     def latency_observer(self) -> UserBotLatencyObserver:

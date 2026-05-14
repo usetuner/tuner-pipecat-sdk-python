@@ -79,21 +79,22 @@ def test_attach_sip_from_dialin_object():
 
 
 # ---------------------------------------------------------------------------
-# attach_sip_from_telephony — the canonical Twilio/Telnyx/Plivo/Exotel path
+# attach_sip_from_telephony — provider-dispatched extraction
 # ---------------------------------------------------------------------------
 
 
-def test_telephony_falls_back_to_native_callsid_when_no_customparams():
+def test_twilio_falls_back_to_callsid_when_body_empty():
     """Twilio with default TwiML: body={} → fall back to CallSid."""
     obs = _make_observer()
     obs.attach_sip_from_telephony(
-        {"stream_id": "MZ-x", "call_id": "CA-twilio", "body": {}}
+        {"stream_id": "MZ-x", "call_id": "CA-twilio", "body": {}},
+        provider="twilio",
     )
     assert obs._config.sip_call_id == "CA-twilio"
     assert obs._config.sip_headers is None
 
 
-def test_telephony_prefers_sip_call_id_from_twilio_body():
+def test_twilio_prefers_sip_call_id_from_body():
     """When user's TwiML adds <Parameter name='SipCallId' .../>, SDK uses it."""
     obs = _make_observer()
     obs.attach_sip_from_telephony(
@@ -105,7 +106,8 @@ def test_telephony_prefers_sip_call_id_from_twilio_body():
                 "Caller": "sip:+15550001111@trunk.example",
                 "CallSid": "CA-twilio",
             },
-        }
+        },
+        provider="twilio",
     )
     assert obs._config.sip_call_id == "LEiKmt9tC1j9RQdnUzwLKeN67iC"
     assert obs._config.sip_headers == {
@@ -115,35 +117,135 @@ def test_telephony_prefers_sip_call_id_from_twilio_body():
     }
 
 
-def test_telephony_alias_lookup_is_case_insensitive():
+def test_twilio_alias_lookup_is_case_insensitive():
     obs = _make_observer()
     obs.attach_sip_from_telephony(
-        {"call_id": "native", "body": {"x-sip-call-id": "xyz-789"}}
+        {"call_id": "native", "body": {"x-sip-call-id": "xyz-789"}},
+        provider="twilio",
     )
     assert obs._config.sip_call_id == "xyz-789"
 
 
-def test_telephony_telnyx_call_control_id_fallback():
+def test_telnyx_ws_call_control_id_fallback():
     obs = _make_observer()
     obs.attach_sip_from_telephony(
-        {"stream_id": "s", "call_control_id": "ctrl-xyz", "customParameters": {}}
+        {"stream_id": "s", "call_control_id": "ctrl-xyz", "customParameters": {}},
+        provider="telnyx",
     )
     assert obs._config.sip_call_id == "ctrl-xyz"
 
 
-def test_telephony_explicit_sip_headers_override_auto_derived():
+def test_telnyx_call_control_webhook_extracts_sip_headers():
+    obs = _make_observer()
+    obs.attach_sip_from_telephony(
+        {
+            "data": {
+                "event_type": "call.initiated",
+                "payload": {
+                    "call_control_id": "ctrl-abc",
+                    "sip_call_id": "sip-id-from-trunk",
+                    "from": "+15551112222",
+                    "to": "+15553334444",
+                    "custom_headers": [
+                        {"name": "X-Trunk", "value": "us-east"},
+                    ],
+                    "sip_headers": [
+                        {"name": "Call-ID", "value": "sip-id-from-trunk"},
+                    ],
+                },
+            }
+        },
+        provider="telnyx",
+    )
+    assert obs._config.sip_call_id == "sip-id-from-trunk"
+    assert obs._config.sip_headers is not None
+    assert obs._config.sip_headers["X-Trunk"] == "us-east"
+    assert obs._config.sip_headers["from"] == "+15551112222"
+
+
+def test_jambonz_extracts_x_cid_from_sip_headers():
+    obs = _make_observer()
+    obs.attach_sip_from_telephony(
+        {
+            "call_sid": "jb-call-sid",
+            "from": "+15550001111",
+            "to": "+15550002222",
+            "direction": "inbound",
+            "sip": {
+                "headers": {
+                    "X-CID": "livekit-cid-abc",
+                    "Call-ID": "sip-tx-id",
+                },
+                "call_id": "sip-tx-id",
+            },
+        },
+        provider="jambonz",
+    )
+    assert obs._config.sip_call_id == "livekit-cid-abc"
+    assert obs._config.sip_headers is not None
+    assert obs._config.sip_headers["from"] == "+15550001111"
+    assert obs._config.sip_headers["direction"] == "inbound"
+
+
+def test_jambonz_falls_back_to_call_sid_when_no_sip_block():
+    """WS-only Jambonz path: no cached webhook → only call_sid available."""
+    obs = _make_observer()
+    obs.attach_sip_from_telephony({"call_sid": "jb-fallback"}, provider="jambonz")
+    assert obs._config.sip_call_id == "jb-fallback"
+
+
+def test_jambonz_accepts_list_shaped_headers():
+    obs = _make_observer()
+    obs.attach_sip_from_telephony(
+        {
+            "call_sid": "jb",
+            "sip": {
+                "headers": [
+                    {"name": "X-CID", "value": "abc"},
+                    {"name": "Call-ID", "value": "sip-id"},
+                ]
+            },
+        },
+        provider="jambonz",
+    )
+    assert obs._config.sip_call_id == "abc"
+
+
+def test_explicit_sip_headers_override_auto_derived():
     obs = _make_observer()
     obs.attach_sip_from_telephony(
         {"call_id": "id", "body": {"SipCallId": "real-id", "Caller": "+1"}},
+        provider="twilio",
         sip_headers={"X-Override": "yes"},
     )
     assert obs._config.sip_call_id == "real-id"
     assert obs._config.sip_headers == {"X-Override": "yes"}
 
 
-def test_telephony_unknown_call_data_keys_yields_none():
+def test_unknown_provider_raises():
     obs = _make_observer()
-    obs.attach_sip_from_telephony({"stream_id": "s"})
+    with pytest.raises(ValueError, match="unknown provider"):
+        obs.attach_sip_from_telephony({"call_id": "x"}, provider="bogus")
+
+
+def test_custom_callable_provider():
+    """Unlisted provider: caller passes their own extractor callable."""
+    obs = _make_observer()
+
+    def my_extractor(payload):
+        return payload["my_id"], {"X-Trace": payload["trace"]}
+
+    obs.attach_sip_from_telephony(
+        {"my_id": "weird-id", "trace": "t-1"},
+        provider=my_extractor,
+    )
+    assert obs._config.sip_call_id == "weird-id"
+    assert obs._config.sip_headers == {"X-Trace": "t-1"}
+
+
+def test_unknown_keys_yields_none():
+    obs = _make_observer()
+    obs.attach_sip_from_telephony({"stream_id": "s"}, provider="twilio")
     assert obs._config.sip_call_id is None
     assert obs._config.sip_headers is None
 

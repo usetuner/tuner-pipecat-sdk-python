@@ -3,10 +3,12 @@
 Owns everything Twilio-specific:
 * ``POST /twiml`` (and ``POST /``) — returns TwiML that forwards SIP-layer
   fields (``SipCallId``, ``Caller``, every ``SipHeader_*``) to the WebSocket
-  as ``<Parameter>`` tags so the SDK can pick them up.
-* ``WebSocket /ws`` — parses the Twilio handshake, builds the
-  ``TwilioFrameSerializer`` + ``FastAPIWebsocketTransport``, then hands off
-  to the provider-agnostic ``bot.run_bot``.
+  as ``<Parameter>`` tags. We use the SDK's ``build_sip_forwarding_twiml``
+  helper so the XML stays correct and escaped.
+* ``WebSocket /ws`` — parses the Twilio handshake into a
+  ``TwilioCallContext``, builds the ``TwilioFrameSerializer`` +
+  ``FastAPIWebsocketTransport``, then hands the typed context off to
+  ``bot.run_bot``.
 
 Run::
 
@@ -33,34 +35,14 @@ from pipecat.transports.websocket.fastapi import (
     FastAPIWebsocketParams,
     FastAPIWebsocketTransport,
 )
+from tuner_pipecat_sdk.providers.twilio import (
+    TwilioCallContext,
+    build_sip_forwarding_twiml,
+)
 
 import bot as bot_module
 
 app = FastAPI()
-
-
-# Twilio voice-webhook fields we forward as <Parameter> tags. Anything
-# starting with ``SipHeader_`` is also forwarded automatically (Twilio's
-# convention for arbitrary SIP headers received on the inbound INVITE).
-_FORWARDED_FIELDS: tuple[str, ...] = (
-    "SipCallId",
-    "Caller",
-    "Called",
-    "CallSid",
-    "From",
-    "To",
-    "AccountSid",
-    "Direction",
-)
-
-
-def _xml_escape(value: str) -> str:
-    return (
-        value.replace("&", "&amp;")
-        .replace('"', "&quot;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-    )
 
 
 @app.post("/")
@@ -69,41 +51,21 @@ async def twiml(request: Request) -> Response:
     """Twilio voice webhook → enriched TwiML with SIP fields forwarded."""
     form = await request.form()
 
-    forwarded: dict[str, str] = {}
-    for field in _FORWARDED_FIELDS:
-        v = form.get(field)
-        if v:
-            forwarded[field] = str(v)
-    for key, value in form.items():
-        if key.startswith("SipHeader_") and value:
-            forwarded[key] = str(value)
-
     host = request.headers.get("x-forwarded-host") or request.headers.get("host", "")
     ws_url = os.getenv("PUBLIC_WS_URL") or f"wss://{host}/ws"
 
-    params_xml = "".join(
-        f'      <Parameter name="{_xml_escape(k)}" value="{_xml_escape(v)}"/>\n'
-        for k, v in forwarded.items()
-    )
-    xml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Connect>
-    <Stream url="{_xml_escape(ws_url)}">
-{params_xml.rstrip()}
-    </Stream>
-  </Connect>
-  <Pause length="40"/>
-</Response>"""
+    xml = build_sip_forwarding_twiml(form, ws_url=ws_url)
 
     logger.info(
-        "[twilio][twiml] forwarded_keys={}  ws_url={}",
-        list(forwarded.keys()),
+        "[twilio][twiml] CallSid={!r}  has_SipCallId={}  ws_url={}",
+        form.get("CallSid"),
+        bool(form.get("SipCallId")),
         ws_url,
     )
-    if "SipCallId" not in forwarded:
+    if not form.get("SipCallId"):
         logger.warning(
             "[twilio][twiml] no SipCallId on form — call may not be "
-            "SIP-originated. SDK will fall back to CallSid."
+            "SIP-originated. Bot will only see CallSid."
         )
     return Response(content=xml, media_type="application/xml")
 
@@ -115,6 +77,15 @@ async def ws(websocket: WebSocket) -> None:
     logger.info("[twilio][ws] websocket accepted")
 
     _, sip_call_data = await parse_telephony_websocket(websocket)
+    ctx = TwilioCallContext.from_call_data(sip_call_data)
+    logger.info(
+        "[twilio][ws] resolved context  call_sid={!r}  sip_call_id={!r}  "
+        "header_keys={}",
+        ctx.call_sid,
+        ctx.sip_call_id,
+        list(ctx.raw_headers.keys()),
+    )
+
     params = FastAPIWebsocketParams(
         audio_in_enabled=True,
         audio_out_enabled=True,
@@ -128,7 +99,7 @@ async def ws(websocket: WebSocket) -> None:
 
     runner_args = WebSocketRunnerArguments(websocket=websocket)
     runner_args.handle_sigint = False
-    await bot_module.run_bot(transport, runner_args, sip_call_data=sip_call_data)
+    await bot_module.run_bot(transport, runner_args, sip_context=ctx)
 
 
 @app.get("/")

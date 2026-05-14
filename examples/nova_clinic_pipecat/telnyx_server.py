@@ -33,8 +33,6 @@ from __future__ import annotations
 
 import os
 import sys
-import time
-from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -56,42 +54,14 @@ app = FastAPI()
 TELNYX_API_BASE = "https://api.telnyx.com/v2"
 
 
-# ---------------------------------------------------------------------------
-# Webhook → WS bridge: park SIP info keyed by call_control_id
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class _Entry:
-    sip_call_id: str | None
-    sip_headers: dict[str, str] | None
-    inserted_at: float
-
-
-_PENDING: dict[str, _Entry] = {}
-_TTL_SECONDS = 300.0
-
-
-def _evict_expired() -> None:
-    cutoff = time.monotonic() - _TTL_SECONDS
-    for k in [k for k, v in _PENDING.items() if v.inserted_at < cutoff]:
-        _PENDING.pop(k, None)
+# Bridge the Call Control event webhook to the Media Streams WebSocket.
+# Telnyx delivers SIP info on the webhook; the bot lives in the WS handler.
+_PENDING: dict[str, dict[str, Any]] = {}
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-# Case-insensitive aliases under which a SIP-layer Call-ID may appear in
-# custom_headers / sip_headers when not exposed as a dedicated field.
-_SIP_CALL_ID_ALIASES: tuple[str, ...] = (
-    "sipcallid",
-    "sip_call_id",
-    "sip-call-id",
-    "x-sip-call-id",
-    "call-id",
-)
 
 
 def _telnyx_headers() -> dict[str, str]:
@@ -124,29 +94,6 @@ async def _telnyx_action(
         )
     else:
         logger.info("[telnyx][api] {} → {}", action, r.status_code)
-
-
-def _extract_headers_list(payload: dict[str, Any], key: str) -> dict[str, str]:
-    """Flatten a Telnyx ``[{"name": ..., "value": ...}]`` list into a dict."""
-    items = payload.get(key) or []
-    out: dict[str, str] = {}
-    if isinstance(items, list):
-        for item in items:
-            if isinstance(item, dict):
-                name = item.get("name")
-                value = item.get("value")
-                if name and value:
-                    out[str(name)] = str(value)
-    return out
-
-
-def _find_sip_call_id(headers: dict[str, str]) -> str | None:
-    lowered = {k.lower(): v for k, v in headers.items()}
-    for alias in _SIP_CALL_ID_ALIASES:
-        v = lowered.get(alias)
-        if v:
-            return v
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -207,37 +154,17 @@ async def webhook(request: Request, background_tasks: BackgroundTasks) -> Respon
         )
         return Response(status_code=200)
 
-    # Extract SIP info from the inbound payload. Telnyx exposes:
-    #   payload["custom_headers"]: list of {name, value} forwarded by the trunk
-    #   payload["sip_headers"]:    list of {name, value} from the INVITE
-    #   payload["from"] / ["to"] / ["caller_id_*"]
-    custom_headers = _extract_headers_list(payload, "custom_headers")
-    sip_headers_list = _extract_headers_list(payload, "sip_headers")
-    merged: dict[str, str] = {**custom_headers, **sip_headers_list}
-
-    # Native top-level fields useful as context
-    for k in ("from", "to", "caller_id_name", "caller_id_number"):
-        v = payload.get(k)
-        if v:
-            merged.setdefault(k, str(v))
-
-    # SIP-layer Call-ID: dedicated field if present, else search aliases.
-    sip_call_id = payload.get("sip_call_id") or _find_sip_call_id(merged)
-
+    # Cache the raw Call Control event so the WS handler can read SIP info
+    # from it. The full event (with ``data.payload`` wrapper) is what the
+    # bot receives.
     if call_control_id:
-        _evict_expired()
-        _PENDING[call_control_id] = _Entry(
-            sip_call_id=sip_call_id,
-            sip_headers=merged or None,
-            inserted_at=time.monotonic(),
-        )
+        _PENDING[call_control_id] = data
 
     logger.info(
-        "[telnyx][webhook] cached  call_control_id={!r}  sip_call_id={!r}  "
-        "header_keys={}",
+        "[telnyx][webhook] cached call_control_id={!r}  from={!r}  to={!r}",
         call_control_id,
-        sip_call_id,
-        list(merged.keys()),
+        payload.get("from"),
+        payload.get("to"),
     )
 
     # Fire the answer API call in the background so we return 200 NOW.
@@ -266,32 +193,9 @@ async def ws(websocket: WebSocket) -> None:
     _, sip_call_data = await parse_telephony_websocket(websocket)
     call_control_id = sip_call_data.get("call_control_id") or ""
 
-    _evict_expired()
-    entry = _PENDING.pop(call_control_id, None) if call_control_id else None
-
-    # Recover SIP info from the webhook-side cache and inject it under
-    # ``body`` so the SDK's customParameters search in
-    # ``attach_sip_from_telephony`` picks it up automatically.
-    if entry:
-        body: dict[str, str] = dict(sip_call_data.get("body") or {})
-        if entry.sip_call_id and "SipCallId" not in body:
-            body["SipCallId"] = entry.sip_call_id
-        if entry.sip_headers:
-            for k, v in entry.sip_headers.items():
-                body.setdefault(k, v)
-        sip_call_data["body"] = body
-        logger.info(
-            "[telnyx][ws] recovered SIP info from cache  sip_call_id={!r}  "
-            "header_keys={}",
-            entry.sip_call_id,
-            list(entry.sip_headers.keys()) if entry.sip_headers else None,
-        )
-    else:
-        logger.warning(
-            "[telnyx][ws] no cached SIP info for call_control_id={!r} — "
-            "SDK will fall back to call_control_id as sip_call_id",
-            call_control_id,
-        )
+    # Hand the bot either the cached Call Control event (richer — has SIP
+    # headers) or the WS call_data (leaner — falls back to call_control_id).
+    sip_payload = _PENDING.pop(call_control_id, sip_call_data)
 
     params = FastAPIWebsocketParams(
         audio_in_enabled=True,
@@ -309,7 +213,12 @@ async def ws(websocket: WebSocket) -> None:
 
     runner_args = WebSocketRunnerArguments(websocket=websocket)
     runner_args.handle_sigint = False
-    await bot_module.run_bot(transport, runner_args, sip_call_data=sip_call_data)
+    await bot_module.run_bot(
+        transport,
+        runner_args,
+        sip_call_data=sip_payload,
+        sip_provider="telnyx",
+    )
 
 
 @app.get("/")

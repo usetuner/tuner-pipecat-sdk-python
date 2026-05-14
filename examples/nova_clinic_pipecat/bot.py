@@ -236,6 +236,8 @@ async def run_bot(
     transport: BaseTransport,
     runner_args: RunnerArguments,
     sip_call_data: dict | None = None,
+    sip_provider: str | None = None,
+    sip_context: object | None = None,
 ):
     logger.info("Starting Nova Clinic assistant")
 
@@ -327,11 +329,14 @@ async def run_bot(
     observer.attach_turn_tracking_observer(turn_tracker)
 
     # Forward SIP-layer Call-ID + headers when the call arrived over SIP.
-    # For Twilio, this only resolves to the real SipCallId if your TwiML
-    # webhook adds <Parameter name="SipCallId" .../> tags — otherwise the
-    # SDK falls back to Twilio's CallSid. See README "SIP / Telephony Calls".
-    if sip_call_data is not None:
-        observer.attach_sip_from_telephony(sip_call_data)
+    # Preferred path: a typed provider context (e.g. JambonzCallContext) the
+    # server built and handed in. Legacy path: ``sip_call_data + sip_provider``
+    # for providers without a typed context yet. See README
+    # "SIP / Telephony Calls".
+    if sip_context is not None:
+        observer.attach_sip_from_context(sip_context)
+    elif sip_call_data is not None and sip_provider is not None:
+        observer.attach_sip_from_telephony(sip_call_data, provider=sip_provider)
     elif isinstance(getattr(runner_args, "body", None), dict):
         dialin = runner_args.body.get("dialin_settings")
         if dialin:
