@@ -6,7 +6,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
-## [0.2.0]
+## [0.2.0] 2026-05-15
 
 ### Changed
 - Migrate all examples to pipecat-ai v1 (`>=1.0.0`) and pipecat-ai-flows v1 (`>=1.0.0`).
