@@ -357,11 +357,10 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     task = PipelineTask(
         pipeline,
         params=PipelineParams(
-            allow_interruptions=True,
-            observers=[observer.latency_observer, turn_tracker],
             enable_metrics=True,
             enable_usage_metrics=True,
         ),
+        observers=[observer.latency_observer, turn_tracker],
     )
 
     flow_manager = FlowManager(
