@@ -40,6 +40,7 @@ Issues = "https://github.com/usetuner/tuner-pipecat-sdk-python/issues"
 
 [project.optional-dependencies]
 flows = [
+    "pipecat-ai[websockets-base]>=1.0.0",
     "pipecat-ai-flows>=1.0.0",
 ]
 test = [
