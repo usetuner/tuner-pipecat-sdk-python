@@ -41,6 +41,8 @@ Then open http://localhost:7860 where applicable.
 1. Install tools (one-time) in a virtual env.
 
 uv sync --extra dev
+.venv/bin/activate
+pip install hatch twine
 
 2. Clean old build artifacts
 
