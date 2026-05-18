@@ -28,7 +28,7 @@ pip install tuner-pipecat-sdk[flows]
 
 ## Plain Pipecat — `Observer`
 
-Use `Observer` when your pipeline manages context directly via `OpenAILLMContext`.
+Use `Observer` when your pipeline manages context directly via `LLMContext`.
 
 ```python
 import uuid
