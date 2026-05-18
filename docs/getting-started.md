@@ -72,8 +72,7 @@ Pipeline([
 The SDK reads **usage and latency from Pipecat only** (no fallback). Ensure the task is created with metrics enabled:
 
 ```python
-from pipecat.pipeline.task import PipelineTask
-from pipecat.pipeline.pipeline_params import PipelineParams
+from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.observers.turn_tracking_observer import TurnTrackingObserver
 
 turn_tracker = TurnTrackingObserver()
@@ -82,10 +81,10 @@ observer.attach_turn_tracking_observer(turn_tracker)
 task = PipelineTask(
     pipeline,
     params=PipelineParams(
-        observers=[observer.latency_observer, turn_tracker],
         enable_metrics=True,
         enable_usage_metrics=True,
     ),
+    observers=[observer.latency_observer, turn_tracker],
 )
 ```
 

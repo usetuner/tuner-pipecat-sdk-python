@@ -323,7 +323,7 @@ async def run_bot(
         call_id=str(uuid.uuid4()),
         base_url=os.getenv("TUNER_BASE_URL", "https://api.usetuner.ai"),
         asr_model="openai/gpt-4o-transcribe",
-        llm_model="gpt-4o",
+        llm_model="gpt-5-mini-2025-08-07",
         tts_model="openai/tts-1",
     )
     observer.attach_turn_tracking_observer(turn_tracker)
@@ -370,7 +370,7 @@ async def run_bot(
         logger.info("Client connected")
         context.add_message(
             {
-                "role": "developer",
+                "role": "assistant",
                 "content": "Greet the caller warmly and ask how you can help them today.",
             }
         )
