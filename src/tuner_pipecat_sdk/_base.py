@@ -96,6 +96,10 @@ class _BaseObserver(FrameProcessor):
                 Optional — not collected automatically; pass it when the callee
                 identity is known to your application.
         """
+        # enable_direct_mode=True: frames bypass the internal process queue and are
+        # pushed through immediately (like old pipecat's simple pass-through). Without
+        # this, pipecat 1.0's _start_interruption() clears the queue on every
+        # InterruptionFrame, dropping buffered TTS audio and cutting speech short.
         super().__init__(**kwargs)
         self._config = TunerConfig(
             api_key=api_key,

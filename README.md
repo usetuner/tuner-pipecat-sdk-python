@@ -9,7 +9,7 @@ then sends a structured `CallPayload` to the Tuner API when a call ends.
 
 - Python **3.10–3.13**. 
 - **Do not use Python 3.14** for installs yet: Pipecat pulls **`onnxruntime~=1.23.2`** and **`numba`** without 3.14 wheels → errors like *No matching distribution found for onnxruntime*.
-- This SDK depends on **`pipecat-ai>=0.0.105`**.
+- This SDK depends on **`pipecat-ai>=1.0.0`**.
 
 ## Installation
 
@@ -28,7 +28,7 @@ pip install tuner-pipecat-sdk[flows]
 
 ## Plain Pipecat — `Observer`
 
-Use `Observer` when your pipeline manages context directly via `OpenAILLMContext`.
+Use `Observer` when your pipeline manages context directly via `LLMContext`.
 
 ```python
 import uuid
@@ -101,8 +101,7 @@ Pipeline([
 Enable metrics on the pipeline task so latency and usage fields are populated:
 
 ```python
-from pipecat.pipeline.task import PipelineTask
-from pipecat.pipeline.pipeline_params import PipelineParams
+from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.observers.turn_tracking_observer import TurnTrackingObserver
 
 turn_tracker = TurnTrackingObserver()
@@ -110,10 +109,10 @@ turn_tracker = TurnTrackingObserver()
 task = PipelineTask(
     pipeline,
     params=PipelineParams(
-        observers=[observer.latency_observer, turn_tracker],
         enable_metrics=True,
         enable_usage_metrics=True,
     ),
+    observers=[observer.latency_observer, turn_tracker],
 )
 ```
 
