@@ -86,8 +86,16 @@ class _BaseObserver(FrameProcessor):
         sip_headers: dict[str, str] | None = None,
         disconnection_reason_resolver: Callable[[], str | None] | None = None,
         agent_version: int | None = None,
+        recipient: str | None = None,
         **kwargs: Any,
     ) -> None:
+        """
+        Args:
+            recipient: Phone number or SIP URL of the callee party
+                (e.g. ``"+15551234567"`` or ``"sip:alice@example.com"``).
+                Optional — not collected automatically; pass it when the callee
+                identity is known to your application.
+        """
         super().__init__(**kwargs)
         self._config = TunerConfig(
             api_key=api_key,
@@ -104,6 +112,7 @@ class _BaseObserver(FrameProcessor):
             sip_call_id=sip_call_id,
             sip_headers=sip_headers,
             agent_version=resolve_agent_version(agent_version),
+            recipient=recipient,
         )
         self._acc = CallAccumulator()
         self._acc.call_start_abs_ns = time.time_ns()
