@@ -129,6 +129,11 @@ class CallPayload(BaseModel):
     sip_call_id: str | None = None
     sip_headers: dict[str, str] | None = None
     agent_version: int | None = None
+    recipient: str | None = None
+    """Phone number or SIP URL of the callee party (e.g. ``+15551234567`` or ``sip:alice@example.com``).
+
+    Not populated automatically — pass this field explicitly when the callee identity is known.
+    """
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize payload to a JSON-ready dict."""

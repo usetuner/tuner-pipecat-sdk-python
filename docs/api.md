@@ -19,8 +19,13 @@ FlowsObserver(
     asr_model: str = "",
     llm_model: str = "",
     tts_model: str = "",
+    recipient: str | None = None,
 )
 ```
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `recipient` | `str \| None` | `None` | Phone number or SIP URL of the callee party (e.g. `+15551234567` or `sip:alice@example.com`). **Not collected automatically** — pass this when the callee identity is known to your application. |
 
 Methods:
 

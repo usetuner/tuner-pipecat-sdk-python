@@ -18,6 +18,11 @@ class TunerConfig(BaseModel):
     sip_call_id: str | None = None
     sip_headers: dict[str, str] | None = None
     agent_version: int | None = None
+    recipient: str | None = None
+    """Phone number or SIP URL of the callee party (e.g. ``+15551234567`` or ``sip:alice@example.com``).
+
+    Not collected automatically — the caller is responsible for supplying this value when known.
+    """
 
     @field_validator("api_key", "call_id", "agent_id")
     @classmethod
