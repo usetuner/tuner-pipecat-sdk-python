@@ -5,8 +5,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from .config import TunerConfig
+from .models import CallUsage
 
-__all__ = ["Observer", "FlowsObserver", "TunerConfig"]
+__all__ = ["Observer", "FlowsObserver", "TunerConfig", "CallUsage"]
 
 if TYPE_CHECKING:
     from .flows_observer import FlowsObserver

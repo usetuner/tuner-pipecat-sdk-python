@@ -6,7 +6,9 @@ from typing import Any
 
 from loguru import logger
 
-from .models import CallPayload, LatencyTurn
+from collections.abc import Callable
+
+from .models import CallPayload, CallUsage, LatencyTurn
 from .payload_builder import build_payload
 from .tool_timing_registry import ToolTimingRegistry
 
@@ -44,6 +46,8 @@ class CallAccumulator:
 
     # call-level pipecat-sourced counters (summed across all MetricsFrames)
     _pipecat_llm_total_tokens: int = field(default=0, repr=False)
+    _pipecat_llm_prompt_tokens: int = field(default=0, repr=False)
+    _pipecat_llm_completion_tokens: int = field(default=0, repr=False)
     _pipecat_tts_chars: int = field(default=0, repr=False)
 
     # per-turn pending pipecat metrics (reset on each latency breakdown)
@@ -93,6 +97,12 @@ class CallAccumulator:
 
     def get_total_llm_tokens(self) -> int:
         return self._pipecat_llm_total_tokens
+
+    def get_llm_prompt_tokens(self) -> int:
+        return self._pipecat_llm_prompt_tokens
+
+    def get_llm_completion_tokens(self) -> int:
+        return self._pipecat_llm_completion_tokens
 
     def get_total_tts_characters(self) -> int:
         return self._pipecat_tts_chars
@@ -421,8 +431,13 @@ class CallAccumulator:
         for d in getattr(frame, "data", []):
             cls_name = type(d).__name__
             if cls_name == "LLMUsageMetricsData":
-                total_tokens = getattr(getattr(d, "value", None), "total_tokens", 0) or 0
+                token_usage = getattr(d, "value", None)
+                total_tokens = getattr(token_usage, "total_tokens", 0) or 0
+                prompt_tokens = getattr(token_usage, "prompt_tokens", 0) or 0
+                completion_tokens = getattr(token_usage, "completion_tokens", 0) or 0
                 self._pipecat_llm_total_tokens += total_tokens
+                self._pipecat_llm_prompt_tokens += prompt_tokens
+                self._pipecat_llm_completion_tokens += completion_tokens
             elif cls_name == "TTSUsageMetricsData":
                 self._pipecat_tts_chars += getattr(d, "value", 0) or 0
             elif cls_name == "ProcessingMetricsData":
@@ -444,5 +459,10 @@ class CallAccumulator:
                         if idx < len(self.latency_turns):
                             self.latency_turns[idx].llm_completed = True
 
-    def build_payload(self, config: Any, transcript: list[dict[str, Any]]) -> CallPayload:
-        return build_payload(self, config, transcript)
+    def build_payload(
+        self,
+        config: Any,
+        transcript: list[dict[str, Any]],
+        cost_calculator: Callable[[CallUsage], float] | None = None,
+    ) -> CallPayload:
+        return build_payload(self, config, transcript, cost_calculator)

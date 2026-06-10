@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class LatencyTurn(BaseModel):
@@ -67,7 +67,7 @@ class ToolInfo(BaseModel):
 
 class TranscriptSegment(BaseModel):
     role: str
-    text: str
+    text: str | None = None
     start_ms: int
     end_ms: int | None = None
     metadata: dict[str, Any]
@@ -86,6 +86,16 @@ class UsageToken(BaseModel):
     asr_duration: int  # seconds (call wall-clock duration: end_ts - start_ts)
     llm_token: int | None = None
     tts_character_count: int | None = None
+
+
+class CallUsage(BaseModel):
+    """Usage data passed to a cost_calculator callable at the end of each call."""
+
+    llm_prompt_tokens: int | None = None
+    llm_completion_tokens: int | None = None
+    llm_total_tokens: int | None = None
+    tts_characters: int | None = None
+    stt_audio_seconds: int = 0
 
 
 class GeneralMetaData(BaseModel):
@@ -130,6 +140,7 @@ class CallPayload(BaseModel):
     sip_headers: dict[str, str] | None = None
     agent_version: int | None = None
     recipient: str | None = None
+    cost: float | None = Field(None, serialization_alias="call_cost")
     """Phone number or SIP URL of the callee party (e.g. ``+15551234567`` or ``sip:alice@example.com``).
 
     Not populated automatically — pass this field explicitly when the callee identity is known.
@@ -148,6 +159,7 @@ __all__ = [
     "TranscriptSegment",
     "AiModels",
     "UsageToken",
+    "CallUsage",
     "GeneralMetaData",
     "CallPayload",
     "DisconnectReason",

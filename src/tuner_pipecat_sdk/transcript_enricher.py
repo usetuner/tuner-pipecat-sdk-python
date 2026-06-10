@@ -144,7 +144,8 @@ def build_agent_result_segment(
     tool_call_id = message.get("tool_call_id", "")
     matched_tool_call = find_matching_tool_call(messages, tool_call_id)
     function_name = matched_tool_call["function"]["name"] if matched_tool_call else None
-    parsed_result = parse_json_value(message.get("content"))
+    parsed_result = parse_json_value(message.get("content", ""))
+    is_structured = isinstance(parsed_result, dict)
     completion_ms = acc.get_tool_completion_ms(tool_call_id) if tool_call_id else None
     result_ms = completion_ms if completion_ms is not None else 0
     if tool_turn and (
@@ -154,17 +155,13 @@ def build_agent_result_segment(
 
     return TranscriptSegment(
         role="agent_result",
-        text=(
-            json.dumps(parsed_result, default=str)
-            if parsed_result is not None
-            else message.get("content", "")
-        ),
+        text=None if is_structured else parsed_result,
         start_ms=result_ms,
         end_ms=None,
         tool=ToolInfo(
             name=function_name,
             request_id=tool_call_id or None,
-            result=(parsed_result if isinstance(parsed_result, dict) else {"value": parsed_result}),
+            result=parsed_result if is_structured else None,
             start_ms=result_ms,
         ),
         metadata=build_segment_metadata(),

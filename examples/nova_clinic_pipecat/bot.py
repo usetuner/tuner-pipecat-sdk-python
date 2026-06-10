@@ -30,7 +30,7 @@ from pipecat.services.openai.stt import OpenAISTTService
 from pipecat.services.openai.tts import OpenAITTSService
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 
-from tuner_pipecat_sdk import Observer
+from tuner_pipecat_sdk import CallUsage, Observer
 
 load_dotenv()
 
@@ -315,6 +315,16 @@ async def run_bot(
         user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer()),
     )
 
+    def calculate_cost(usage: CallUsage) -> float:
+        # OpenAI gpt-4o-mini pricing (per token / per character / per second)
+        llm_cost  = (usage.llm_prompt_tokens     or 0) * 0.000_000_150
+        llm_cost += (usage.llm_completion_tokens or 0) * 0.000_000_600
+        # OpenAI TTS-1: $15 per 1M characters
+        tts_cost  = (usage.tts_characters        or 0) * 0.000_015
+        # OpenAI gpt-4o-transcribe: $6 per 1M audio seconds
+        stt_cost  = usage.stt_audio_seconds            * 0.000_006
+        return (llm_cost + tts_cost + stt_cost) * 100
+
     turn_tracker = TurnTrackingObserver()
     observer = Observer(
         api_key=os.getenv("TUNER_API_KEY"),
@@ -325,6 +335,7 @@ async def run_bot(
         asr_model="openai/gpt-4o-transcribe",
         llm_model="gpt-5-mini-2025-08-07",
         tts_model="openai/tts-1",
+        cost_calculator=calculate_cost,
     )
     observer.attach_turn_tracking_observer(turn_tracker)
 

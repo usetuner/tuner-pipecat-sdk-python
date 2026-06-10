@@ -73,6 +73,10 @@ def test_enrich_transcript_tool_call_and_result(tuner_config):
     assert result_segments[0].start_ms == 90
     assert func_segments[0].start_ms != result_segments[0].start_ms
 
+    # JSON result → text is None, tool.result carries the structured data
+    assert result_segments[0].text is None
+    assert result_segments[0].tool.result == {"ok": True}
+
 
 def test_consecutive_assistant_messages_merged_into_one_segment(tuner_config):
     acc = CallAccumulator()
@@ -376,3 +380,111 @@ def test_agent_result_with_no_matching_tool_call_has_null_function_name(tuner_co
     assert result_segs[0].tool is not None
     assert result_segs[0].tool.name is None  # no matched tool call
     assert result_segs[0].start_ms == 200
+
+
+def test_agent_result_non_json_uses_text_not_tool_result(tuner_config):
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = 0
+    acc.call_end_abs_ns = 2_000_000_000
+    acc.done = True
+    transcript = [
+        {"role": "user", "content": "hello"},
+        {
+            "role": "assistant",
+            "tool_calls": [{"id": "tc-1", "function": {"name": "do_thing", "arguments": "{}"}}],
+        },
+        {"role": "tool", "tool_call_id": "tc-1", "content": "plain text result"},
+    ]
+    payload = acc.build_payload(tuner_config, transcript)
+    result_seg = next(s for s in payload.transcript_with_tool_calls if s.role == "agent_result")
+    # Non-JSON: text holds the raw value, tool.result is None
+    assert result_seg.text == "plain text result"
+    assert result_seg.tool.result is None
+
+
+def test_injected_user_messages_excluded_from_transcript(tuner_config):
+    """Idle-timeout injected role=user messages must not appear as Customer entries.
+
+    Scenario: user speaks once at 13s, then goes silent. The idle handler injects
+    two prompts as role=user messages. The bot responds to the first ("Are you still
+    there?") — that creates a latency turn with had_user_speech=False. The second
+    injection has no turn at all. Neither should appear in the transcript.
+    """
+    base_ns = 1_000_000_000
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = base_ns
+    acc.call_end_abs_ns = base_ns + 60_000_000_000
+    acc.done = True
+    acc.latency_turns = [
+        # Real user turn at 13s
+        LatencyTurn(
+            turn_index=0,
+            user_started_ms=13_000,
+            user_stopped_ms=15_000,
+            bot_started_ms=19_000,
+            bot_stopped_ms=23_000,
+            had_user_speech=True,
+        ),
+        # Bot responded to idle injection — no real user speech
+        LatencyTurn(
+            turn_index=1,
+            user_started_ms=0,
+            user_stopped_ms=0,
+            bot_started_ms=46_000,
+            bot_stopped_ms=47_000,
+        ),
+    ]
+    transcript = [
+        {"role": "user", "content": "Yes, my name is Sallym."},
+        {"role": "assistant", "content": "Hi Sallym, great to meet you."},
+        # Injected by idle handler — maps to turn[1] (user_started_ms=0)
+        {"role": "user", "content": "The user has been quiet. Politely ask if they're still there."},
+        {"role": "assistant", "content": "Are you still there?"},
+        # Second injection — no corresponding turn (past end of latency_turns)
+        {"role": "user", "content": "The user has been quiet. We will be disconnecting the call now."},
+    ]
+
+    payload = acc.build_payload(tuner_config, transcript)
+    user_segs = [s for s in payload.transcript_with_tool_calls if s.role == "user"]
+
+    assert len(user_segs) == 1, f"expected 1 user segment, got {len(user_segs)}: {[s.text for s in user_segs]}"
+    assert user_segs[0].text == "Yes, my name is Sallym."
+    assert user_segs[0].start_ms == 13_000
+    assert user_segs[0].end_ms == 15_000
+
+
+def test_injected_user_messages_do_not_corrupt_subsequent_real_turn(tuner_config):
+    """An injected message between two real user turns must not shift alignment.
+
+    Scenario: user speaks, bot responds, idle injection fires (with a silent bot
+    response), then user speaks again. The second real user turn must be correctly
+    aligned to its latency turn.
+    """
+    base_ns = 1_000_000_000
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = base_ns
+    acc.call_end_abs_ns = base_ns + 60_000_000_000
+    acc.done = True
+    acc.latency_turns = [
+        LatencyTurn(turn_index=0, user_started_ms=5_000, user_stopped_ms=6_000, bot_started_ms=7_000, bot_stopped_ms=8_000, had_user_speech=True),
+        # Silent bot turn (injection response) — no real user speech
+        LatencyTurn(turn_index=1, user_started_ms=0, user_stopped_ms=0, bot_started_ms=20_000, bot_stopped_ms=21_000),
+        LatencyTurn(turn_index=2, user_started_ms=30_000, user_stopped_ms=31_000, bot_started_ms=32_000, bot_stopped_ms=33_000, had_user_speech=True),
+    ]
+    transcript = [
+        {"role": "user", "content": "Hello"},
+        {"role": "assistant", "content": "Hi there!"},
+        {"role": "user", "content": "The user needs more time."},  # injected
+        {"role": "assistant", "content": "Take your time."},
+        {"role": "user", "content": "I'm back now."},
+        {"role": "assistant", "content": "Great, let's continue."},
+    ]
+
+    payload = acc.build_payload(tuner_config, transcript)
+    user_segs = [s for s in payload.transcript_with_tool_calls if s.role == "user"]
+
+    assert len(user_segs) == 2, f"expected 2 user segments, got {len(user_segs)}: {[s.text for s in user_segs]}"
+    assert user_segs[0].text == "Hello"
+    assert user_segs[0].start_ms == 5_000
+    assert user_segs[1].text == "I'm back now."
+    assert user_segs[1].start_ms == 30_000
