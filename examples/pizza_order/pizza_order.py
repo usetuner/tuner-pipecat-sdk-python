@@ -50,7 +50,7 @@ from pipecat_flows import (
     NodeConfig,
 )
 
-from tuner_pipecat_sdk import FlowsObserver
+from tuner_pipecat_sdk import CallUsage, FlowsObserver
 
 load_dotenv(override=True)
 
@@ -271,6 +271,16 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     debug_logger = DebugLogProcessor()
     turn_tracker = TurnTrackingObserver()
 
+    def calculate_cost(usage: CallUsage) -> float:
+        # OpenAI gpt-4o-mini pricing (per token)
+        llm_cost  = (usage.llm_prompt_tokens     or 0) * 0.000_000_150
+        llm_cost += (usage.llm_completion_tokens or 0) * 0.000_000_600
+        # Deepgram Aura-2 TTS: $0.030 per 1K characters
+        tts_cost  = (usage.tts_characters        or 0) * 0.000_030
+        # Deepgram Nova-3 STT: $0.0043 per audio minute
+        stt_cost  = usage.stt_audio_seconds            * (0.0043 / 60)
+        return (llm_cost + tts_cost + stt_cost) * 100
+
     observer = FlowsObserver(
         api_key=os.getenv("TUNER_API_KEY", "dev"),
         workspace_id=int(os.getenv("TUNER_WORKSPACE_ID")),
@@ -280,6 +290,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         asr_model=os.getenv("TUNER_ASR_MODEL", "deepgram/nova-3"),
         llm_model=os.getenv("TUNER_LLM_MODEL", "gpt-4o-mini"),
         tts_model=os.getenv("TUNER_TTS_MODEL", "deepgram/aura-2-thalia-en"),
+        cost_calculator=calculate_cost,
         debug=True,
     )
     observer.attach_turn_tracking_observer(turn_tracker)
