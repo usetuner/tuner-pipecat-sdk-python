@@ -6,6 +6,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.2.2] 2026-06-11
+
+### Added
+- **Call cost reporting** — pass a `cost_calculator` callable to `Observer`/`FlowsObserver` to compute the cost of a call from its usage data (`CallUsage`: LLM prompt/completion tokens, TTS characters, STT audio seconds). The result (in USD cents) is included in the payload sent to the Tuner API.
+- `tuner_pipecat_sdk.CallUsage` — usage data type passed to `cost_calculator`.
+- `pizza_order` example updated to demonstrate `cost_calculator` with Deepgram + OpenAI pricing.
+
+---
+
 ## [0.2.0] 2026-05-15
 
 ### Changed
@@ -49,6 +58,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Initial development: accumulator, HTTP client, frame handling, turn tracking, and first round of examples.
 
-[Unreleased]: https://github.com/usetuner/tuner-pipecat-sdk-python/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/usetuner/tuner-pipecat-sdk-python/compare/v0.2.0...HEAD
 [0.1.1]: https://github.com/usetuner/tuner-pipecat-sdk-python/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/usetuner/tuner-pipecat-sdk-python/compare/v0.0.x...v0.1.0
