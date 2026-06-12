@@ -22,7 +22,7 @@ greet + present menu
 
 ## Prerequisites
 
-- Python 3.10+, [`uv`](https://docs.astral.sh/uv/)
+- Python 3.11+, [`uv`](https://docs.astral.sh/uv/)
 - SDK install paths (PyPI, `pip` vs examples): see the **repository root README**.
 
 ## Setup
