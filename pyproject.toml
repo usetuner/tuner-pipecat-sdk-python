@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tuner-pipecat-sdk"
-version = "0.2.1"
-description = "Pipecat observer SDK for capturing latency, transcript, and usage data from pipecat and pipecat-flows pipelines."
+version = "0.2.2"
+description = "Pipecat observer SDK for capturing latency, transcript, and usage data from pipecat pipelines."
 readme = "README.md"
 authors = [
     { name = "Tuner Team" },
@@ -39,10 +39,6 @@ Repository = "https://github.com/usetuner/tuner-pipecat-sdk-python"
 Issues = "https://github.com/usetuner/tuner-pipecat-sdk-python/issues"
 
 [project.optional-dependencies]
-flows = [
-    "pipecat-ai[websockets-base]>=1.0.0",
-    "pipecat-ai-flows>=1.0.0",
-]
 test = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
@@ -59,7 +55,7 @@ publish = [
     "twine>=5.0",
 ]
 dev = [
-    "tuner-pipecat-sdk[test,lint,type,publish,flows]",
+    "tuner-pipecat-sdk[test,lint,type,publish]",
 ]
 
 [tool.pytest.ini_options]
@@ -90,7 +86,7 @@ no_implicit_optional = true
 check_untyped_defs = true
 
 [[tool.mypy.overrides]]
-module = ["pipecat.*","pipecat_flows.*"]
+module = ["pipecat.*"]
 ignore_missing_imports = true
 
 [tool.coverage.run]
@@ -98,7 +94,6 @@ source = ["tuner_pipecat_sdk"]
 branch = true
 omit = [
     "src/tuner_pipecat_sdk/observer.py",
-    "src/tuner_pipecat_sdk/flow_manager_integration.py",
 ]
 
 [tool.coverage.report]

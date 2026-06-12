@@ -2,6 +2,8 @@
 
 from types import SimpleNamespace
 
+import pytest
+
 from tuner_pipecat_sdk.accumulator import CallAccumulator
 from tuner_pipecat_sdk.models import LatencyTurn
 
@@ -226,3 +228,71 @@ def test_build_payload_disconnection_reason_omitted_from_dict_when_none(tuner_co
     acc.done = True
     payload = acc.build_payload(tuner_config, [])
     assert "disconnection_reason" not in payload.to_dict()
+
+
+def test_cost_calculator_invoked_and_stored_in_payload(tuner_config):
+    base_ns = 1_000_000_000
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = base_ns
+    acc.call_end_abs_ns = base_ns + 60_000_000_000  # 60s call
+    acc.done = True
+    # Simulate LLM metrics: 100 prompt + 50 completion = 150 total
+    token_value = SimpleNamespace(prompt_tokens=100, completion_tokens=50, total_tokens=150)
+    acc.on_metrics_frame(SimpleNamespace(data=[_metric("LLMUsageMetricsData", value=token_value)]))
+    # Simulate TTS metrics: 200 characters
+    acc.on_metrics_frame(SimpleNamespace(data=[_metric("TTSUsageMetricsData", value=200)]))
+
+    def calculate_cost(usage):
+        llm_cost = (usage.llm_prompt_tokens or 0) * 0.000_003
+        llm_cost += (usage.llm_completion_tokens or 0) * 0.000_015
+        tts_cost = (usage.tts_characters or 0) * 0.000_030
+        stt_cost = usage.stt_audio_seconds * 0.000_006
+        return llm_cost + tts_cost + stt_cost
+
+    payload = acc.build_payload(tuner_config, [], calculate_cost)
+
+    expected = 100 * 0.000_003 + 50 * 0.000_015 + 200 * 0.000_030 + 60 * 0.000_006
+    assert payload.cost == pytest.approx(expected)
+    assert "call_cost" in payload.to_dict()
+    assert payload.to_dict()["call_cost"] == pytest.approx(expected)
+
+
+def test_cost_calculator_none_omits_cost_from_payload(tuner_config):
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = 1_000_000_000
+    acc.call_end_abs_ns = 2_000_000_000
+    acc.done = True
+    payload = acc.build_payload(tuner_config, [])
+    assert payload.cost is None
+    assert "call_cost" not in payload.to_dict()
+
+
+def test_cost_calculator_receives_correct_usage_fields(tuner_config):
+    base_ns = 1_000_000_000
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = base_ns
+    acc.call_end_abs_ns = base_ns + 30_000_000_000  # 30s call
+    acc.done = True
+    token_value = SimpleNamespace(prompt_tokens=80, completion_tokens=20, total_tokens=100)
+    acc.on_metrics_frame(SimpleNamespace(data=[_metric("LLMUsageMetricsData", value=token_value)]))
+    acc.on_metrics_frame(SimpleNamespace(data=[_metric("TTSUsageMetricsData", value=500)]))
+
+    captured = {}
+
+    def capture_usage(usage):
+        captured.update({
+            "prompt": usage.llm_prompt_tokens,
+            "completion": usage.llm_completion_tokens,
+            "total": usage.llm_total_tokens,
+            "tts": usage.tts_characters,
+            "stt_secs": usage.stt_audio_seconds,
+        })
+        return 0.0
+
+    acc.build_payload(tuner_config, [], capture_usage)
+
+    assert captured["prompt"] == 80
+    assert captured["completion"] == 20
+    assert captured["total"] == 100
+    assert captured["tts"] == 500
+    assert captured["stt_secs"] == 30

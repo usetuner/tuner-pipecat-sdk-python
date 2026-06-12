@@ -1,7 +1,5 @@
 """Shared pytest fixtures for tuner_pipecat_sdk tests."""
 
-from unittest.mock import MagicMock
-
 import pytest
 
 from tuner_pipecat_sdk.config import TunerConfig
@@ -22,13 +20,3 @@ def tuner_config():
         llm_model="gpt-4",
         tts_model="eleven",
     )
-
-
-@pytest.fixture
-def mock_flow_manager():
-    """Minimal flow manager mock with state and get_current_context."""
-    fm = MagicMock()
-    fm._current_node = None
-    fm.state = {}
-    fm.get_current_context.return_value = []
-    return fm

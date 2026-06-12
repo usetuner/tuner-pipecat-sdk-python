@@ -73,6 +73,10 @@ def test_enrich_transcript_tool_call_and_result(tuner_config):
     assert result_segments[0].start_ms == 90
     assert func_segments[0].start_ms != result_segments[0].start_ms
 
+    # JSON result → text is None, tool.result carries the structured data
+    assert result_segments[0].text is None
+    assert result_segments[0].tool.result == {"ok": True}
+
 
 def test_consecutive_assistant_messages_merged_into_one_segment(tuner_config):
     acc = CallAccumulator()
@@ -376,3 +380,24 @@ def test_agent_result_with_no_matching_tool_call_has_null_function_name(tuner_co
     assert result_segs[0].tool is not None
     assert result_segs[0].tool.name is None  # no matched tool call
     assert result_segs[0].start_ms == 200
+
+
+def test_agent_result_non_json_uses_text_not_tool_result(tuner_config):
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = 0
+    acc.call_end_abs_ns = 2_000_000_000
+    acc.done = True
+    transcript = [
+        {"role": "user", "content": "hello"},
+        {
+            "role": "assistant",
+            "tool_calls": [{"id": "tc-1", "function": {"name": "do_thing", "arguments": "{}"}}],
+        },
+        {"role": "tool", "tool_call_id": "tc-1", "content": "plain text result"},
+    ]
+    payload = acc.build_payload(tuner_config, transcript)
+    result_seg = next(s for s in payload.transcript_with_tool_calls if s.role == "agent_result")
+    # Non-JSON: text holds the raw value, tool.result is None
+    assert result_seg.text == "plain text result"
+    assert result_seg.tool.result is None
+

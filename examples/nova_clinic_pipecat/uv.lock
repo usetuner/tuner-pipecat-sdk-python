@@ -2658,7 +2658,7 @@ wheels = [
 
 [[package]]
 name = "tuner-pipecat-sdk"
-version = "0.1.1"
+version = "0.2.2"
 source = { editable = "../../" }
 dependencies = [
     { name = "httpx" },
@@ -2674,6 +2674,7 @@ requires-dist = [
     { name = "loguru", specifier = "~=0.7.2" },
     { name = "mypy", marker = "extra == 'type'", specifier = ">=1.10" },
     { name = "pipecat-ai", specifier = ">=1.0.0" },
+    { name = "pipecat-ai", extras = ["websockets-base"], marker = "extra == 'flows'", specifier = ">=1.0.0" },
     { name = "pipecat-ai-flows", marker = "extra == 'flows'", specifier = ">=1.0.0" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8.0" },

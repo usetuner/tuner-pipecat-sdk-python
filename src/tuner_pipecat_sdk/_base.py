@@ -29,6 +29,7 @@ from ._providers import PROVIDER_EXTRACTORS, ProviderExtractor
 from .accumulator import CallAccumulator
 from .client import post_call
 from .config import TunerConfig
+from .models import CallUsage
 
 
 _CI_VERSION_VARS = ("GITHUB_RUN_NUMBER", "CIRCLE_BUILD_NUM", "BUILD_NUMBER")
@@ -87,6 +88,7 @@ class _BaseObserver(FrameProcessor):
         disconnection_reason_resolver: Callable[[], str | None] | None = None,
         agent_version: int | None = None,
         recipient: str | None = None,
+        cost_calculator: Callable[[CallUsage], float] | None = None,
         **kwargs: Any,
     ) -> None:
         """
@@ -123,6 +125,7 @@ class _BaseObserver(FrameProcessor):
         self._flushed = False
         self._context_provider: Callable[[], list] | None = None
         self._disconnection_reason_resolver = disconnection_reason_resolver
+        self._cost_calculator = cost_calculator
 
         self._latency_observer = UserBotLatencyObserver()
 
@@ -271,7 +274,7 @@ class _BaseObserver(FrameProcessor):
             if self._context_provider is None and not self._flushed:
                 logger.warning(
                     "[tuner] no context_provider attached at pipeline start — "
-                    "call attach_context() or attach_flow_manager() before call end "
+                    "call attach_context() before call end "
                     "or call data will be lost at flush"
                 )
             if not getattr(frame, "enable_metrics", False):
@@ -337,6 +340,6 @@ class _BaseObserver(FrameProcessor):
         transcript = self._context_provider()
         if self._config.debug:
             logger.debug("[tuner] transcript ({} messages): {}", len(transcript), transcript)
-        payload = self._acc.build_payload(self._config, transcript)
+        payload = self._acc.build_payload(self._config, transcript, self._cost_calculator)
         logger.info("[tuner] payload: {}", payload)
         await post_call(self._config, payload)

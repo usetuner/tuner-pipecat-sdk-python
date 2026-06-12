@@ -1,6 +1,6 @@
 # Examples
 
-Each example shows a different voice bot use case built with [Pipecat Flows](https://github.com/pipecat-ai/pipecat-flows) and observed with `pipecat-flows-tuner`.
+Each example shows a different voice bot use case built with [Pipecat](https://github.com/pipecat-ai/pipecat) and observed with `tuner-pipecat-sdk`.
 
 Every example is self-contained with its own `pyproject.toml`. Run `uv sync` inside the example directory and follow its README.
 
@@ -10,9 +10,8 @@ Every example is self-contained with its own `pyproject.toml`. Run `uv sync` ins
 
 | Example | Use case | Key concepts |
 |---------|----------|-------------|
-| [`customer_support/`](customer_support/) | Acme Corp support agent | Multi-branch flow, state accumulation, resolve vs. escalate |
-| [`appointment_booking/`](appointment_booking/) | Medical clinic receptionist | Linear 7-node flow, enum inputs, confirmation + reschedule |
-| [`pizza_order/`](pizza_order/) | Pipecat Pizza ordering | Toppings selection, delivery/pickup branch, running price total |
+| [`pizza_order/`](pizza_order/) | Pipecat Pizza ordering | LLM tool-calling, running price total, confirmation branch, cost reporting |
+| [`nova_clinic_pipecat/`](nova_clinic_pipecat/) | Medical clinic receptionist | Tool-calling, SIP/telephony transports, cost reporting |
 
 ---
 
@@ -22,7 +21,7 @@ All examples share the same requirements:
 
 - Python 3.10+, [`uv`](https://docs.astral.sh/uv/)
 - For **installing the SDK with pip**, Python version issues, or local path deps, see the **repository root README** (not repeated here).
-- API keys: `CARTESIA_API_KEY`, `DEEPGRAM_API_KEY`, `OPENAI_API_KEY`
+- API keys: `DEEPGRAM_API_KEY`, `OPENAI_API_KEY` (see each example's `.env.example`)
 - Optional: Tuner API credentials (`TUNER_API_KEY`, `TUNER_WORKSPACE_ID`, `TUNER_AGENT_ID`, `TUNER_BASE_URL`)
 
 ---
@@ -48,9 +47,9 @@ transport.input()
         └─► context_aggregator.user()
             └─► LLM
                 └─► TTS
-                    └─► FlowsObserver   ← pipecat-flows-tuner
+                    └─► Observer   ← tuner-pipecat-sdk
                         └─► transport.output()
                             └─► context_aggregator.assistant()
 ```
 
-`FlowsObserver` sits after TTS in the pipeline. It intercepts metrics frames, tracks node transitions via `attach_flow_manager()`, and posts a structured `CallPayload` to the Tuner API when the call ends.
+`Observer` sits after TTS in the pipeline. It intercepts metrics frames, reads the transcript via `attach_context()`, and posts a structured `CallPayload` to the Tuner API when the call ends.

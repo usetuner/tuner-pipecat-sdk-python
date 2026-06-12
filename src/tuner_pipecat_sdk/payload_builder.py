@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from .models import AiModels, CallPayload, GeneralMetaData, UsageToken
+from .models import AiModels, CallPayload, CallUsage, GeneralMetaData, UsageToken
 from .transcript_enricher import enrich_transcript
 
 if TYPE_CHECKING:
@@ -24,10 +25,20 @@ def build_payload(
     acc: CallAccumulator,
     config: TunerConfig,
     transcript: list[dict[str, Any]],
+    cost_calculator: Callable[[CallUsage], float] | None = None,
 ) -> CallPayload:
     enriched = _ensure_monotonic_bounds(enrich_transcript(acc, transcript))
     start_ts = acc.call_start_abs_ns // 1_000_000_000
     end_ts = acc.call_end_abs_ns // 1_000_000_000
+
+    usage = CallUsage(
+        llm_prompt_tokens=acc.get_llm_prompt_tokens() or None,
+        llm_completion_tokens=acc.get_llm_completion_tokens() or None,
+        llm_total_tokens=acc.get_total_llm_tokens() or None,
+        tts_characters=acc.get_total_tts_characters() or None,
+        stt_audio_seconds=max(0, end_ts - start_ts),
+    )
+    cost = cost_calculator(usage) if cost_calculator is not None else None
 
     return CallPayload(
         call_id=config.call_id,
@@ -55,4 +66,5 @@ def build_payload(
         sip_headers=config.sip_headers,
         agent_version=config.agent_version,
         recipient=config.recipient,
+        cost=cost,
     )

@@ -3,12 +3,12 @@
 ## Requirements
 
 - Python 3.10+
-- A `pipecat` bot that uses `pipecat-flows`
+- A `pipecat` bot
 - Tuner API credentials (`api_key`, `workspace_id`, `agent_id`)
 
 ## Pipecat app working directory
 
-Run the pipeline from your **Pipecat application project root** (the app that creates the pipeline, adds `FlowsObserver`, and calls `PipelineTask`). That is the working directory (`pwd`) for the process that runs this SDK.
+Run the pipeline from your **Pipecat application project root** (the app that creates the pipeline, adds `Observer`, and calls `PipelineTask`). That is the working directory (`pwd`) for the process that runs this SDK.
 
 Example: if your app is at `/path/to/pipecat-app`, start your server or script from there:
 
@@ -31,9 +31,12 @@ pip install -e .
 
 ```python
 import uuid
-from tuner_pipecat_sdk import FlowsObserver
+from pipecat.processors.aggregators.llm_context import LLMContext
+from tuner_pipecat_sdk import Observer
 
-observer = FlowsObserver(
+context = LLMContext()
+
+observer = Observer(
     api_key="YOUR_TUNER_API_KEY",
     workspace_id=42,
     agent_id="support-agent",
@@ -44,7 +47,7 @@ observer = FlowsObserver(
     tts_model="cartesia/sonic",
 )
 
-observer.attach_flow_manager(flow_manager)
+observer.attach_context(context)
 ```
 
 Set `asr_model`, `llm_model`, and `tts_model` to populate
@@ -52,7 +55,7 @@ Set `asr_model`, `llm_model`, and `tts_model` to populate
 
 ## Pipeline Placement
 
-Put `FlowsObserver` after TTS and before transport output:
+Put `Observer` after TTS and before transport output:
 
 ```python
 Pipeline([
@@ -94,7 +97,7 @@ Without these, `llm_token`, `tts_character_count`, and per-turn `ttfb_ms` / `llm
 
 When `EndFrame` or `CancelFrame` is observed:
 
-1. The observer reads transcript context from the attached flow manager.
+1. The observer reads transcript context from the attached LLM context.
 2. It builds a typed `CallPayload`.
 3. It sends the payload to `POST /api/v1/public/call`.
 

@@ -1725,9 +1725,6 @@ wheels = [
 ]
 
 [package.optional-dependencies]
-cartesia = [
-    { name = "websockets" },
-]
 deepgram = [
     { name = "deepgram-sdk" },
     { name = "websockets" },
@@ -1747,20 +1744,6 @@ webrtc = [
 ]
 
 [[package]]
-name = "pipecat-ai-flows"
-version = "1.1.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "docstring-parser" },
-    { name = "loguru" },
-    { name = "pipecat-ai" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/06/57/b69438d83269f8797efddb8758b21851539e65c1a1785c356ef6500e93b9/pipecat_ai_flows-1.1.0.tar.gz", hash = "sha256:3a47d4aec167d31ff0469cc66ae76063250665e6c8fc0cc39a051e87bf2d4b06", size = 4940753, upload-time = "2026-05-07T22:27:31.484Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/30/25/425fb20dc0ef8a8194340ee38726171b27dcde5a17df54a410a6a6d42910/pipecat_ai_flows-1.1.0-py3-none-any.whl", hash = "sha256:970cfa7cac31c4a65fc03d48f43df367e523b099023e8714006655a92eb7a9cc", size = 25752, upload-time = "2026-05-07T22:27:30.033Z" },
-]
-
-[[package]]
 name = "pipecat-ai-small-webrtc-prebuilt"
 version = "2.5.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1777,16 +1760,14 @@ name = "pizza-order-bot"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
-    { name = "pipecat-ai", extra = ["cartesia", "deepgram", "openai", "runner", "webrtc"] },
-    { name = "pipecat-ai-flows" },
+    { name = "pipecat-ai", extra = ["deepgram", "openai", "runner", "webrtc"] },
     { name = "python-dotenv" },
     { name = "tuner-pipecat-sdk" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "pipecat-ai", extras = ["webrtc", "silero", "deepgram", "cartesia", "openai", "runner"], specifier = ">=1.0.0" },
-    { name = "pipecat-ai-flows", specifier = ">=1.0.0" },
+    { name = "pipecat-ai", extras = ["webrtc", "silero", "deepgram", "openai", "runner"], specifier = ">=1.0.0" },
     { name = "python-dotenv", specifier = ">=1.0.1" },
     { name = "tuner-pipecat-sdk", editable = "../../" },
 ]
@@ -2691,7 +2672,7 @@ wheels = [
 
 [[package]]
 name = "tuner-pipecat-sdk"
-version = "0.1.1"
+version = "0.2.2"
 source = { editable = "../../" }
 dependencies = [
     { name = "httpx" },
@@ -2707,16 +2688,15 @@ requires-dist = [
     { name = "loguru", specifier = "~=0.7.2" },
     { name = "mypy", marker = "extra == 'type'", specifier = ">=1.10" },
     { name = "pipecat-ai", specifier = ">=1.0.0" },
-    { name = "pipecat-ai-flows", marker = "extra == 'flows'", specifier = ">=1.0.0" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8.0" },
     { name = "pytest-asyncio", marker = "extra == 'test'", specifier = ">=0.24" },
     { name = "pytest-cov", marker = "extra == 'test'", specifier = ">=5.0" },
     { name = "ruff", marker = "extra == 'lint'", specifier = ">=0.6" },
-    { name = "tuner-pipecat-sdk", extras = ["test", "lint", "type", "publish", "flows"], marker = "extra == 'dev'" },
+    { name = "tuner-pipecat-sdk", extras = ["test", "lint", "type", "publish"], marker = "extra == 'dev'" },
     { name = "twine", marker = "extra == 'publish'", specifier = ">=5.0" },
 ]
-provides-extras = ["flows", "test", "lint", "type", "publish", "dev"]
+provides-extras = ["test", "lint", "type", "publish", "dev"]
 
 [package.metadata.requires-dev]
 dev = [
