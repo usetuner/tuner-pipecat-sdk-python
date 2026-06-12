@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: BSD 2-Clause License
 
-"""Pizzeria ordering bot built with Pipecat Flows.
+"""Pizzeria ordering bot built with Pipecat and the Tuner Observer.
 
 Requirements:
 - DEEPGRAM_API_KEY
@@ -13,17 +13,20 @@ Run the example:
 uv run pizza_order.py
 """
 
-import json
 import os
 import uuid
 
 from dotenv import load_dotenv
 from loguru import logger
+from pipecat.adapters.schemas.function_schema import FunctionSchema
+from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.frames.frames import (
+    EndTaskFrame,
     Frame,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
+    LLMRunFrame,
     TextFrame,
     TranscriptionFrame,
 )
@@ -43,14 +46,8 @@ from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.deepgram.tts import DeepgramTTSService
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.transports.base_transport import BaseTransport, TransportParams
-from pipecat_flows import (
-    FlowArgs,
-    FlowManager,
-    FlowsFunctionSchema,
-    NodeConfig,
-)
 
-from tuner_pipecat_sdk import CallUsage, FlowsObserver
+from tuner_pipecat_sdk import CallUsage, Observer
 
 load_dotenv(override=True)
 
@@ -60,6 +57,56 @@ transport_params = {
         audio_out_enabled=True,
     ),
 }
+
+
+# ---------------------------------------------------------------------------
+# Menu
+# ---------------------------------------------------------------------------
+
+MENU = {
+    "margherita": 10.99,
+    "pepperoni": 12.99,
+    "veggie": 11.99,
+    "bbq chicken": 13.99,
+}
+
+SIZE_SURCHARGE = {"small": 0.0, "medium": 2.0, "large": 4.0}
+
+
+# ---------------------------------------------------------------------------
+# Prompt
+# ---------------------------------------------------------------------------
+
+AGENT_INSTRUCTIONS = f"""
+You are a friendly cashier at 'Pipecat Pizza'.
+Keep responses short and conversational. This is a voice call — never use
+emojis, formatting, bullet points, or special characters in your responses.
+
+## Today's menu
+{chr(10).join(f"- {name} (${price:.2f})" for name, price in MENU.items())}
+
+## Sizes
+- small (no extra charge)
+- medium (+$2.00)
+- large (+$4.00)
+
+## How to take an order
+1. Greet the customer warmly and present today's menu, then ask which pizza
+   they would like.
+2. Once they pick a pizza, call the choose_pizza function with their choice.
+3. Ask what size they want, then call the choose_size function.
+4. Read back the full order — pizza, size, and total price — and ask the
+   customer to confirm. Call the confirm_order function with their answer.
+5. If confirmed, thank them enthusiastically and tell them their order is being
+   prepared. If not confirmed, apologise politely and tell them they can call
+   back anytime.
+6. After your final closing line, call the end_call function to end the call.
+
+## Important rules
+- Only accept pizzas from the menu above.
+- Never confirm an order without calling confirm_order first.
+- Always read back the pizza, size, and total before asking to confirm.
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -96,155 +143,79 @@ class DebugLogProcessor(FrameProcessor):
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Order state + tools
 # ---------------------------------------------------------------------------
 
-MENU = {
-    "margherita": 10.99,
-    "pepperoni": 12.99,
-    "veggie": 11.99,
-    "bbq chicken": 13.99,
-}
+# Single-call demo: keep the in-progress order in module state.
+_order: dict = {}
 
 
-def log_node(node: dict, label: str) -> None:
-    logger.debug(f"[NODE CREATED] {label}:\n{json.dumps(node, indent=2, default=str)}")
-
-
-# ---------------------------------------------------------------------------
-# Flow nodes
-# ---------------------------------------------------------------------------
-
-
-def create_greeting_node() -> NodeConfig:
-    choose_pizza_func = FlowsFunctionSchema(
-        name="choose_pizza",
-        description="Record which pizza the customer wants to order.",
-        required=["pizza"],
-        properties={"pizza": {"type": "string", "enum": list(MENU.keys())}},
-        handler=handle_choose_pizza,
-    )
-
-    node = NodeConfig(
-        name="greeting",
-        role_messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You are a friendly pizzeria cashier at 'Pipecat Pizza'. "
-                    "Keep responses short and conversational. "
-                    "Your responses will be converted to audio — no emojis or special characters."
-                ),
-            }
-        ],
-        task_messages=[
-            {
-                "role": "system",
-                "content": (
-                    f"Greet the customer warmly and present today's menu: "
-                    f"{', '.join(f'{k} (${v:.2f})' for k, v in MENU.items())}. "
-                    "Ask them which pizza they'd like."
-                ),
-            }
-        ],
-        functions=[choose_pizza_func],
-    )
-    log_node(dict(node), "greeting")
-    return node
-
-
-async def handle_choose_pizza(args: FlowArgs, flow_manager: FlowManager) -> tuple:
-    pizza = args["pizza"].lower()
+async def choose_pizza(params):
+    """Record which pizza the customer wants to order."""
+    pizza = params.arguments.get("pizza", "").lower()
     price = MENU.get(pizza, 0.0)
     logger.info(f"[ORDER] Pizza chosen: {pizza} (${price:.2f})")
-    flow_manager.state["pizza"] = pizza
-    flow_manager.state["price"] = price
-    return {"pizza": pizza, "price": price}, create_size_node()
+    _order["pizza"] = pizza
+    _order["price"] = price
+    await params.result_callback({"pizza": pizza, "price": price})
 
 
-def create_size_node() -> NodeConfig:
-    choose_size_func = FlowsFunctionSchema(
-        name="choose_size",
-        description="Record the pizza size the customer wants.",
-        required=["size"],
-        properties={"size": {"type": "string", "enum": ["small", "medium", "large"]}},
-        handler=handle_choose_size,
-    )
-
-    node = NodeConfig(
-        name="size",
-        task_messages=[
-            {
-                "role": "system",
-                "content": "Ask the customer what size they want: small ($0 extra), medium (+$2), or large (+$4).",
-            }
-        ],
-        functions=[choose_size_func],
-    )
-    log_node(dict(node), "size")
-    return node
-
-
-async def handle_choose_size(args: FlowArgs, flow_manager: FlowManager) -> tuple:
-    size = args["size"].lower()
-    surcharge = {"small": 0.0, "medium": 2.0, "large": 4.0}.get(size, 0.0)
-    total = flow_manager.state["price"] + surcharge
+async def choose_size(params):
+    """Record the pizza size the customer wants."""
+    size = params.arguments.get("size", "").lower()
+    surcharge = SIZE_SURCHARGE.get(size, 0.0)
+    total = _order.get("price", 0.0) + surcharge
     logger.info(f"[ORDER] Size chosen: {size} | total=${total:.2f}")
-    flow_manager.state["size"] = size
-    flow_manager.state["total"] = total
-    return {"size": size, "total": total}, create_confirm_node()
+    _order["size"] = size
+    _order["total"] = total
+    await params.result_callback({"size": size, "total": total})
 
 
-def create_confirm_node() -> NodeConfig:
-    confirm_func = FlowsFunctionSchema(
-        name="confirm_order",
-        description="Confirm or cancel the order.",
-        required=["confirmed"],
-        properties={"confirmed": {"type": "boolean"}},
-        handler=handle_confirm,
-    )
+async def confirm_order(params):
+    """Confirm or cancel the order."""
+    confirmed = bool(params.arguments.get("confirmed"))
+    logger.info(f"[ORDER] Confirmed: {confirmed} | order={_order}")
+    await params.result_callback({"confirmed": confirmed})
 
-    node = NodeConfig(
-        name="confirm",
-        task_messages=[
-            {
-                "role": "system",
-                "content": (
-                    "Read back the order summary to the customer and ask them to confirm. "
-                    "Include the pizza name, size, and total price from what was just ordered."
+
+async def end_call(params):
+    logger.info("[END CALL] Reason: agent_hangup")
+    await params.result_callback({"status": "ending", "reason": "agent_hangup"})
+    await params.llm.push_frame(EndTaskFrame(), FrameDirection.UPSTREAM)
+
+
+def build_tools() -> ToolsSchema:
+    return ToolsSchema(
+        standard_tools=[
+            FunctionSchema(
+                name="choose_pizza",
+                description="Record which pizza the customer wants to order.",
+                properties={"pizza": {"type": "string", "enum": list(MENU.keys())}},
+                required=["pizza"],
+            ),
+            FunctionSchema(
+                name="choose_size",
+                description="Record the pizza size the customer wants.",
+                properties={"size": {"type": "string", "enum": list(SIZE_SURCHARGE.keys())}},
+                required=["size"],
+            ),
+            FunctionSchema(
+                name="confirm_order",
+                description="Confirm or cancel the order.",
+                properties={"confirmed": {"type": "boolean"}},
+                required=["confirmed"],
+            ),
+            FunctionSchema(
+                name="end_call",
+                description=(
+                    "End the call once you have delivered your final spoken response "
+                    "to the customer."
                 ),
-            }
-        ],
-        functions=[confirm_func],
+                properties={},
+                required=[],
+            ),
+        ]
     )
-    log_node(dict(node), "confirm")
-    return node
-
-
-async def handle_confirm(args: FlowArgs, flow_manager: FlowManager) -> tuple:
-    confirmed = args["confirmed"]
-    logger.info(f"[ORDER] Confirmed: {confirmed} | state={flow_manager.state}")
-    return {"confirmed": confirmed}, create_farewell_node(confirmed)
-
-
-def create_farewell_node(confirmed: bool = True) -> NodeConfig:
-    if confirmed:
-        content = (
-            "Thank the customer enthusiastically, tell them their order is being prepared, "
-            "and wish them a great meal. Then end the conversation."
-        )
-    else:
-        content = (
-            "Apologise politely, tell them they can call back anytime, and end the conversation."
-        )
-
-    node = NodeConfig(
-        name="farewell",
-        task_messages=[{"role": "system", "content": content}],
-        post_actions=[{"type": "end_conversation"}],
-    )
-    log_node(dict(node), "farewell")
-    return node
 
 
 # ---------------------------------------------------------------------------
@@ -258,9 +229,17 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         api_key=os.getenv("DEEPGRAM_API_KEY"),
         voice=os.getenv("DEEPGRAM_VOICE", "aura-2-thalia-en"),
     )
-    llm = OpenAILLMService(api_key=os.getenv("OPENAI_API_KEY"))
+    llm = OpenAILLMService(
+        api_key=os.getenv("OPENAI_API_KEY"),
+        settings=OpenAILLMService.Settings(system_instruction=AGENT_INSTRUCTIONS),
+    )
 
-    context = LLMContext()
+    llm.register_function("choose_pizza", choose_pizza)
+    llm.register_function("choose_size", choose_size)
+    llm.register_function("confirm_order", confirm_order)
+    llm.register_function("end_call", end_call)
+
+    context = LLMContext(tools=build_tools())
     context_aggregator = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(
@@ -281,7 +260,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         stt_cost  = usage.stt_audio_seconds            * (0.0043 / 60)
         return (llm_cost + tts_cost + stt_cost) * 100
 
-    observer = FlowsObserver(
+    observer = Observer(
         api_key=os.getenv("TUNER_API_KEY", "dev"),
         workspace_id=int(os.getenv("TUNER_WORKSPACE_ID")),
         agent_id=os.getenv("TUNER_AGENT_ID", "pizzeria-bot"),
@@ -317,19 +296,22 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         ),
         observers=[observer.latency_observer, turn_tracker],
     )
-
-    flow_manager = FlowManager(
-        task=task,
-        llm=llm,
-        context_aggregator=context_aggregator,
-        transport=transport,
-    )
-    observer.attach_flow_manager(flow_manager)
+    observer.attach_context(context)
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
         logger.info("[BOT] Client connected — starting pizzeria flow")
-        await flow_manager.initialize(create_greeting_node())
+        _order.clear()
+        context.add_message(
+            {
+                "role": "assistant",
+                "content": (
+                    "Greet the customer warmly, present the menu, "
+                    "and ask which pizza they would like."
+                ),
+            }
+        )
+        await task.queue_frames([LLMRunFrame()])
 
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):

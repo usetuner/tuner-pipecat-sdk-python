@@ -1,26 +1,23 @@
 # Pizza Order Bot
 
-A full pizza ordering bot built with Pipecat Flows and the `pipecat-flows-tuner` SDK.
+A pizza ordering bot built with Pipecat and the `tuner-pipecat-sdk` `Observer`.
 
 **What it demonstrates:**
-- 7-node ordering flow: pizza → toppings → size → fulfilment → (address) → confirm → farewell
-- Delivery vs. pickup branching — address node is skipped for pickup orders
-- Running price calculation accumulated across nodes
-- Confirmation with cancellation branch
-- Full call observability via `FlowsObserver`
+- LLM tool-calling order flow: choose pizza → choose size → confirm → end call
+- Running price calculation (pizza price + size surcharge)
+- Confirmation with a cancellation branch
+- Full call observability via the plain `Observer` (`attach_context`)
+- Per-call cost reporting via a `cost_calculator`
 
-## Flow diagram
+## Conversation flow
 
 ```
-greeting (choose pizza)
-   └─► toppings
-           └─► size
-                 └─► fulfilment
-                         ├─► address ──┐  (delivery only)
-                         │             ▼
-                         └─────────► confirm
-                                         ├─► farewell (confirmed)
-                                         └─► farewell (cancelled)
+greet + present menu
+   └─► choose_pizza
+           └─► choose_size
+                 └─► confirm_order
+                         ├─► (confirmed)  → thank + end_call
+                         └─► (cancelled)  → apologise + end_call
 ```
 
 ## Prerequisites
@@ -39,7 +36,6 @@ greeting (choose pizza)
 2. Create a `.env` file:
 
    ```env
-   CARTESIA_API_KEY=your_cartesia_key
    DEEPGRAM_API_KEY=your_deepgram_key
    OPENAI_API_KEY=your_openai_key
 
@@ -64,5 +60,5 @@ Open http://localhost:7860 in your browser and click **Connect**.
 |------|---------|
 | STT  | Deepgram Nova-3 |
 | LLM  | OpenAI GPT-4o-mini |
-| TTS  | Cartesia Sonic |
+| TTS  | Deepgram Aura-2 |
 | Transport | SmallWebRTC (default) |

@@ -274,7 +274,7 @@ class _BaseObserver(FrameProcessor):
             if self._context_provider is None and not self._flushed:
                 logger.warning(
                     "[tuner] no context_provider attached at pipeline start — "
-                    "call attach_context() or attach_flow_manager() before call end "
+                    "call attach_context() before call end "
                     "or call data will be lost at flush"
                 )
             if not getattr(frame, "enable_metrics", False):

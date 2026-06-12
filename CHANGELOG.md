@@ -9,9 +9,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [0.2.2] 2026-06-11
 
 ### Added
-- **Call cost reporting** — pass a `cost_calculator` callable to `Observer`/`FlowsObserver` to compute the cost of a call from its usage data (`CallUsage`: LLM prompt/completion tokens, TTS characters, STT audio seconds). The result (in USD cents) is included in the payload sent to the Tuner API.
+- **Call cost reporting** — pass a `cost_calculator` callable to `Observer` to compute the cost of a call from its usage data (`CallUsage`: LLM prompt/completion tokens, TTS characters, STT audio seconds). The result (in USD cents) is included in the payload sent to the Tuner API.
 - `tuner_pipecat_sdk.CallUsage` — usage data type passed to `cost_calculator`.
 - `pizza_order` example updated to demonstrate `cost_calculator` with Deepgram + OpenAI pricing.
+
+### Removed
+- **Dropped `pipecat-ai-flows` support** — removed the `FlowsObserver` class, the `flows` optional-dependency extra, and the `pipecat-ai-flows` dependency. Use `Observer` with `attach_context()` for all pipelines.
+- The `pizza_order` example was migrated from pipecat-flows to the plain `Observer` + LLM tool-calling API.
 
 ---
 

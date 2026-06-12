@@ -17,7 +17,6 @@ from tuner_pipecat_sdk.observer import Observer
 
 # ---------------------------------------------------------------------------
 # Use Observer as the concrete vehicle for testing base behaviour.
-# All assertions here apply equally to FlowsObserver.
 # ---------------------------------------------------------------------------
 
 

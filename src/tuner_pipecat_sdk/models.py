@@ -112,7 +112,7 @@ class DisconnectReason(str, Enum):
 
     Usage::
 
-        FlowsObserver(
+        Observer(
             ...
             disconnection_reason_resolver=lambda: DisconnectReason.USER_HANGUP
         )

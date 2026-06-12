@@ -1,13 +1,13 @@
 # API Reference
 
-## `FlowsObserver`
+## `Observer`
 
-`FlowsObserver` is a `FrameProcessor` that captures runtime signals and emits one payload per call.
+`Observer` is a `FrameProcessor` that captures runtime signals and emits one payload per call.
 
 Constructor:
 
 ```python
-FlowsObserver(
+Observer(
     api_key: str,
     workspace_id: int,
     agent_id: str,
@@ -29,7 +29,7 @@ FlowsObserver(
 
 Methods:
 
-- `attach_flow_manager(flow_manager) -> None`
+- `attach_context(context) -> None`
 - `attach_turn_tracking_observer(turn_tracker) -> None`
 - `latency_observer -> UserBotLatencyObserver`
 
