@@ -2,7 +2,7 @@
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.11+
 - A `pipecat` bot
 - Tuner API credentials (`api_key`, `workspace_id`, `agent_id`)
 
