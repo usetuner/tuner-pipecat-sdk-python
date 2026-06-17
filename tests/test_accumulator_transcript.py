@@ -1,5 +1,7 @@
 """Accumulator transcript enrichment with tools and transitions."""
 
+import pytest
+
 from tuner_pipecat_sdk.accumulator import CallAccumulator
 from tuner_pipecat_sdk.models import LatencyTurn
 
@@ -30,6 +32,7 @@ def test_enrich_transcript_tool_call_and_result(tuner_config):
         LatencyTurn(
             turn_index=0,
             node="greeting",
+            is_proactive=True,  # bot greeted first — no user speech for this turn
             ttfb_ms=50,
             llm_ms=30,
             tts_ms=20,
@@ -400,4 +403,125 @@ def test_agent_result_non_json_uses_text_not_tool_result(tuner_config):
     # Non-JSON: text holds the raw value, tool.result is None
     assert result_seg.text == "plain text result"
     assert result_seg.tool.result is None
+
+
+@pytest.mark.parametrize("injected_role", ["assistant", "system"])
+def test_pre_seeded_preamble_instruction_excluded_from_transcript(tuner_config, injected_role):
+    """Developer-injected instructions before the first LLM response — whether
+    role=assistant or role=system — must not appear in the output transcript."""
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = 0
+    acc.call_end_abs_ns = 2_000_000_000
+    acc.done = True
+    acc.latency_turns = [
+        LatencyTurn(
+            turn_index=0,
+            node="greeting",
+            is_proactive=True,
+            ttfb_ms=100,
+            llm_ms=2120,
+            tts_ms=1940,
+            bot_started_ms=500,
+            user_stopped_ms=0,
+            user_started_ms=0,
+            bot_stopped_ms=2000,
+        )
+    ]
+    transcript = [
+        {
+            "role": injected_role,
+            "content": "Greet the customer warmly, present the menu, and ask which pizza they would like.",
+        },
+        {"role": "assistant", "content": "Hi there, thanks for calling Pipecat Pizza!"},
+    ]
+    payload = acc.build_payload(tuner_config, transcript)
+    agent_segments = [s for s in payload.transcript_with_tool_calls if s.role == "agent"]
+    assert len(agent_segments) == 1
+    assert agent_segments[0].text == "Hi there, thanks for calling Pipecat Pizza!"
+
+
+def test_injected_user_message_without_speech_excluded_from_transcript(tuner_config):
+    """Mid-conversation injected user messages (silence handlers, node transitions)
+    have no VAD speech timestamps and must not appear as Customer rows."""
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = 0
+    acc.call_end_abs_ns = 60_000_000_000
+    acc.done = True
+    acc.latency_turns = [
+        LatencyTurn(
+            turn_index=0,
+            node="main",
+            ttfb_ms=100,
+            llm_ms=1130,
+            tts_ms=1010,
+            bot_started_ms=2000,
+            user_stopped_ms=1000,
+            user_started_ms=500,
+            bot_stopped_ms=5000,
+        ),
+        LatencyTurn(
+            turn_index=1,
+            node="silence",
+            ttfb_ms=None,
+            llm_ms=None,
+            tts_ms=None,
+            bot_started_ms=46000,
+            user_stopped_ms=0,
+            user_started_ms=0,
+            bot_stopped_ms=47000,
+        ),
+    ]
+    transcript = [
+        {"role": "user", "content": "Yes, sir. My name is Sallym."},
+        {"role": "assistant", "content": "Hi Sallym, it's great to connect with you."},
+        # Injected by silence handler — no actual speech
+        {
+            "role": "user",
+            "content": "The user has been quiet. Politely and briefly ask if they're still there.",
+        },
+        {"role": "assistant", "content": "Are you still there?"},
+    ]
+    payload = acc.build_payload(tuner_config, transcript)
+    user_segments = [s for s in payload.transcript_with_tool_calls if s.role == "user"]
+    agent_segments = [s for s in payload.transcript_with_tool_calls if s.role == "agent"]
+    assert len(user_segments) == 1
+    assert user_segments[0].text == "Yes, sir. My name is Sallym."
+    assert len(agent_segments) == 2
+    assert agent_segments[1].text == "Are you still there?"
+    assert agent_segments[1].start_ms == 46000
+
+
+def test_outbound_call_user_speaks_first_is_not_filtered(tuner_config):
+    """Fix 2 must not drop real user utterances in outbound calls where the callee
+    speaks before the bot. user_stopped_ms > 0 distinguishes real speech from
+    injected messages."""
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = 0
+    acc.call_end_abs_ns = 10_000_000_000
+    acc.done = True
+    acc.latency_turns = [
+        LatencyTurn(
+            turn_index=0,
+            node="main",
+            ttfb_ms=50,
+            llm_ms=800,
+            tts_ms=500,
+            user_started_ms=150,
+            user_stopped_ms=2000,
+            bot_started_ms=2500,
+            bot_stopped_ms=5000,
+        ),
+    ]
+    transcript = [
+        {"role": "user", "content": "Hello?"},
+        {"role": "assistant", "content": "Hi there! This is Sam calling from Acme."},
+    ]
+    payload = acc.build_payload(tuner_config, transcript)
+    user_segments = [s for s in payload.transcript_with_tool_calls if s.role == "user"]
+    agent_segments = [s for s in payload.transcript_with_tool_calls if s.role == "agent"]
+    assert len(user_segments) == 1
+    assert user_segments[0].text == "Hello?"
+    assert user_segments[0].start_ms == 150
+    assert len(agent_segments) == 1
+    assert agent_segments[0].start_ms == 2500
 

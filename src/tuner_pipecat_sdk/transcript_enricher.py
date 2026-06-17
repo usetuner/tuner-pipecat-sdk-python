@@ -269,6 +269,12 @@ def enrich_transcript(
             user_turn = (
                 acc.latency_turns[real_user_idx] if real_user_idx < len(acc.latency_turns) else None
             )
+            # Injected user messages (silence handlers, node transitions) have no speech
+            # frames, so both timestamps stay at 0. Skip the segment but still advance
+            # user_idx to keep latency_turn slot alignment intact.
+            if user_turn is not None and user_turn.user_started_ms == 0 and user_turn.user_stopped_ms == 0:
+                user_idx += 1
+                continue
             result.append(
                 build_user_segment(grouped_messages, user_turn, real_user_idx, user_interrupted)
             )
@@ -320,6 +326,11 @@ def enrich_transcript(
             grouped_messages, message_idx = collect_consecutive_assistant_messages(
                 messages, message_idx
             )
+            # In preamble position (before any user turn) consecutive assistant messages
+            # are a pre-seeded developer instruction followed by the real LLM response.
+            # Only the last message in the group was generated (and spoken) by the LLM.
+            if user_idx == 0 and len(grouped_messages) > 1:
+                grouped_messages = [grouped_messages[-1]]
             final_msg_idx = message_idx - 1  # last message in the consecutive group
             is_preamble = user_idx == 0
             if is_preamble and proactive_turn_idx < latency_offset:
