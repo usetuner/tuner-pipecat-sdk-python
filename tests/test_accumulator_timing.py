@@ -54,19 +54,21 @@ def test_on_call_end_idempotent_when_done():
     assert acc.call_end_abs_ns == 100
 
 
+def _user_segs(acc):
+    return [s for s in acc.speech_segments if s.speaker == "user"]
+
+
 def test_on_user_turn_stopped_no_vad_stop_is_safe():
     acc = CallAccumulator()
     acc.call_start_abs_ns = 1_000_000_000
 
     # Set up a turn without ever firing on_vad_stopped
     acc.on_turn_started(turn_number=1, timestamp_ns=1_001_000_000)
-    acc._active_turn_number = 1
 
     # Should log a warning and return — not crash
     acc.on_user_turn_stopped(timestamp_ns=1_002_000_000)
 
-    turn = acc.latency_turns[0]
-    assert turn.stt_ms is None  # or 0, whatever your default is
+    assert _user_segs(acc)[0].stt_ms is None
 
 
 def test_stt_ms_computed_from_vad_gap():
@@ -80,7 +82,7 @@ def test_stt_ms_computed_from_vad_gap():
     acc.on_vad_stopped(vad_ts)
     acc.on_user_turn_stopped(user_stopped_ts)
 
-    assert acc.latency_turns[0].stt_ms == 300
+    assert _user_segs(acc)[0].stt_ms == 300
 
 
 def test_vad_stopped_before_user_stopped_speaking_sets_stt():
@@ -92,8 +94,8 @@ def test_vad_stopped_before_user_stopped_speaking_sets_stt():
     acc.on_user_stopped_speaking(1_000_000_000_000 + 1_600_000_000)
     acc.on_user_turn_stopped(1_000_000_000_000 + 1_700_000_000)  # 300ms after VAD
 
-    assert acc.latency_turns[0].stt_ms == 300
-    assert acc.latency_turns[0].user_stopped_ms > 0
+    assert _user_segs(acc)[0].stt_ms == 300
+    assert _user_segs(acc)[0].stop_ms > 0
 
 
 def test_on_user_turn_stopped_before_vad_stopped_warns_and_is_safe():
@@ -105,4 +107,4 @@ def test_on_user_turn_stopped_before_vad_stopped_warns_and_is_safe():
     # Fire user turn stopped without vad stopped — should not crash
     acc.on_user_turn_stopped(1_001_500_000)
 
-    assert acc.latency_turns[0].stt_ms is None
+    assert _user_segs(acc)[0].stt_ms is None

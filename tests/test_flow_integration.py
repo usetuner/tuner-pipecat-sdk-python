@@ -56,13 +56,15 @@ def test_full_call_flow_single_turn(config):
     )
     acc.on_bot_stopped(base_ns + 400_000_000)
 
-    assert len(acc.latency_turns) == 1
-    turn = acc.latency_turns[0]
-    assert turn.turn_index == 0
-    assert turn.user_stopped_ms == 100
-    assert turn.bot_started_ms == 250
-    assert turn.bot_stopped_ms == 400
-    assert turn.ttfb_ms == 100
+    user_segs = [s for s in acc.speech_segments if s.speaker == "user"]
+    bot_segs = [s for s in acc.speech_segments if s.speaker == "bot"]
+    assert len(user_segs) == 1
+    assert len(bot_segs) == 1
+    assert user_segs[0].stop_ms == 100
+    assert bot_segs[0].start_ms == 250
+    assert bot_segs[0].stop_ms == 400
+    assert len(acc.latency_measurements) == 1
+    assert acc.latency_measurements[0].ttfb_ms == 100
 
     # End
     acc.on_call_end(base_ns + 500_000_000)

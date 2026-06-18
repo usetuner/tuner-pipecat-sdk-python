@@ -27,7 +27,9 @@ def build_payload(
     transcript: list[dict[str, Any]],
     cost_calculator: Callable[[CallUsage], float] | None = None,
 ) -> CallPayload:
-    enriched = _ensure_monotonic_bounds(enrich_transcript(acc, transcript))
+    enriched = _ensure_monotonic_bounds(
+        enrich_transcript(acc, transcript, config.user_segment_merge_gap_ms)
+    )
     start_ts = acc.call_start_abs_ns // 1_000_000_000
     end_ts = acc.call_end_abs_ns // 1_000_000_000
 

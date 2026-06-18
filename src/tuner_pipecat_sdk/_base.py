@@ -18,6 +18,8 @@ from pipecat.frames.frames import (
     FunctionCallResultFrame,
     MetricsFrame,
     StartFrame,
+    TranscriptionFrame,
+    TTSTextFrame,
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
     VADUserStoppedSpeakingFrame,
@@ -30,7 +32,6 @@ from .accumulator import CallAccumulator
 from .client import post_call
 from .config import TunerConfig
 from .models import CallUsage
-
 
 _CI_VERSION_VARS = ("GITHUB_RUN_NUMBER", "CIRCLE_BUILD_NUM", "BUILD_NUMBER")
 
@@ -296,6 +297,15 @@ class _BaseObserver(FrameProcessor):
 
         elif isinstance(frame, MetricsFrame):
             self._acc.on_metrics_frame(frame)
+
+        elif isinstance(frame, TranscriptionFrame):
+            # Finalized STT only (InterimTranscriptionFrame is a sibling, not a subclass).
+            self._acc.on_transcription(frame.text, timestamp_ns)
+
+        elif isinstance(frame, TTSTextFrame):
+            # Text the TTS produces, accumulated per bot speech window. (will_be_spoken is
+            # not relied on — it defaults False and isn't set by every TTS service.)
+            self._acc.on_tts_text(frame.text)
 
         elif isinstance(frame, UserStartedSpeakingFrame):
             self._acc.on_user_started_speaking(timestamp_ns)

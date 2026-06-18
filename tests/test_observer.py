@@ -69,7 +69,7 @@ async def test_handle_end_frame_triggers_flush(observer, mock_context):
     observer._acc.call_start_abs_ns = 0
     observer._acc.call_end_abs_ns = 1_000_000_000
     observer._acc.done = True
-    observer._acc.latency_turns = []
+    observer._acc.speech_segments = []
 
     with (
         patch("tuner_pipecat_sdk._base.post_call", new_callable=AsyncMock) as post_mock,

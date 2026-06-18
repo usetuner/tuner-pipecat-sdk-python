@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from tuner_pipecat_sdk.accumulator import CallAccumulator
-from tuner_pipecat_sdk.models import LatencyTurn
+from tuner_pipecat_sdk.models import LatencyMeasurement, SpeechSegment
 
 
 def _metric(cls_name: str, **kwargs):
@@ -81,17 +81,13 @@ def test_enrich_transcript_user_and_assistant(tuner_config):
     acc.call_start_abs_ns = 0
     acc.call_end_abs_ns = 1_000_000_000
     acc.done = True
-    acc.latency_turns = [
-        LatencyTurn(
-            turn_index=0,
-            node="n",
-            ttfb_ms=100,
-            llm_ms=50,
-            tts_ms=50,
-            bot_started_ms=200,
-            user_stopped_ms=100,
-            user_started_ms=50,
-            bot_stopped_ms=300,
+    acc.speech_segments = [
+        SpeechSegment(id=0, speaker="user", start_ms=50, stop_ms=100),
+        SpeechSegment(id=1, speaker="bot", start_ms=200, stop_ms=300),
+    ]
+    acc.latency_measurements = [
+        LatencyMeasurement(
+            user_segment_id=0, bot_segment_id=1, ttfb_ms=100, llm_ms=50, tts_ms=50, e2e_ms=100
         )
     ]
     transcript = [
@@ -114,19 +110,11 @@ def test_enrich_transcript_skips_system(tuner_config):
         {"role": "user", "content": "Hi"},
         {"role": "assistant", "content": "Hi!"},
     ]
-    acc.latency_turns = [
-        LatencyTurn(
-            turn_index=0,
-            node=None,
-            ttfb_ms=0,
-            llm_ms=0,
-            tts_ms=0,
-            bot_started_ms=0,
-            user_stopped_ms=0,
-            user_started_ms=0,
-            bot_stopped_ms=100,
-        )
+    acc.speech_segments = [
+        SpeechSegment(id=0, speaker="user", start_ms=10, stop_ms=50),
+        SpeechSegment(id=1, speaker="bot", start_ms=80, stop_ms=100),
     ]
+    acc.latency_measurements = [LatencyMeasurement(user_segment_id=0, bot_segment_id=1)]
     payload = acc.build_payload(tuner_config, transcript)
     roles = [segment.role for segment in payload.transcript_with_tool_calls]
     assert "system" not in roles
@@ -140,17 +128,13 @@ def test_payload_transcript_preserves_conversation_order(tuner_config):
     acc.done = True
     acc.registry.record_invocation_ns("tc-1", base_ns + 80_000_000)
     acc.registry.record_completion_ns("tc-1", base_ns + 160_000_000)
-    acc.latency_turns = [
-        LatencyTurn(
-            turn_index=0,
-            node="greeting",
-            ttfb_ms=10,
-            llm_ms=20,
-            tts_ms=30,
-            bot_started_ms=6000,
-            user_stopped_ms=1000,
-            user_started_ms=500,
-            bot_stopped_ms=7000,
+    acc.speech_segments = [
+        SpeechSegment(id=0, speaker="user", start_ms=500, stop_ms=1000),
+        SpeechSegment(id=1, speaker="bot", start_ms=6000, stop_ms=7000),
+    ]
+    acc.latency_measurements = [
+        LatencyMeasurement(
+            user_segment_id=0, bot_segment_id=1, ttfb_ms=10, llm_ms=20, tts_ms=30, e2e_ms=5000
         )
     ]
     transcript = [
@@ -174,17 +158,17 @@ def test_payload_keeps_initial_greeting_before_first_user(tuner_config):
     acc.call_start_abs_ns = base_ns
     acc.call_end_abs_ns = base_ns + 5_000_000_000
     acc.done = True
-    acc.latency_turns = [
-        LatencyTurn(
-            turn_index=0,
-            ttfb_ms=100,
-            llm_ms=50,
-            tts_ms=40,
-            bot_started_ms=2000,
-            user_stopped_ms=1300,
-            user_started_ms=1000,
-            bot_stopped_ms=2800,
-        )
+    # Proactive greeting (bot speaks first) followed by a real user→bot exchange.
+    acc.speech_segments = [
+        SpeechSegment(id=0, speaker="bot", start_ms=800, stop_ms=1500, is_proactive=True),
+        SpeechSegment(id=1, speaker="user", start_ms=2000, stop_ms=2300),
+        SpeechSegment(id=2, speaker="bot", start_ms=3000, stop_ms=3800),
+    ]
+    acc.latency_measurements = [
+        LatencyMeasurement(user_segment_id=-1, bot_segment_id=0, is_proactive=True, ttfb_ms=100),
+        LatencyMeasurement(
+            user_segment_id=1, bot_segment_id=2, ttfb_ms=100, llm_ms=50, tts_ms=40, e2e_ms=700
+        ),
     ]
     transcript = [
         {"role": "assistant", "content": "Welcome to Pipecat Pizza!"},
@@ -198,8 +182,9 @@ def test_payload_keeps_initial_greeting_before_first_user(tuner_config):
 
     greeting = payload.transcript_with_tool_calls[0]
     assert greeting.text == "Welcome to Pipecat Pizza!"
-    assert greeting.start_ms == 0
-    assert greeting.end_ms == 0
+    assert greeting.start_ms == 800
+    assert greeting.end_ms == 1500
+    assert greeting.metadata.get("e2e_latency") is None  # proactive → no e2e
 
 
 def test_build_payload_includes_disconnection_reason(tuner_config):

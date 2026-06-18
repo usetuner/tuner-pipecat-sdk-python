@@ -85,6 +85,34 @@ def test_handle_metrics_frame_routes_to_accumulator(observer):
         mock_on_metrics.assert_called_once_with(frame)
 
 
+def test_handle_transcription_frame_routes_to_accumulator(observer):
+    from pipecat.frames.frames import TranscriptionFrame
+
+    frame = TranscriptionFrame(text="hello there", user_id="u1", timestamp="2026-01-01T00:00:00Z")
+    with patch.object(observer._acc, "on_transcription") as mock_on_transcription:
+        observer._handle(frame, 500)
+        mock_on_transcription.assert_called_once_with("hello there", 500)
+
+
+def test_handle_interim_transcription_frame_is_ignored(observer):
+    """Only finalized TranscriptionFrames count; interim results must not be recorded."""
+    from pipecat.frames.frames import InterimTranscriptionFrame
+
+    frame = InterimTranscriptionFrame(text="par", user_id="u1", timestamp="2026-01-01T00:00:00Z")
+    with patch.object(observer._acc, "on_transcription") as mock_on_transcription:
+        observer._handle(frame, 500)
+        mock_on_transcription.assert_not_called()
+
+
+def test_handle_tts_text_frame_routes_to_accumulator(observer):
+    from pipecat.frames.frames import TTSTextFrame
+
+    frame = TTSTextFrame(text="hello there", aggregated_by="sentence")
+    with patch.object(observer._acc, "on_tts_text") as mock_on_tts:
+        observer._handle(frame, 500)
+        mock_on_tts.assert_called_once_with("hello there")
+
+
 def test_handle_function_call_result_records_completion(observer):
     observer._acc.call_start_abs_ns = 1_000_000_000
     frame = FunctionCallResultFrame(
@@ -123,12 +151,15 @@ async def test_attach_turn_tracking_observer_wiring(observer):
         mock_time.time_ns.return_value = 1_000_000_000 + 300_000_000
         await handlers["on_turn_started"](None, 1)
 
-    assert len(observer._acc.latency_turns) == 1
-    assert observer._acc.latency_turns[0].user_started_ms == 300
+    user_segs = [s for s in observer._acc.speech_segments if s.speaker == "user"]
+    assert len(user_segs) == 1
+    assert user_segs[0].start_ms == 300
     assert observer._acc._active_turn_number == 1
 
+    # Bot responds, then the turn ends as interrupted.
+    observer._acc.on_bot_started_speaking(1_000_000_000 + 500_000_000)
     await handlers["on_turn_ended"](None, 1, 2.5, True)
-    assert observer._acc.latency_turns[0].was_interrupted is True
+    assert observer._acc.latency_measurements[0].was_interrupted is True
     assert observer._acc._active_turn_number is None
 
 

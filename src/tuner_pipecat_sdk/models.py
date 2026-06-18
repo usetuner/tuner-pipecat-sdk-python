@@ -8,22 +8,48 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 
-class LatencyTurn(BaseModel):
-    turn_index: int
+class SpeechSegment(BaseModel):
+    """A single raw, timestamped unit of speech — either the user or the bot.
+
+    Append-only and makes no cardinality assumption: a user may produce several
+    consecutive segments before any bot reply (mid-sentence pauses, silence gaps),
+    a bot may produce several segments for one response (speak → tool → speak),
+    and a user segment with no following bot reply is a natural orphan state.
+
+    ``stt_ms`` lives here (user segments only) because STT finalization latency is
+    a property of the user's own utterance — it exists whether or not the bot ever
+    replies, so it must survive on orphan turns.
+    """
+
+    id: int
+    speaker: str  # "user" | "bot"
+    start_ms: int = 0
+    stop_ms: int | None = None
+    stt_ms: int | None = None
+    spoken_text: str | None = None  # bot segments only — text actually voiced via TTS
     node: str | None = None
-    bot_node: str | None = None
-    is_proactive: bool = False
+    interrupted: bool | None = None  # bot segment cut off by the user
+    interrupted_at_ms: int | None = None  # bot segments only — when the user cut in
+    is_proactive: bool = False  # bot segment preceding any user speech
+
+
+class LatencyMeasurement(BaseModel):
+    """Latency of one bot response, derived only when a bot reply follows a user
+    segment (or the proactive greeting). Linked to its speech segments by id.
+
+    Carries only response-derived metrics: nothing here exists independent of a
+    reply. An orphan user segment (no bot response) has no LatencyMeasurement.
+    """
+
+    user_segment_id: int  # FK → SpeechSegment.id (-1 for the proactive greeting)
+    bot_segment_id: int | None = None  # FK → first bot SpeechSegment of the response
     ttfb_ms: int | None = None
     llm_ms: int | None = None
     tts_ms: int | None = None
-    stt_ms: int | None = None
-    bot_started_ms: int = 0
-    user_stopped_ms: int = 0
-    user_started_ms: int = 0
-    bot_stopped_ms: int | None = None
-    interrupted_at_ms: int | None = None
+    e2e_ms: int | None = None  # bot.start_ms - user.stop_ms
+    is_proactive: bool = False
     was_interrupted: bool | None = None
-    llm_completed: bool = False
+    interrupted_at_ms: int | None = None
 
 
 class TranscriptWord(BaseModel):
@@ -152,7 +178,8 @@ class CallPayload(BaseModel):
 
 
 __all__ = [
-    "LatencyTurn",
+    "SpeechSegment",
+    "LatencyMeasurement",
     "TranscriptWord",
     "TranscriptMetadata",
     "ToolInfo",

@@ -23,6 +23,11 @@ class TunerConfig(BaseModel):
 
     Not collected automatically — the caller is responsible for supplying this value when known.
     """
+    user_segment_merge_gap_ms: int = 1500
+    """Silence threshold (ms) for merging consecutive user speech segments into one
+    transcript row. Mid-sentence VAD pauses (~300-600ms) merge; gaps at or above this
+    (e.g. the user waiting on an unresponsive agent) stay as separate rows so the
+    silence is visible. See transcript_enricher merge-by-gap logic."""
 
     @field_validator("api_key", "call_id", "agent_id")
     @classmethod
