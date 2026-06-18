@@ -25,34 +25,34 @@ async def post_call(config: TunerConfig, payload: CallPayload) -> None:
     payload_json = json.dumps(payload_dict, default=str)
 
     logger.info(
-        "[flows-tuner] sending call  call_id={}  transcript_messages={}  url={}  "
+        "[tuner] sending call  call_id={}  transcript_messages={}  url={}  "
         "payload_bytes={}",
         payload.call_id,
         len(payload.transcript_with_tool_calls),
         url,
         len(payload_json),
     )
-    logger.info("[flows-tuner] request body: {}", payload_json)
+    logger.info("[tuner] request body: {}", payload_json)
 
     if config.debug:
-        print("[flows-tuner] --- request payload ---")
+        print("[tuner] --- request payload ---")
         print(json.dumps(payload_dict, indent=2, default=str))
-        print("[flows-tuner] --- end payload ---")
+        print("[tuner] --- end payload ---")
 
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=15) as client:
             response = await client.post(url, json=payload_dict, headers=headers)
 
         if response.status_code == 409:
             logger.info(
-                "[flows-tuner] call {} already exists (409) — skipping",
+                "[tuner] call {} already exists (409) — skipping",
                 config.call_id,
             )
             return
 
         if response.status_code >= 400:
             logger.error(
-                "[flows-tuner] POST → {}  call_id={}  response_body={}",
+                "[tuner] POST → {}  call_id={}  response_body={}",
                 response.status_code,
                 config.call_id,
                 response.text[:2000],
@@ -61,14 +61,14 @@ async def post_call(config: TunerConfig, payload: CallPayload) -> None:
         response.raise_for_status()
 
         logger.info(
-            "[flows-tuner] POST → {}  call_id={}",
+            "[tuner] POST → {}  call_id={}",
             response.status_code,
             config.call_id,
         )
 
     except (httpx.HTTPStatusError, httpx.RequestError) as exc:
         logger.error(
-            "[flows-tuner] failed to deliver call {}: {}",
+            "[tuner] failed to deliver call {}: {}",
             config.call_id,
             exc,
         )
