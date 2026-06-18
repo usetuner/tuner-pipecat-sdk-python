@@ -1,4 +1,4 @@
-"""Tuner Observer — for plain pipecat pipelines (no pipecat-flows)."""
+"""Tuner Observer — for plain pipecat pipelines."""
 
 from __future__ import annotations
 

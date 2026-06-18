@@ -1,4 +1,4 @@
-"""Tests for Observer: plain pipecat pipeline (no pipecat-flows)."""
+"""Tests for Observer: plain pipecat pipeline."""
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
