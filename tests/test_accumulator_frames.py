@@ -41,43 +41,71 @@ def test_on_function_call_in_progress_records_invocation_in_registry():
     assert acc.get_tool_invocation_ms("tc-xyz") == 200
 
 
-def test_on_transcription_records_text_and_timing():
+def test_user_started_speaking_records_per_utterance_windows():
+    """Each VAD utterance opens a window; a coalesced turn accrues several windows."""
     acc = CallAccumulator()
-    acc.call_start_abs_ns = 1_000_000_000
-    acc.on_transcription("Can I also order a Coke?", 1_000_000_000 + 300_000_000)
-    acc.on_transcription("   ", 1_000_000_000 + 400_000_000)  # blank ignored
-    assert acc.user_transcriptions == [("Can I also order a Coke?", 300)]
+    base = 1_000_000_000
+    acc.call_start_abs_ns = base
+    acc.on_turn_started(1, base + 100_000_000)
+    acc.on_user_started_speaking(base + 100_000_000)
+    acc.on_user_stopped_speaking(base + 300_000_000)
+    # second utterance, same turn (no new turn-start)
+    acc.on_user_started_speaking(base + 1_000_000_000)
+    acc.on_user_stopped_speaking(base + 1_400_000_000)
+    seg = _user_segs(acc)[0]
+    assert seg.windows == [[100, 300], [1000, 1400]]
+    assert seg.turn_number == 1
 
 
-def test_tts_text_flushed_onto_bot_segment_as_spoken_text():
+def test_tts_text_captured_even_when_it_arrives_before_bot_started():
+    """TTSTextFrames arrive ~200ms before BotStartedSpeakingFrame; they must still be
+    captured (the old buffer-clear-at-start dropped them)."""
     acc = CallAccumulator()
     base_ns = 1_000_000_000
     acc.call_start_abs_ns = base_ns
     acc.on_turn_started(1, base_ns + 100_000_000)
+    acc.on_tts_text("Hello there,", base_ns + 180_000_000)  # before bot start
+    acc.on_tts_text("how can I help?", base_ns + 190_000_000)
     acc.on_bot_started_speaking(base_ns + 200_000_000)
-    acc.on_tts_text("Hello there,")
-    acc.on_tts_text("how can I help?")
     acc.on_bot_stopped(base_ns + 500_000_000)
     bot = _bot_segs(acc)[0]
     assert bot.spoken_text == "Hello there, how can I help?"
 
 
-def test_tts_buffer_resets_between_bot_segments():
+def test_tts_text_assigned_per_segment_by_window():
     acc = CallAccumulator()
     base_ns = 1_000_000_000
     acc.call_start_abs_ns = base_ns
     acc.on_turn_started(1, base_ns + 100_000_000)
     acc.on_bot_started_speaking(base_ns + 200_000_000)
-    acc.on_tts_text("First.")
+    acc.on_tts_text("First.", base_ns + 210_000_000)
     acc.on_bot_stopped(base_ns + 300_000_000)
-    # second response — buffer must not carry "First."
+    # second response — must not carry "First."
     acc.on_turn_started(2, base_ns + 400_000_000)
     acc.on_bot_started_speaking(base_ns + 500_000_000)
-    acc.on_tts_text("Second.")
+    acc.on_tts_text("Second.", base_ns + 510_000_000)
     acc.on_bot_stopped(base_ns + 600_000_000)
     bots = _bot_segs(acc)
     assert bots[0].spoken_text == "First."
     assert bots[1].spoken_text == "Second."
+
+
+def test_tts_text_for_never_voiced_response_is_dropped():
+    """Text generated for a response interrupted before any BotStartedSpeaking must not
+    contaminate the next (actually voiced) segment."""
+    acc = CallAccumulator()
+    base_ns = 1_000_000_000
+    acc.call_start_abs_ns = base_ns
+    acc.on_turn_started(1, base_ns + 100_000_000)
+    # "draft" TTS, but the user interrupts before bot audio → no BotStartedSpeaking
+    acc.on_tts_text("Draft never voiced.", base_ns + 200_000_000)
+    # ~7s later the actually-voiced response starts
+    acc.on_turn_started(2, base_ns + 7_000_000_000)
+    acc.on_tts_text("Real reply.", base_ns + 7_200_000_000)
+    acc.on_bot_started_speaking(base_ns + 7_300_000_000)
+    acc.on_bot_stopped(base_ns + 8_000_000_000)
+    bot = _bot_segs(acc)[0]
+    assert bot.spoken_text == "Real reply."  # draft dropped (outside the window)
 
 
 def test_on_function_call_result_records_completion_in_registry():

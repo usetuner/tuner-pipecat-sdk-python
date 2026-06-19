@@ -11,6 +11,11 @@ from .models import CallPayload, CallUsage, LatencyMeasurement, SpeechSegment
 from .payload_builder import build_payload
 from .tool_timing_registry import ToolTimingRegistry
 
+# TTSTextFrames are emitted slightly before BotStartedSpeakingFrame. A bot segment claims
+# voiced TTS sentences from up to this many ms before its start. Wide enough to cover the
+# TTS lead, far below the multi-second gap to an interrupted-before-voiced response.
+_TTS_LEAD_SLACK_MS = 2000
+
 
 @dataclass
 class CallAccumulator:
@@ -24,12 +29,6 @@ class CallAccumulator:
     speech_segments: list[SpeechSegment] = field(default_factory=list)
     latency_measurements: list[LatencyMeasurement] = field(default_factory=list)
     _next_segment_id: int = field(default=0, repr=False)
-
-    # Finalized STT transcriptions, in order: (text, rel_ms). Real user speech produces
-    # these; developer-injected context messages do not. The enricher uses them to tell
-    # real utterances apart from injected messages and to time un-turned utterances
-    # (e.g. the user speaking during a tool call, which fires no turn-start).
-    user_transcriptions: list[tuple[str, int]] = field(default_factory=list)
 
     # Active turn tracking
     _active_turn_number: int | None = field(default=None, repr=False)
@@ -45,10 +44,12 @@ class CallAccumulator:
     _response_user_segment_id: int | None = field(default=None, repr=False)
     # Latency measurement awaiting its on_latency_breakdown payload.
     _pending_measurement: LatencyMeasurement | None = field(default=None, repr=False)
-    # TTS text chunks accumulated for the current bot speech window, flushed onto the
-    # bot segment at bot-stop. This is what the bot actually voiced — the authoritative
-    # signal for which assistant context messages were spoken vs unspoken drafts.
-    _bot_text_buffer: list[str] = field(default_factory=list, repr=False)
+    # Timeline of voiced TTS sentences: (text, rel_ms). TTSTextFrames arrive slightly
+    # BEFORE BotStartedSpeakingFrame, so we can't tie them to a segment at arrival time.
+    # At on_bot_stopped each bot segment claims the TTS in its [start - lead, stop] window.
+    # Text generated for a response that was interrupted before it was voiced (no
+    # BotStartedSpeaking) falls outside every window and is dropped — never marked spoken.
+    _tts_timeline: list[tuple[str, int]] = field(default_factory=list, repr=False)
 
     # Ordered pairing for latency observer callbacks (on_latency_measured then breakdown).
     _pending_latency_ms_queue: deque[int] = field(default_factory=deque, repr=False)
@@ -169,7 +170,9 @@ class CallAccumulator:
             self._pending_turn_starts.append((turn_number, timestamp_ns))
             return
 
-        seg = self._append_segment("user", start_ms=self._rel_ms(timestamp_ns))
+        seg = self._append_segment(
+            "user", start_ms=self._rel_ms(timestamp_ns), turn_number=turn_number
+        )
         self._active_turn_number = turn_number
         self._turn_to_user_segment_id[turn_number] = seg.id
         self._active_user_segment_id = seg.id
@@ -208,18 +211,15 @@ class CallAccumulator:
             seg.start_ms = started_ms
         else:
             seg.start_ms = min(seg.start_ms, started_ms)
+        # Open a new per-utterance window. A coalesced turn (multiple utterances before any
+        # bot reply) accrues several windows, preserving per-utterance timing.
+        seg.windows.append([started_ms, None])
 
-    def on_transcription(self, text: str, timestamp_ns: int) -> None:
-        """Record a finalized STT transcription. Used by the enricher as the authoritative
-        signal for which context user messages were actually spoken."""
+    def on_tts_text(self, text: str, timestamp_ns: int) -> None:
+        """Record a voiced TTS sentence on the timeline. Assigned to a bot segment by time
+        window at on_bot_stopped (TTSTextFrames arrive before BotStartedSpeakingFrame)."""
         if text and text.strip():
-            self.user_transcriptions.append((text, self._rel_ms(timestamp_ns)))
-
-    def on_tts_text(self, text: str) -> None:
-        """Accumulate a TTS text chunk for the current bot speech window. Flushed onto the
-        bot segment at on_bot_stopped as its spoken_text."""
-        if text:
-            self._bot_text_buffer.append(text)
+            self._tts_timeline.append((text, self._rel_ms(timestamp_ns)))
 
     def on_user_stopped_speaking(self, timestamp_ns: int) -> None:
         """Capture user stop_ms directly from VAD frame.
@@ -231,6 +231,11 @@ class CallAccumulator:
         if seg is not None:
             stopped_ms = self._rel_ms(timestamp_ns)
             seg.stop_ms = max(seg.stop_ms or 0, stopped_ms)
+            # Close the open window (or open+close one if no start was recorded).
+            if seg.windows and seg.windows[-1][1] is None:
+                seg.windows[-1][1] = stopped_ms
+            else:
+                seg.windows.append([seg.start_ms, stopped_ms])
 
     def on_function_call_result(self, tool_call_id: str, timestamp_ns: int) -> None:
         self.registry.record_completion_ns(tool_call_id, timestamp_ns)
@@ -247,11 +252,15 @@ class CallAccumulator:
             return
         bot_seg = self._segment_by_id(self._current_bot_segment_id)
         if bot_seg is not None:
-            bot_seg.stop_ms = self._rel_ms(timestamp_ns)
-            if self._bot_text_buffer:
-                # Join chunks; whitespace is normalized at match time in the enricher.
-                bot_seg.spoken_text = " ".join(self._bot_text_buffer).strip() or None
-            self._bot_text_buffer.clear()
+            stop_ms = self._rel_ms(timestamp_ns)
+            bot_seg.stop_ms = stop_ms
+            # Claim TTS sentences voiced in this segment's window. Drop everything up to
+            # this stop (claimed + any older un-voiced/abandoned text), keep later TTS.
+            window_start = bot_seg.start_ms - _TTS_LEAD_SLACK_MS
+            claimed = [t for t, ms in self._tts_timeline if window_start <= ms <= stop_ms]
+            if claimed:
+                bot_seg.spoken_text = " ".join(claimed).strip() or None
+            self._tts_timeline = [(t, ms) for t, ms in self._tts_timeline if ms > stop_ms]
             self._current_bot_segment_id = None
         else:
             logger.warning("[tuner] bot_stopped with no active bot segment; ignoring event")
@@ -273,7 +282,6 @@ class CallAccumulator:
         re-pointing ``_response_user_segment_id``.
         """
         started_ms = self._rel_ms(timestamp_ns)
-        self._bot_text_buffer.clear()  # fresh TTS window
         is_proactive = self._response_user_segment_id is None  # bot speaks before any user turn
         response_key = -1 if is_proactive else self._response_user_segment_id
 
@@ -281,7 +289,12 @@ class CallAccumulator:
         # user segment it answers (-1 for the proactive greeting). A new user turn re-points
         # _response_user_segment_id, so the next response naturally links to the new user
         # segment rather than folding into the previous one.
-        seg = self._append_segment("bot", start_ms=started_ms, is_proactive=is_proactive)
+        seg = self._append_segment(
+            "bot",
+            start_ms=started_ms,
+            is_proactive=is_proactive,
+            turn_number=self._active_turn_number,
+        )
         self._current_bot_segment_id = seg.id
         self._pending_measurement = LatencyMeasurement(
             user_segment_id=response_key, bot_segment_id=seg.id, is_proactive=is_proactive

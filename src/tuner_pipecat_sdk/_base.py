@@ -18,7 +18,6 @@ from pipecat.frames.frames import (
     FunctionCallResultFrame,
     MetricsFrame,
     StartFrame,
-    TranscriptionFrame,
     TTSTextFrame,
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
@@ -147,12 +146,18 @@ class _BaseObserver(FrameProcessor):
 
         @turn_tracker.event_handler("on_turn_started")
         async def _on_turn_started(_tracker: Any, turn_number: int) -> None:
+            if self._config.debug:
+                logger.debug("[tuner] on_turn_started turn={}", turn_number)
             self._acc.on_turn_started(turn_number, time.time_ns())
 
         @turn_tracker.event_handler("on_turn_ended")
         async def _on_turn_ended(
             _tracker: Any, turn_number: int, _duration: float, was_interrupted: bool
         ) -> None:
+            if self._config.debug:
+                logger.debug(
+                    "[tuner] on_turn_ended turn={} interrupted={}", turn_number, was_interrupted
+                )
             self._acc.on_turn_ended(turn_number, was_interrupted)
 
     def attach_sip_info(
@@ -270,6 +275,20 @@ class _BaseObserver(FrameProcessor):
         await self.push_frame(frame, direction)
 
     def _handle(self, frame: Any, timestamp_ns: int) -> None:
+        if self._config.debug and isinstance(
+            frame,
+            (
+                BotStartedSpeakingFrame,
+                BotStoppedSpeakingFrame,
+                TTSTextFrame,
+                UserStartedSpeakingFrame,
+                UserStoppedSpeakingFrame,
+            ),
+        ):
+            logger.debug(
+                "[tuner] frame {} @ {}ms", type(frame).__name__, self._acc._rel_ms(timestamp_ns)
+            )
+
         if isinstance(frame, StartFrame):
             self._acc.on_start(timestamp_ns)
             if self._context_provider is None and not self._flushed:
@@ -298,14 +317,10 @@ class _BaseObserver(FrameProcessor):
         elif isinstance(frame, MetricsFrame):
             self._acc.on_metrics_frame(frame)
 
-        elif isinstance(frame, TranscriptionFrame):
-            # Finalized STT only (InterimTranscriptionFrame is a sibling, not a subclass).
-            self._acc.on_transcription(frame.text, timestamp_ns)
-
         elif isinstance(frame, TTSTextFrame):
-            # Text the TTS produces, accumulated per bot speech window. (will_be_spoken is
-            # not relied on — it defaults False and isn't set by every TTS service.)
-            self._acc.on_tts_text(frame.text)
+            # Voiced TTS sentence, recorded on a timeline and assigned to a bot segment by
+            # window at bot-stop (TTSTextFrames arrive before BotStartedSpeakingFrame).
+            self._acc.on_tts_text(frame.text, timestamp_ns)
 
         elif isinstance(frame, UserStartedSpeakingFrame):
             self._acc.on_user_started_speaking(timestamp_ns)
@@ -350,6 +365,24 @@ class _BaseObserver(FrameProcessor):
         transcript = self._context_provider()
         if self._config.debug:
             logger.debug("[tuner] transcript ({} messages): {}", len(transcript), transcript)
+        # Capture diagnostics: what the accumulator actually recorded from the pipeline.
+        # If a turn that clearly fired frames is missing a segment here, the bug is frame
+        # delivery to this observer (not transcript reconstruction).
+        logger.info(
+            "[tuner] segments ({}): {}",
+            len(self._acc.speech_segments),
+            [
+                (s.id, s.speaker, s.start_ms, s.stop_ms, s.is_proactive, bool(s.spoken_text))
+                for s in self._acc.speech_segments
+            ],
+        )
+        logger.info(
+            "[tuner] measurements: {}",
+            [
+                (m.user_segment_id, m.bot_segment_id, m.ttfb_ms)
+                for m in self._acc.latency_measurements
+            ],
+        )
         payload = self._acc.build_payload(self._config, transcript, self._cost_calculator)
         logger.info("[tuner] payload: {}", payload)
         await post_call(self._config, payload)

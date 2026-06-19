@@ -85,32 +85,13 @@ def test_handle_metrics_frame_routes_to_accumulator(observer):
         mock_on_metrics.assert_called_once_with(frame)
 
 
-def test_handle_transcription_frame_routes_to_accumulator(observer):
-    from pipecat.frames.frames import TranscriptionFrame
-
-    frame = TranscriptionFrame(text="hello there", user_id="u1", timestamp="2026-01-01T00:00:00Z")
-    with patch.object(observer._acc, "on_transcription") as mock_on_transcription:
-        observer._handle(frame, 500)
-        mock_on_transcription.assert_called_once_with("hello there", 500)
-
-
-def test_handle_interim_transcription_frame_is_ignored(observer):
-    """Only finalized TranscriptionFrames count; interim results must not be recorded."""
-    from pipecat.frames.frames import InterimTranscriptionFrame
-
-    frame = InterimTranscriptionFrame(text="par", user_id="u1", timestamp="2026-01-01T00:00:00Z")
-    with patch.object(observer._acc, "on_transcription") as mock_on_transcription:
-        observer._handle(frame, 500)
-        mock_on_transcription.assert_not_called()
-
-
 def test_handle_tts_text_frame_routes_to_accumulator(observer):
     from pipecat.frames.frames import TTSTextFrame
 
     frame = TTSTextFrame(text="hello there", aggregated_by="sentence")
     with patch.object(observer._acc, "on_tts_text") as mock_on_tts:
         observer._handle(frame, 500)
-        mock_on_tts.assert_called_once_with("hello there")
+        mock_on_tts.assert_called_once_with("hello there", 500)
 
 
 def test_handle_function_call_result_records_completion(observer):

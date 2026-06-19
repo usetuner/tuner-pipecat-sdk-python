@@ -23,10 +23,15 @@ class SpeechSegment(BaseModel):
 
     id: int
     speaker: str  # "user" | "bot"
+    turn_number: int | None = None  # TurnTrackingObserver turn this segment belongs to
     start_ms: int = 0
     stop_ms: int | None = None
     stt_ms: int | None = None
     spoken_text: str | None = None  # bot segments only — text actually voiced via TTS
+    # User segments only — one [start, stop] per VAD utterance. A coalesced turn (several
+    # utterances before any bot reply) holds several windows, giving per-utterance timing
+    # the single start/stop can't. Used by the enricher to align and gap-split user rows.
+    windows: list[list[int | None]] = Field(default_factory=list)
     node: str | None = None
     interrupted: bool | None = None  # bot segment cut off by the user
     interrupted_at_ms: int | None = None  # bot segments only — when the user cut in

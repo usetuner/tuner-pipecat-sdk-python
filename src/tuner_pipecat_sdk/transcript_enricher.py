@@ -26,37 +26,9 @@ DEFAULT_MERGE_GAP_MS = 1500
 
 
 def _normalize(text: str) -> str:
-    """Lowercase, drop punctuation, collapse whitespace — for matching context message
-    text against STT transcriptions, which may differ in punctuation/casing."""
+    """Lowercase, drop punctuation, collapse whitespace — for matching an assistant context
+    message against the text the bot actually voiced (TTS), which differs in punctuation."""
     return re.sub(r"[^a-z0-9 ]+", "", text.lower()).strip()
-
-
-def consume_transcriptions(
-    group_norm: str, norm_transcriptions: list[tuple[str, int]], cursor: int
-) -> tuple[int, int | None]:
-    """Greedily match a user message group against transcriptions from ``cursor``.
-
-    Returns ``(matched_count, start_ms)``. ``matched_count == 0`` means no real speech
-    matched this group — i.e. it was injected into the context by the developer rather
-    than spoken. The aggregator joins consecutive transcriptions into one message, so we
-    accumulate transcriptions while they remain a prefix of (or contain) the group text.
-    """
-    if not group_norm or cursor >= len(norm_transcriptions):
-        return 0, None
-    start_ms = norm_transcriptions[cursor][1]
-    concat = ""
-    count = 0
-    while cursor + count < len(norm_transcriptions):
-        nxt = norm_transcriptions[cursor + count][0]
-        trial = f"{concat} {nxt}".strip()
-        if group_norm.startswith(trial) or trial.startswith(group_norm):
-            concat = trial
-            count += 1
-            if len(concat) >= len(group_norm):
-                break
-        else:
-            break
-    return count, (start_ms if count else None)
 
 
 def build_segment_metadata(*, interrupted: bool = False, **extra: Any) -> dict[str, Any]:
@@ -103,29 +75,24 @@ def collect_consecutive_user_messages(
 
 def build_user_segment(
     grouped_messages: list[dict[str, Any]],
-    segs: list[SpeechSegment],
     *,
+    start_ms: int,
+    end_ms: int,
     interrupted: bool,
-    fallback_start_ms: int = 0,
+    stt_ms: int | None = None,
+    turn_index: int | None = None,
 ) -> TranscriptSegment:
-    """Build one user row from one-or-more user messages merged onto their segments.
-
-    ``fallback_start_ms`` times un-turned utterances (real speech with no turn segment,
-    e.g. the user speaking during a tool call) from their STT transcription.
-    """
+    """Build one user row from one-or-more user messages and their merged speech window."""
     text = " ".join(message.get("content", "") for message in grouped_messages).strip()
-    first = segs[0] if segs else None
-    last = segs[-1] if segs else None
     return TranscriptSegment(
         role="user",
         text=text,
-        start_ms=first.start_ms if first else fallback_start_ms,
-        end_ms=(last.stop_ms or 0) if last else 0,
+        start_ms=start_ms,
+        end_ms=end_ms,
         metadata=build_segment_metadata(
             interrupted=interrupted,
-            node=first.node if first else None,
-            turn_index=first.id if first else None,
-            stt_node_ttfb=first.stt_ms if first else None,
+            turn_index=turn_index,
+            stt_node_ttfb=stt_ms,
             fragments=len(grouped_messages) if len(grouped_messages) > 1 else None,
         ),
     )
@@ -323,7 +290,16 @@ def enrich_transcript(
         m.bot_segment_id: m for m in acc.latency_measurements if m.bot_segment_id is not None
     }
     seg_by_id = {s.id: s for s in acc.speech_segments}
-    norm_transcriptions = [(_normalize(t), ms) for t, ms in acc.user_transcriptions]
+
+    # Flatten per-utterance user speech windows, in order: (start, stop, segment, is_first).
+    # A coalesced turn (several utterances before a bot reply) is ONE segment with several
+    # windows — flattening gives each real utterance its own timing, so context user
+    # messages map 1:1 to windows regardless of how the accumulator grouped them into turns.
+    user_windows: list[tuple[int, int | None, SpeechSegment, bool]] = []
+    for s in user_segs:
+        wins = s.windows or [[s.start_ms, s.stop_ms]]
+        for i, w in enumerate(wins):
+            user_windows.append((w[0] or 0, w[1], s, i == 0))
 
     # Prefer the authoritative spoken-detection when the bot's actually-voiced text (TTS)
     # was captured; otherwise fall back to the positional last-in-window heuristic.
@@ -331,26 +307,11 @@ def enrich_transcript(
         spoken_indices = find_spoken_assistant_message_indices_via_tts(messages, bot_segs)
     else:
         spoken_indices = find_spoken_assistant_message_indices(messages)
-    # Spoken assistant messages map 1:1, in order, to bot segments. Record which user
-    # segment each response answers so we can detect injected user messages (a developer
-    # injected {"role":"user"} with no speech, whose bot reply answers an earlier segment).
-    spoken_sorted = sorted(spoken_indices)
-    answered_user_id_by_msg: dict[int, int | None] = {}
-    for k, msg_idx in enumerate(spoken_sorted):
-        meas = meas_by_bot_id.get(bot_segs[k].id) if k < len(bot_segs) else None
-        answered_user_id_by_msg[msg_idx] = meas.user_segment_id if meas else None
-
-    def following_response_answer(after_idx: int) -> int | None:
-        for msg_idx in spoken_sorted:
-            if msg_idx >= after_idx:
-                return answered_user_id_by_msg.get(msg_idx)
-        return None
 
     result: list[TranscriptSegment] = []
     message_idx = 0
-    user_cursor = 0
+    win_cursor = 0
     bot_cursor = 0
-    trans_cursor = 0
     seen_user_message = False
     last_agent_interrupted = False  # the user interrupts when the prior agent turn was cut off
 
@@ -366,62 +327,53 @@ def enrich_transcript(
             seen_user_message = True
             grouped_messages, message_idx = collect_consecutive_user_messages(messages, message_idx)
             n = len(grouped_messages)
-            candidate_segs = user_segs[user_cursor : user_cursor + n]
-            answered = following_response_answer(message_idx)
-            candidate_ids = {s.id for s in candidate_segs}
+            # Each user message maps to the next speech window (1:1 with real utterances).
+            group_wins = user_windows[win_cursor : win_cursor + n]
+            win_cursor += len(group_wins)
 
-            # Does this group's bot reply (if any) answer a segment outside this group?
-            # That happens both for developer-injected messages AND for real utterances
-            # the user spoke without a turn-start firing (e.g. while a tool ran).
-            seg_injected = answered is not None and answered != -1 and answered not in candidate_ids
+            # Group the messages into rows, starting a new row wherever the silence between
+            # consecutive utterances is large enough (a real pause) — else merge fragments.
+            rows: list[tuple[list[dict[str, Any]], list[tuple[int, int | None, Any, bool]]]] = []
+            cur_msgs: list[dict[str, Any]] = []
+            cur_wins: list[tuple[int, int | None, Any, bool]] = []
+            for i, msg in enumerate(grouped_messages):
+                win = group_wins[i] if i < len(group_wins) else None
+                if cur_wins and win is not None:
+                    prev_stop = cur_wins[-1][1] or 0
+                    if prev_stop > 0 and win[0] > 0 and (win[0] - prev_stop) >= merge_gap_ms:
+                        rows.append((cur_msgs, cur_wins))
+                        cur_msgs, cur_wins = [], []
+                cur_msgs.append(msg)
+                if win is not None:
+                    cur_wins.append(win)
+            if cur_msgs:
+                rows.append((cur_msgs, cur_wins))
 
-            # Authoritative real-vs-injected signal: was this text actually transcribed?
-            group_norm = _normalize(" ".join(m.get("content", "") for m in grouped_messages))
-            matched, trans_start = consume_transcriptions(
-                group_norm, norm_transcriptions, trans_cursor
-            )
-            # Drop only when both signals agree it is not real speech: no transcription
-            # matched AND no turn segment of its own. (Without transcriptions captured,
-            # never drop — degrade to rendering everything.)
-            if norm_transcriptions and matched == 0 and seg_injected:
-                last_agent_interrupted = False
-                continue
-            trans_cursor += matched
-
-            if candidate_segs and not seg_injected:
-                # Turned utterance(s): rich segment timing. Split into rows wherever the
-                # silence gap between fragments is large enough (keeps a real pause visible).
-                row_msgs: list[dict[str, Any]] = []
-                row_segs: list[SpeechSegment] = []
-                for msg, seg in zip(grouped_messages, candidate_segs, strict=False):
-                    if row_segs:
-                        prev_stop = row_segs[-1].stop_ms or 0
-                        gap = seg.start_ms - prev_stop
-                        if prev_stop > 0 and seg.start_ms > 0 and gap >= merge_gap_ms:
-                            result.append(
-                                build_user_segment(
-                                    row_msgs, row_segs, interrupted=last_agent_interrupted
-                                )
-                            )
-                            last_agent_interrupted = False
-                            row_msgs, row_segs = [], []
-                    row_msgs.append(msg)
-                    row_segs.append(seg)
-                if row_segs:
+            for row_msgs, row_wins in rows:
+                if not row_wins:
+                    # No speech window → no VAD/STT ever fired for this message. Real speech
+                    # always produces a window (even mid-tool-call, on the active segment),
+                    # so this is a developer-injected context message — drop it. (Only when
+                    # windows exist at all; with none recorded we render everything untimed
+                    # rather than drop a whole degenerate-capture transcript.)
+                    if user_windows:
+                        continue
                     result.append(
-                        build_user_segment(row_msgs, row_segs, interrupted=last_agent_interrupted)
+                        build_user_segment(
+                            row_msgs, start_ms=0, end_ms=0, interrupted=last_agent_interrupted
+                        )
                     )
                     last_agent_interrupted = False
-                user_cursor += len(candidate_segs)
-            else:
-                # Un-turned real utterance (spoke during a tool call / interruption) or a
-                # degenerate no-segment case: render one row, timed from its transcription.
+                    continue
+                first_seg = row_wins[0][2]
                 result.append(
                     build_user_segment(
-                        grouped_messages,
-                        [],
+                        row_msgs,
+                        start_ms=row_wins[0][0],
+                        end_ms=row_wins[-1][1] or 0,
                         interrupted=last_agent_interrupted,
-                        fallback_start_ms=trans_start or 0,
+                        stt_ms=first_seg.stt_ms if row_wins[0][3] else None,
+                        turn_index=first_seg.id,
                     )
                 )
                 last_agent_interrupted = False
@@ -478,8 +430,12 @@ def enrich_transcript(
                 bot_seg = bot_segs[bot_cursor]
                 measurement = meas_by_bot_id.get(bot_seg.id)
                 bot_cursor += 1
+                # Genuine interruption only: the user cut in while the bot was speaking, which
+                # sets interrupted_at_ms. TurnTrackingObserver also reports was_interrupted=True
+                # when the pipeline ends (a clean end_call hangup) — exclude that false positive.
                 interrupted = bool(
-                    (measurement and measurement.was_interrupted) or bot_seg.interrupted
+                    (measurement and measurement.interrupted_at_ms is not None)
+                    or bot_seg.interrupted_at_ms is not None
                 )
                 last_agent_interrupted = interrupted
             else:

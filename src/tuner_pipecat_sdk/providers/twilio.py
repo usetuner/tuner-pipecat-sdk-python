@@ -89,7 +89,7 @@ class TwilioCallContext:
     raw_headers: dict[str, str] = field(default_factory=dict)
 
     @classmethod
-    def from_call_data(cls, call_data: dict[str, Any]) -> "TwilioCallContext":
+    def from_call_data(cls, call_data: dict[str, Any]) -> TwilioCallContext:
         """Extract a context from ``parse_telephony_websocket`` output.
 
         Twilio's ``call_data`` shape::
@@ -145,7 +145,7 @@ class TwilioCallContext:
         )
 
     @classmethod
-    def fallback(cls, call_sid: str) -> "TwilioCallContext":
+    def fallback(cls, call_sid: str) -> TwilioCallContext:
         """Minimal context when ``call_data`` is missing or malformed."""
         return cls(
             call_sid=call_sid,

@@ -325,23 +325,21 @@ def test_pre_seeded_preamble_instruction_excluded_from_transcript(tuner_config, 
 
 
 def test_injected_user_message_without_speech_excluded_from_transcript(tuner_config):
-    """Mid-conversation injected user messages (silence handlers) produce no STT
-    transcription, so they must not appear as Customer rows; the bot's reply still does."""
+    """Mid-conversation injected user messages (silence handlers) produce no VAD speech
+    window, so they must not appear as Customer rows; the bot's reply still does."""
     acc = CallAccumulator()
     acc.call_start_abs_ns = 0
     acc.call_end_abs_ns = 60_000_000_000
     acc.done = True
     acc.speech_segments = [
-        _seg(0, "user", 500, 1000),
+        _seg(0, "user", 500, 1000, windows=[[500, 1000]]),  # one real utterance, one window
         _seg(1, "bot", 2000, 5000),
-        _seg(2, "bot", 46000, 47000),  # triggered by injected user message
+        _seg(2, "bot", 46000, 47000),  # triggered by injected user message — no user window
     ]
     acc.latency_measurements = [
         _meas(0, 1, ttfb_ms=100, llm_ms=1130, tts_ms=1010),
         _meas(0, 2),  # answers user seg 0 again — no new user turn fired
     ]
-    # Only the real utterance was transcribed; the injected message never was.
-    acc.user_transcriptions = [("Yes, sir. My name is Sallym.", 600)]
     transcript = [
         {"role": "user", "content": "Yes, sir. My name is Sallym."},
         {"role": "assistant", "content": "Hi Sallym, it's great to connect with you."},
@@ -361,72 +359,76 @@ def test_injected_user_message_without_speech_excluded_from_transcript(tuner_con
     assert agent_segments[1].start_ms == 46000
 
 
-def test_turned_message_kept_even_if_transcription_text_mismatches(tuner_config):
-    """Safety: dropping requires BOTH no transcription match AND no turn segment. A genuinely
-    turned utterance whose STT text diverges from the context text must never be dropped."""
+def test_coalesced_two_utterance_turn_merges_without_stealing_next_segment(tuner_config):
+    """Two consecutive user messages = one coalesced turn (one segment, two windows). They
+    merge into one row and must NOT consume the next turn's segment (the regression)."""
     acc = CallAccumulator()
     acc.call_start_abs_ns = 0
-    acc.call_end_abs_ns = 10_000_000_000
+    acc.call_end_abs_ns = 30_000_000_000
     acc.done = True
-    acc.speech_segments = [_seg(0, "user", 500, 1000), _seg(1, "bot", 2000, 3000)]
-    acc.latency_measurements = [_meas(0, 1, ttfb_ms=50)]  # bot answers user seg 0 → turned
-    acc.user_transcriptions = [("completely different words", 500)]  # won't match the context
+    acc.speech_segments = [
+        _seg(0, "user", 100, 1000, windows=[[100, 500], [600, 1000]]),  # turn 1: 2 utterances
+        _seg(1, "bot", 1500, 3000),
+        _seg(2, "user", 5000, 6000, windows=[[5000, 6000]]),  # turn 2
+        _seg(3, "bot", 7000, 9000),
+    ]
+    acc.latency_measurements = [_meas(0, 1, ttfb_ms=50), _meas(2, 3, ttfb_ms=50)]
     transcript = [
-        {"role": "user", "content": "Hello there"},
-        {"role": "assistant", "content": "Hi!"},
+        {"role": "user", "content": "I would like to order"},
+        {"role": "user", "content": "margarita."},
+        {"role": "assistant", "content": "Great choice! What size?"},
+        {"role": "user", "content": "Small."},
+        {"role": "assistant", "content": "Got it."},
     ]
     payload = acc.build_payload(tuner_config, transcript)
-    user_segments = [s for s in payload.transcript_with_tool_calls if s.role == "user"]
-    assert len(user_segments) == 1
-    assert user_segments[0].text == "Hello there"
-    assert user_segments[0].start_ms == 500  # kept with its segment timing
+    user_rows = [s for s in payload.transcript_with_tool_calls if s.role == "user"]
+    assert len(user_rows) == 2
+    assert user_rows[0].text == "I would like to order margarita."
+    assert user_rows[0].start_ms == 100
+    assert user_rows[0].metadata["fragments"] == 2
+    assert user_rows[1].text == "Small."
+    assert user_rows[1].start_ms == 5000  # kept its own segment — not stolen
 
 
-def test_without_transcriptions_nothing_is_dropped(tuner_config):
-    """Degraded mode: with no STT transcriptions captured we cannot tell injected from real,
-    so we render everything rather than risk dropping real speech (the injected row appears)."""
+def test_silence_gap_within_one_turn_splits_via_windows(tuner_config):
+    """User speaks, waits (bot never replies), speaks again — one coalesced turn with two
+    windows far apart. The gap splits them into two rows so the silence stays visible."""
     acc = CallAccumulator()
     acc.call_start_abs_ns = 0
     acc.call_end_abs_ns = 60_000_000_000
     acc.done = True
     acc.speech_segments = [
-        _seg(0, "user", 500, 1000),
-        _seg(1, "bot", 2000, 5000),
-        _seg(2, "bot", 46000, 47000),
+        _seg(0, "user", 200, 9500, windows=[[200, 1000], [9000, 9500]]),  # 8s gap between
+        _seg(1, "bot", 10000, 12000),
     ]
-    acc.latency_measurements = [_meas(0, 1), _meas(0, 2)]
-    acc.user_transcriptions = []  # none captured
+    acc.latency_measurements = [_meas(0, 1, ttfb_ms=100)]
     transcript = [
-        {"role": "user", "content": "My name is Sallym."},
-        {"role": "assistant", "content": "Hi Sallym!"},
-        {"role": "user", "content": "The user has been quiet. Ask if still there."},
-        {"role": "assistant", "content": "Are you still there?"},
+        {"role": "user", "content": "Book me a flight"},
+        {"role": "user", "content": "Are you still there?"},
+        {"role": "assistant", "content": "Yes I am here!"},
     ]
     payload = acc.build_payload(tuner_config, transcript)
-    user_segments = [s for s in payload.transcript_with_tool_calls if s.role == "user"]
-    assert len(user_segments) == 2  # injected row not dropped in degraded mode
+    user_rows = [s for s in payload.transcript_with_tool_calls if s.role == "user"]
+    assert [r.text for r in user_rows] == ["Book me a flight", "Are you still there?"]
+    assert user_rows[0].start_ms == 200
+    assert user_rows[1].start_ms == 9000  # gap preserved as a separate row
 
 
 def test_user_speaks_during_tool_call_is_kept(tuner_config):
-    """Regression: a real utterance spoken while a tool runs fires no turn-start, so it
-    has no speech segment. It must still be rendered (timed from its transcription),
-    not mistaken for an injected message and dropped."""
+    """A real utterance spoken while a tool runs fires no turn-start, so its VAD window is
+    appended to the active (previous) user segment. It must still be rendered and timed
+    from that window — not dropped."""
     acc = CallAccumulator()
     acc.call_start_abs_ns = 0
     acc.call_end_abs_ns = 60_000_000_000
     acc.done = True
     acc.registry.record_invocation_ns("tc1", 28_000_000)
     acc.speech_segments = [
-        _seg(0, "user", 27101, 27483, stt_ms=179),  # "margarita" turn
-        _seg(1, "bot", 28903, 36681),  # "I'm sorry..." reply (answers seg 0)
+        # One user turn, two utterances: "margarita" then "Coke" spoken during the tool call.
+        _seg(0, "user", 27101, 39877, stt_ms=179, windows=[[27101, 27483], [37053, 39877]]),
+        _seg(1, "bot", 40000, 46000),  # "I'm sorry..." reply
     ]
     acc.latency_measurements = [_meas(0, 1, ttfb_ms=377)]
-    acc.user_transcriptions = [
-        ("I would like to order", 26000),
-        ("margarita.", 27101),
-        ("Can I also order,", 37053),  # spoken during the choose_pizza tool call
-        ("a Coke?", 39877),
-    ]
     transcript = [
         {"role": "user", "content": "I would like to order margarita."},
         {
@@ -439,10 +441,13 @@ def test_user_speaks_during_tool_call_is_kept(tuner_config):
     ]
     payload = acc.build_payload(tuner_config, transcript)
     segs = payload.transcript_with_tool_calls
-    user_texts = [s.text for s in segs if s.role == "user"]
-    assert user_texts == ["I would like to order margarita.", "Can I also order, a Coke?"]
+    user_rows = [s for s in segs if s.role == "user"]
+    assert [r.text for r in user_rows] == [
+        "I would like to order margarita.",
+        "Can I also order, a Coke?",
+    ]
     coke = next(s for s in segs if s.text == "Can I also order, a Coke?")
-    assert coke.start_ms == 37053  # timed from its transcription
+    assert coke.start_ms == 37053  # timed from its own VAD window
 
 
 def test_outbound_call_user_speaks_first_is_not_filtered(tuner_config):
@@ -673,3 +678,27 @@ def test_user_interruption_flags_propagate(tuner_config):
     assert [s.role for s in segs] == ["user", "agent", "user", "agent"]
     assert segs[1].metadata["interrupted"] is True  # agent was interrupted
     assert segs[2].metadata["interrupted"] is True  # this user did the interrupting
+
+
+def test_clean_end_call_hangup_not_marked_interrupted(tuner_config):
+    """TurnTrackingObserver reports was_interrupted=True when the pipeline ends on a clean
+    end_call hangup. With no interrupted_at_ms (no user cut in), the final agent row must
+    NOT be flagged interrupted."""
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = 0
+    acc.call_end_abs_ns = 10_000_000_000
+    acc.done = True
+    acc.speech_segments = [
+        _seg(0, "user", 200, 500, windows=[[200, 500]]),
+        # final bot turn ended by end_call: was_interrupted set by the observer, but the
+        # user never cut in → no interrupted_at_ms.
+        _seg(1, "bot", 800, 3000, interrupted=True),
+    ]
+    acc.latency_measurements = [_meas(0, 1, ttfb_ms=50, was_interrupted=True)]
+    transcript = [
+        {"role": "user", "content": "Yes, confirm."},
+        {"role": "assistant", "content": "Thank you! Have a great day!"},
+    ]
+    payload = acc.build_payload(tuner_config, transcript)
+    agent = next(s for s in payload.transcript_with_tool_calls if s.role == "agent")
+    assert agent.metadata["interrupted"] is False  # clean hangup, not a real interruption
