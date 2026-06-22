@@ -77,10 +77,6 @@ class CallAccumulator:
     # Processed retroactively in on_start once the reference timestamp is known.
     _pending_turn_starts: list[tuple[int, int]] = field(default_factory=list, repr=False)
 
-    # vad_stopped_ns keyed by user segment id — internal timing state used to
-    # compute stt_ms (turn-stop − vad-stop) in on_user_turn_stopped.
-    _vad_stopped_ns_by_user_segment_id: dict[int, int] = field(default_factory=dict, repr=False)
-
     # Set to True on the first UserStartedSpeakingFrame — used to distinguish
     # the proactive bot greeting from mid-conversation tool or node transitions.
     _user_has_spoken: bool = field(default=False, repr=False)
@@ -313,30 +309,6 @@ class CallAccumulator:
         )
         self.latency_measurements.append(self._pending_measurement)
 
-    def on_vad_stopped(self, timestamp_ns: int) -> None:
-        if self._active_user_segment_id is None:
-            # VADUserStoppedSpeakingFrame can legitimately fire before any turn
-            # starts (background noise, room ambience at call start) — debug only.
-            logger.debug("[tuner] on_vad_stopped: no active user segment")
-            return
-        self._vad_stopped_ns_by_user_segment_id[self._active_user_segment_id] = timestamp_ns
-
-    def on_user_turn_stopped(self, timestamp_ns: int) -> None:
-        seg = self._segment_by_id(self._active_user_segment_id)
-        if seg is None:
-            logger.warning("[tuner] on_user_turn_stopped: no active user segment")
-            return
-        vad_stopped_ns = self._vad_stopped_ns_by_user_segment_id.get(seg.id)
-        if vad_stopped_ns is None:
-            logger.warning(
-                "[tuner] on_user_turn_stopped: vad_stopped_ns not set on segment {}", seg.id
-            )
-            return
-        # stt_ms is a property of the user's own utterance — store it on the user
-        # SpeechSegment so it survives even when no bot response ever follows.
-        gap_ms = (timestamp_ns - vad_stopped_ns) // 1_000_000
-        seg.stt_ms = max(0, gap_ms)
-
     def on_latency_measured(self, latency_secs: float) -> None:
         self._pending_latency_ms_queue.append(max(0, int(latency_secs * 1000)))
 
@@ -388,18 +360,39 @@ class CallAccumulator:
             ):
                 bot_seg.start_ms = user_seg.stop_ms + latency_ms
 
-        ttfb_ms: int | None = None
+        # Per-processor TTFB from the breakdown (each entry carries its processor name) so each
+        # node's latency is attributed to the right node. NOTE: "GoogleSTTService".lower()
+        # contains the substring "tts", so STT must be matched FIRST or it would leak into the
+        # TTS bucket. STT TTFB is intentionally not surfaced here — STT latency lives on the
+        # user row as stt_ms; this breakdown describes the bot response (LLM + TTS).
+        first_ttfb_ms: int | None = None
+        llm_ttfb_ms: int | None = None
+        tts_ttfb_ms: int | None = None
         for ttfb in getattr(breakdown, "ttfb", []) or []:
             candidate = int((getattr(ttfb, "duration_secs", 0) or 0) * 1000)
-            if candidate > 0:
-                ttfb_ms = candidate
-                break
-        measurement.ttfb_ms = ttfb_ms
+            if candidate <= 0:
+                continue
+            if first_ttfb_ms is None:
+                first_ttfb_ms = candidate
+            proc = str(getattr(ttfb, "processor", "")).lower()
+            if "stt" in proc:
+                continue
+            if "llm" in proc and llm_ttfb_ms is None:
+                llm_ttfb_ms = candidate
+            elif "tts" in proc and tts_ttfb_ms is None:
+                tts_ttfb_ms = candidate
+        # tts_node_ttfb: the TTS service's own TTFB. Fall back to the first positive TTFB only
+        # when no processor was identifiable (e.g. unlabeled metrics in tests) — real pipelines
+        # always label TTS, so STT/LLM TTFBs no longer leak into this field.
+        measurement.ttfb_ms = tts_ttfb_ms if tts_ttfb_ms is not None else first_ttfb_ms
 
+        # LLM time-to-first-token. Prefer the processing-time metric when present, but fall
+        # back to the LLM's own TTFB — some providers (e.g. Google/Gemini) emit a TTFB metric
+        # but no ProcessingMetricsData, which would otherwise leave LLM latency blank.
         measurement.llm_ms = (
             round(self._pending_pipecat_llm_processing_s * 1000)
             if self._pending_pipecat_llm_processing_s
-            else None
+            else llm_ttfb_ms
         )
         measurement.tts_ms = (
             round(self._pending_pipecat_tts_processing_s * 1000)
@@ -454,6 +447,18 @@ class CallAccumulator:
                     self._pending_pipecat_tts_processing_s = val
                 else:
                     self._pending_pipecat_llm_processing_s += val
+            elif cls_name == "TTFBMetricsData":
+                # The STT service's time-to-first-byte is the user's pure STT latency.
+                # Record it on the active user segment (value is in seconds). First
+                # transcription of the turn wins, so a coalesced multi-utterance turn keeps
+                # the latency of its first utterance. (Only "stt" here — the LLM/TTS TTFBs are
+                # attributed to the bot response in on_latency_breakdown.)
+                processor = str(getattr(d, "processor", "")).lower()
+                if "stt" in processor:
+                    val = getattr(d, "value", 0) or 0
+                    seg = self._segment_by_id(self._active_user_segment_id)
+                    if seg is not None and val > 0 and seg.stt_ms is None:
+                        seg.stt_ms = round(val * 1000)
 
     def build_payload(
         self,

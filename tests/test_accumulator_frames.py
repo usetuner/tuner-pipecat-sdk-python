@@ -191,6 +191,86 @@ def test_on_latency_breakdown_enriches_measurement():
     assert meas.e2e_ms == 200  # 900 - 700
 
 
+# Used for Google/Gemini, which emit a per-processor TTFB metric but no LLM ProcessingMetricsData.
+def test_on_latency_breakdown_llm_ms_falls_back_to_llm_ttfb():
+    """Some providers (e.g. Google/Gemini) emit a per-processor TTFB metric but no LLM
+    ProcessingMetricsData. LLM latency must still be populated — from the LLM's TTFB —
+    instead of coming through blank."""
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = 1_000_000_000
+    # No _pending_pipecat_llm_processing_s set (Google never emitted one).
+    acc.on_latency_measured(0.2)
+
+    acc.on_turn_started(1, 1_000_000_000 + 500_000_000)
+    acc.on_user_stopped_speaking(1_000_000_000 + 700_000_000)
+    acc.on_bot_started_speaking(1_000_000_000 + 900_000_000)
+    breakdown = SimpleNamespace(
+        user_turn_start_time=1.5,
+        user_turn_secs=0.2,
+        ttfb=[
+            SimpleNamespace(processor="GoogleLLMService#0", duration_secs=0.658),
+            SimpleNamespace(processor="GoogleTTSService#0", duration_secs=0.132),
+        ],
+        function_calls=[],
+    )
+    acc.on_latency_breakdown(breakdown)
+
+    meas = acc.latency_measurements[0]
+    assert meas.llm_ms == 658  # fell back to the LLM processor's TTFB
+    assert meas.ttfb_ms == 132  # tts_node_ttfb is the TTS processor's TTFB, not the LLM's
+
+
+def test_on_latency_breakdown_per_node_ttfb_not_contaminated_by_stt():
+    """Each node's TTFB is attributed to the right node. Regression guard: the breakdown lists
+    TTFBs in arrival order STT -> LLM -> TTS, and "GoogleSTTService".lower() contains the
+    substring "tts" — so a naive match would put the STT TTFB into tts_node_ttfb. The STT entry
+    must NOT leak into either the LLM or TTS field."""
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = 1_000_000_000
+    acc.on_latency_measured(0.2)
+
+    acc.on_turn_started(1, 1_000_000_000 + 500_000_000)
+    acc.on_user_stopped_speaking(1_000_000_000 + 700_000_000)
+    acc.on_bot_started_speaking(1_000_000_000 + 900_000_000)
+    breakdown = SimpleNamespace(
+        user_turn_start_time=1.5,
+        user_turn_secs=0.2,
+        ttfb=[
+            SimpleNamespace(processor="GoogleSTTService#0", duration_secs=0.879),  # first!
+            SimpleNamespace(processor="GoogleLLMService#0", duration_secs=0.658),
+            SimpleNamespace(processor="GoogleTTSService#0", duration_secs=0.132),
+        ],
+        function_calls=[],
+    )
+    acc.on_latency_breakdown(breakdown)
+
+    meas = acc.latency_measurements[0]
+    assert meas.ttfb_ms == 132  # TTS node, NOT the STT 879 nor the LLM 658
+    assert meas.llm_ms == 658  # LLM node
+
+
+def test_on_latency_breakdown_llm_processing_time_preferred_over_ttfb():
+    """When a provider DOES emit LLM processing time (e.g. OpenAI), it stays the source of
+    LLM latency — the TTFB fallback only fills the gap when processing time is absent."""
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = 1_000_000_000
+    acc._pending_pipecat_llm_processing_s = 0.03
+    acc.on_latency_measured(0.2)
+
+    acc.on_turn_started(1, 1_000_000_000 + 500_000_000)
+    acc.on_user_stopped_speaking(1_000_000_000 + 700_000_000)
+    acc.on_bot_started_speaking(1_000_000_000 + 900_000_000)
+    breakdown = SimpleNamespace(
+        user_turn_start_time=1.5,
+        user_turn_secs=0.2,
+        ttfb=[SimpleNamespace(processor="OpenAILLMService#0", duration_secs=0.658)],
+        function_calls=[],
+    )
+    acc.on_latency_breakdown(breakdown)
+
+    assert acc.latency_measurements[0].llm_ms == 30  # processing time wins
+
+
 def test_on_latency_breakdown_keeps_bot_start_when_latency_missing():
     acc = CallAccumulator()
     acc.call_start_abs_ns = 1_000_000_000
@@ -319,24 +399,6 @@ def test_on_turn_started_never_collapses_consecutive_user_speech():
     assert len(segs) == 2
     assert segs[0].start_ms == 200
     assert segs[1].start_ms == 300
-
-
-def test_on_vad_stopped_records_timestamp_by_segment():
-    acc = CallAccumulator()
-    acc.call_start_abs_ns = 1_000_000_000
-    acc.on_turn_started(1, 1_000_000_000 + 100_000_000)
-    acc.on_vad_stopped(1_000_000_000 + 400_000_000)
-    seg_id = _user_segs(acc)[0].id
-    assert acc._vad_stopped_ns_by_user_segment_id[seg_id] == 1_000_000_000 + 400_000_000
-
-
-def test_on_user_turn_stopped_computes_stt_ms_on_segment():
-    acc = CallAccumulator()
-    acc.call_start_abs_ns = 1_000_000_000
-    acc.on_turn_started(1, 1_000_000_000 + 100_000_000)
-    acc.on_vad_stopped(1_000_000_000 + 400_000_000)
-    acc.on_user_turn_stopped(1_000_000_000 + 550_000_000)  # 150ms after vad
-    assert _user_segs(acc)[0].stt_ms == 150
 
 
 def test_on_call_end_anchors_user_stop_when_still_speaking():

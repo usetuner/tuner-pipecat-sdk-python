@@ -14,6 +14,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 - **Developer-injected `{"role": "user"}` messages (e.g. a `"Greet the customer…"` kickoff) no longer appear as user turns or shift the transcript out of sync.** Real user turns are now matched against captured STT transcriptions; when no transcriptions are available the observer falls back to dropping user messages that precede a proactive greeting.
+- **LLM latency (`llm_node_ttft`) is now populated for providers that emit a TTFB metric but no processing-time metric (e.g. Google/Gemini).** It falls back to the LLM service's TTFB when processing time is absent.
+- **Per-node TTFB attribution corrected.** `tts_node_ttfb` now reports the TTS service's own TTFB instead of the first TTFB in the turn (which was the STT's on real turns).
+
+### Changed
+- **`stt_node_ttfb` now reports the STT service's TTFB** (pure model latency) instead of the VAD-stop→turn-finalized gap. Values are lower and no longer include smart-turn analysis time.
 
 ---
 

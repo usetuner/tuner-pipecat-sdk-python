@@ -58,53 +58,53 @@ def _user_segs(acc):
     return [s for s in acc.speech_segments if s.speaker == "user"]
 
 
-def test_on_user_turn_stopped_no_vad_stop_is_safe():
-    acc = CallAccumulator()
-    acc.call_start_abs_ns = 1_000_000_000
+def _ttfb_frame(processor, value):
+    from types import SimpleNamespace
 
-    # Set up a turn without ever firing on_vad_stopped
-    acc.on_turn_started(turn_number=1, timestamp_ns=1_001_000_000)
-
-    # Should log a warning and return — not crash
-    acc.on_user_turn_stopped(timestamp_ns=1_002_000_000)
-
-    assert _user_segs(acc)[0].stt_ms is None
+    data = type("TTFBMetricsData", (), {"processor": processor, "value": value})()
+    return SimpleNamespace(data=[data])
 
 
-def test_stt_ms_computed_from_vad_gap():
-    acc = CallAccumulator()
-    acc.call_start_abs_ns = 1_000_000_000_000
-    acc.on_turn_started(1, 1_000_000_000_000 + 1_000_000_000)
-
-    vad_ts = 1_000_000_000_000 + 1_500_000_000
-    user_stopped_ts = 1_000_000_000_000 + 1_800_000_000  # 300ms after VAD
-
-    acc.on_vad_stopped(vad_ts)
-    acc.on_user_turn_stopped(user_stopped_ts)
-
-    assert _user_segs(acc)[0].stt_ms == 300
-
-
-def test_vad_stopped_before_user_stopped_speaking_sets_stt():
-    acc = CallAccumulator()
-    acc.call_start_abs_ns = 1_000_000_000_000
-    acc.on_turn_started(1, 1_000_000_000_000 + 1_000_000_000)
-
-    acc.on_vad_stopped(1_000_000_000_000 + 1_400_000_000)
-    acc.on_user_stopped_speaking(1_000_000_000_000 + 1_600_000_000)
-    acc.on_user_turn_stopped(1_000_000_000_000 + 1_700_000_000)  # 300ms after VAD
-
-    assert _user_segs(acc)[0].stt_ms == 300
-    assert _user_segs(acc)[0].stop_ms > 0
-
-
-def test_on_user_turn_stopped_before_vad_stopped_warns_and_is_safe():
-    """on_user_turn_stopped with no prior VAD stop logs warning and skips."""
+def test_stt_ms_set_from_stt_service_ttfb():
+    """stt_node_ttfb is the STT service's own TTFB (pure model latency), read from the STT
+    TTFBMetricsData on the active user segment."""
     acc = CallAccumulator()
     acc.call_start_abs_ns = 1_000_000_000
     acc.on_turn_started(1, 1_001_000_000)
 
-    # Fire user turn stopped without vad stopped — should not crash
-    acc.on_user_turn_stopped(1_001_500_000)
+    acc.on_metrics_frame(_ttfb_frame("GoogleSTTService#0", 0.879))
+
+    assert _user_segs(acc)[0].stt_ms == 879
+
+
+def test_stt_ms_ignores_non_stt_ttfb():
+    """LLM/TTS TTFB metrics must not be written to the user segment's stt_ms (note that
+    'GoogleSTTService'.lower() contains the substring 'tts' — only genuine STT counts)."""
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = 1_000_000_000
+    acc.on_turn_started(1, 1_001_000_000)
+
+    acc.on_metrics_frame(_ttfb_frame("GoogleLLMService#0", 0.658))
+    acc.on_metrics_frame(_ttfb_frame("GoogleTTSService#0", 0.132))
 
     assert _user_segs(acc)[0].stt_ms is None
+
+
+def test_stt_ms_first_ttfb_of_turn_wins():
+    """A coalesced turn emits several STT TTFBs; the first utterance's latency is kept."""
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = 1_000_000_000
+    acc.on_turn_started(1, 1_001_000_000)
+
+    acc.on_metrics_frame(_ttfb_frame("GoogleSTTService#0", 0.879))
+    acc.on_metrics_frame(_ttfb_frame("GoogleSTTService#0", 1.250))
+
+    assert _user_segs(acc)[0].stt_ms == 879
+
+
+def test_stt_ms_none_when_no_active_user_segment():
+    """An STT TTFB before any turn starts is ignored, not crashed on."""
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = 1_000_000_000
+    acc.on_metrics_frame(_ttfb_frame("GoogleSTTService#0", 0.879))
+    assert _user_segs(acc) == []

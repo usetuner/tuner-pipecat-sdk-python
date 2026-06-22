@@ -23,7 +23,6 @@ from pipecat.frames.frames import (
     TTSTextFrame,
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
-    VADUserStoppedSpeakingFrame,
 )
 from pipecat.observers.base_observer import BaseObserver, FramePushed
 from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
@@ -356,16 +355,12 @@ class _BaseObserver(BaseObserver):
 
         elif isinstance(frame, UserStoppedSpeakingFrame):
             self._acc.on_user_stopped_speaking(timestamp_ns)
-            self._acc.on_user_turn_stopped(timestamp_ns)
 
         elif isinstance(frame, BotStartedSpeakingFrame):
             self._acc.on_bot_started_speaking(timestamp_ns)
 
         elif isinstance(frame, BotStoppedSpeakingFrame):
             self._acc.on_bot_stopped(timestamp_ns)
-
-        elif isinstance(frame, VADUserStoppedSpeakingFrame):
-            self._acc.on_vad_stopped(timestamp_ns)
 
         elif isinstance(frame, CancelFrame | EndFrame):
             if self._disconnection_reason_resolver is not None:
