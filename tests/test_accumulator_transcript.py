@@ -408,10 +408,56 @@ def test_silence_gap_within_one_turn_splits_via_windows(tuner_config):
         {"role": "assistant", "content": "Yes I am here!"},
     ]
     payload = acc.build_payload(tuner_config, transcript)
-    user_rows = [s for s in payload.transcript_with_tool_calls if s.role == "user"]
+    rows = payload.transcript_with_tool_calls
+    user_rows = [s for s in rows if s.role == "user"]
     assert [r.text for r in user_rows] == ["Book me a flight", "Are you still there?"]
     assert user_rows[0].start_ms == 200
     assert user_rows[1].start_ms == 9000  # gap preserved as a separate row
+    # Two rows from one coalesced turn must still get DISTINCT, sequential turn_index.
+    turn_indices = [r.metadata["turn_index"] for r in rows if "turn_index" in r.metadata]
+    assert turn_indices == sorted(set(turn_indices))  # unique and ascending
+
+
+def test_turn_index_is_unique_per_row_across_a_coalesced_turn(tuner_config):
+    """Regression for the duplicate-turn_index bug: a coalesced turn that splits into two
+    rows (two utterances around a tool call, like 'I can take medium.' then 'do you have
+    Coke?') must give each rendered row a distinct, sequential turn_index — not the shared
+    segment id."""
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = 0
+    acc.call_end_abs_ns = 60_000_000_000
+    acc.done = True
+    acc.speech_segments = [
+        _seg(0, "bot", 500, 2000, is_proactive=True),  # greeting
+        # one user turn, two utterances split by a tool call (gap > merge threshold)
+        _seg(1, "user", 5000, 9000, windows=[[5000, 6000], [8000, 9000]]),
+        _seg(2, "bot", 10000, 12000),
+    ]
+    acc.latency_measurements = [
+        _meas(-1, 0, is_proactive=True, ttfb_ms=100),
+        _meas(1, 2, ttfb_ms=50),
+    ]
+    transcript = [
+        {"role": "assistant", "content": "Hi! What would you like?"},
+        {"role": "user", "content": "I can take medium."},
+        {
+            "role": "assistant",
+            "tool_calls": [{"id": "cs", "function": {"name": "choose_size", "arguments": "{}"}}],
+        },
+        {"role": "tool", "tool_call_id": "cs", "content": '{"size": "medium"}'},
+        {"role": "user", "content": "By the way, do you have Coke?"},
+        {"role": "assistant", "content": "Sorry, only pizza."},
+    ]
+    payload = acc.build_payload(tuner_config, transcript)
+    rows = payload.transcript_with_tool_calls
+    user_rows = [s for s in rows if s.role == "user"]
+    # The single coalesced turn produced two distinct rows...
+    assert [r.text for r in user_rows] == ["I can take medium.", "By the way, do you have Coke?"]
+    assert user_rows[0].metadata["turn_index"] != user_rows[1].metadata["turn_index"]
+    # ...and every row carrying a turn_index has a unique, ascending value.
+    indices = [r.metadata["turn_index"] for r in rows if "turn_index" in r.metadata]
+    assert len(indices) == len(set(indices))
+    assert indices == sorted(indices)
 
 
 def test_user_speaks_during_tool_call_is_kept(tuner_config):

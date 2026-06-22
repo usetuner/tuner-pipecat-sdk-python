@@ -178,6 +178,7 @@ def build_agent_text_segment(
     measurement: LatencyMeasurement | None,
     *,
     interrupted: bool,
+    turn_index: int,
 ) -> TranscriptSegment:
     text = " ".join(m.get("content", "") for m in grouped_messages).strip()
     is_proactive = bool(
@@ -200,7 +201,7 @@ def build_agent_text_segment(
             llm_node_ttft=measurement.llm_ms if measurement else None,
             tts_node_ttfb=measurement.ttfb_ms if measurement else None,
             node=bot_seg.node if bot_seg else None,
-            turn_index=bot_seg.id if bot_seg else None,
+            turn_index=turn_index,
             interrupted_at_ms=interrupted_at_ms,
         ),
     )
@@ -277,6 +278,60 @@ def find_spoken_assistant_message_indices_via_tts(
     return spoken
 
 
+# A flattened per-utterance user window: (start_ms, stop_ms, segment, is_segment_first_window).
+UserWindow = tuple[int, int | None, SpeechSegment, bool]
+
+
+def _upcoming_response_anchor(
+    bot_segs: list[SpeechSegment],
+    bot_cursor: int,
+    meas_by_bot_id: dict[int, LatencyMeasurement],
+    seg_by_id: dict[int, SpeechSegment],
+) -> tuple[int, int]:
+    """``(bot_started_ms, user_stopped_ms)`` of the response a tool call belongs to — used as
+    the late-frame fallback when a recorded tool time is missing or implausibly late."""
+    bot = bot_segs[bot_cursor] if bot_cursor < len(bot_segs) else None
+    meas = meas_by_bot_id.get(bot.id) if bot else None
+    user = seg_by_id.get(meas.user_segment_id) if meas else None
+    return (bot.start_ms if bot else 0, (user.stop_ms or 0) if user else 0)
+
+
+def _split_user_rows(
+    grouped_messages: list[dict[str, Any]],
+    group_wins: list[UserWindow],
+    merge_gap_ms: int,
+) -> list[tuple[list[dict[str, Any]], int | None, int | None, int | None]]:
+    """Pair each user message with its speech window and split into rows wherever the silence
+    between consecutive utterances is large enough (a real pause) — else merge fragments.
+
+    Returns ``(row_messages, start_ms, end_ms, stt_ms)`` per row. ``start_ms is None`` means
+    the row had no window (no VAD ever fired → developer-injected, not real speech).
+    """
+
+    def finalize(msgs: list[dict[str, Any]], wins: list[UserWindow]):
+        if not wins:
+            return (msgs, None, None, None)
+        stt = wins[0][2].stt_ms if wins[0][3] else None  # stt only on the segment's first window
+        return (msgs, wins[0][0], wins[-1][1] or 0, stt)
+
+    rows = []
+    cur_msgs: list[dict[str, Any]] = []
+    cur_wins: list[UserWindow] = []
+    for i, msg in enumerate(grouped_messages):
+        win = group_wins[i] if i < len(group_wins) else None
+        if cur_wins and win is not None:
+            prev_stop = cur_wins[-1][1] or 0
+            if prev_stop > 0 and win[0] > 0 and (win[0] - prev_stop) >= merge_gap_ms:
+                rows.append(finalize(cur_msgs, cur_wins))
+                cur_msgs, cur_wins = [], []
+        cur_msgs.append(msg)
+        if win is not None:
+            cur_wins.append(win)
+    if cur_msgs:
+        rows.append(finalize(cur_msgs, cur_wins))
+    return rows
+
+
 def enrich_transcript(
     acc: CallAccumulator,
     messages: list[dict[str, Any]],
@@ -312,6 +367,7 @@ def enrich_transcript(
     message_idx = 0
     win_cursor = 0
     bot_cursor = 0
+    next_turn_index = 0  # stable, unique, sequential index per rendered user/agent row
     seen_user_message = False
     last_agent_interrupted = False  # the user interrupts when the prior agent turn was cut off
 
@@ -326,56 +382,29 @@ def enrich_transcript(
         if role == "user":
             seen_user_message = True
             grouped_messages, message_idx = collect_consecutive_user_messages(messages, message_idx)
-            n = len(grouped_messages)
-            # Each user message maps to the next speech window (1:1 with real utterances).
-            group_wins = user_windows[win_cursor : win_cursor + n]
+            # Each user message maps 1:1 to the next speech window (real utterances only).
+            group_wins = user_windows[win_cursor : win_cursor + len(grouped_messages)]
             win_cursor += len(group_wins)
 
-            # Group the messages into rows, starting a new row wherever the silence between
-            # consecutive utterances is large enough (a real pause) — else merge fragments.
-            rows: list[tuple[list[dict[str, Any]], list[tuple[int, int | None, Any, bool]]]] = []
-            cur_msgs: list[dict[str, Any]] = []
-            cur_wins: list[tuple[int, int | None, Any, bool]] = []
-            for i, msg in enumerate(grouped_messages):
-                win = group_wins[i] if i < len(group_wins) else None
-                if cur_wins and win is not None:
-                    prev_stop = cur_wins[-1][1] or 0
-                    if prev_stop > 0 and win[0] > 0 and (win[0] - prev_stop) >= merge_gap_ms:
-                        rows.append((cur_msgs, cur_wins))
-                        cur_msgs, cur_wins = [], []
-                cur_msgs.append(msg)
-                if win is not None:
-                    cur_wins.append(win)
-            if cur_msgs:
-                rows.append((cur_msgs, cur_wins))
-
-            for row_msgs, row_wins in rows:
-                if not row_wins:
-                    # No speech window → no VAD/STT ever fired for this message. Real speech
-                    # always produces a window (even mid-tool-call, on the active segment),
-                    # so this is a developer-injected context message — drop it. (Only when
-                    # windows exist at all; with none recorded we render everything untimed
-                    # rather than drop a whole degenerate-capture transcript.)
-                    if user_windows:
-                        continue
-                    result.append(
-                        build_user_segment(
-                            row_msgs, start_ms=0, end_ms=0, interrupted=last_agent_interrupted
-                        )
-                    )
-                    last_agent_interrupted = False
+            for row_msgs, start_ms, end_ms, stt_ms in _split_user_rows(
+                grouped_messages, group_wins, merge_gap_ms
+            ):
+                # No window → no VAD ever fired → developer-injected; drop it. (Unless nothing
+                # was captured at all, in which case render untimed rather than drop the whole
+                # degenerate transcript.)
+                if start_ms is None and user_windows:
                     continue
-                first_seg = row_wins[0][2]
                 result.append(
                     build_user_segment(
                         row_msgs,
-                        start_ms=row_wins[0][0],
-                        end_ms=row_wins[-1][1] or 0,
+                        start_ms=start_ms or 0,
+                        end_ms=end_ms or 0,
                         interrupted=last_agent_interrupted,
-                        stt_ms=first_seg.stt_ms if row_wins[0][3] else None,
-                        turn_index=first_seg.id,
+                        stt_ms=stt_ms,
+                        turn_index=next_turn_index,
                     )
                 )
+                next_turn_index += 1
                 last_agent_interrupted = False
             continue
 
@@ -383,11 +412,9 @@ def enrich_transcript(
             # Tool calls belong to the upcoming bot response. FunctionCallInProgressFrame
             # arrives late at the observer (after the bot has spoken), so fall back to the
             # response's user_stopped time when the recorded invocation looks too late.
-            up_bot = bot_segs[bot_cursor] if bot_cursor < len(bot_segs) else None
-            up_meas = meas_by_bot_id.get(up_bot.id) if up_bot else None
-            up_user = seg_by_id.get(up_meas.user_segment_id) if up_meas else None
-            bot_started_ms = up_bot.start_ms if up_bot else 0
-            user_stopped_ms = (up_user.stop_ms or 0) if up_user else 0
+            bot_started_ms, user_stopped_ms = _upcoming_response_anchor(
+                bot_segs, bot_cursor, meas_by_bot_id, seg_by_id
+            )
             for tool_call in message.get("tool_calls", []):
                 tool_call_id = tool_call.get("id")
                 invocation_ms = acc.get_tool_invocation_ms(tool_call_id) or 0 if tool_call_id else 0
@@ -400,16 +427,16 @@ def enrich_transcript(
             continue
 
         if role == "tool":
-            up_bot = bot_segs[bot_cursor] if bot_cursor < len(bot_segs) else None
-            up_meas = meas_by_bot_id.get(up_bot.id) if up_bot else None
-            up_user = seg_by_id.get(up_meas.user_segment_id) if up_meas else None
+            bot_started_ms, user_stopped_ms = _upcoming_response_anchor(
+                bot_segs, bot_cursor, meas_by_bot_id, seg_by_id
+            )
             result.append(
                 build_agent_result_segment(
                     acc=acc,
                     message=message,
                     messages=messages,
-                    bot_started_ms=up_bot.start_ms if up_bot else 0,
-                    user_stopped_ms=(up_user.stop_ms or 0) if up_user else 0,
+                    bot_started_ms=bot_started_ms,
+                    user_stopped_ms=user_stopped_ms,
                 )
             )
             message_idx += 1
@@ -444,9 +471,14 @@ def enrich_transcript(
                 interrupted = False
             result.append(
                 build_agent_text_segment(
-                    grouped_messages, bot_seg, measurement, interrupted=interrupted
+                    grouped_messages,
+                    bot_seg,
+                    measurement,
+                    interrupted=interrupted,
+                    turn_index=next_turn_index,
                 )
             )
+            next_turn_index += 1
             continue
 
         message_idx += 1
