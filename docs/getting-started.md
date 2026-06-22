@@ -55,7 +55,8 @@ Set `asr_model`, `llm_model`, and `tts_model` to populate
 
 ## Pipeline Placement
 
-Put `Observer` after TTS and before transport output:
+`Observer` is a pipeline-level observer: register it on the `PipelineTask`
+(`observers=[...]`, see below), not inside the `Pipeline([...])` processor list:
 
 ```python
 Pipeline([
@@ -64,7 +65,6 @@ Pipeline([
     context_aggregator.user(),
     llm,
     tts,
-    observer,
     transport.output(),
     context_aggregator.assistant(),
 ])
@@ -87,7 +87,7 @@ task = PipelineTask(
         enable_metrics=True,
         enable_usage_metrics=True,
     ),
-    observers=[observer.latency_observer, turn_tracker],
+    observers=[observer, observer.latency_observer, turn_tracker],
 )
 ```
 

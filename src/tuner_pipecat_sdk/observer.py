@@ -11,14 +11,20 @@ class Observer(_BaseObserver):
     """
     Drop-in observer for plain pipecat pipelines.
 
-    Pipeline position (after TTS):
-        transport.input() → stt → user_agg → llm → tts → Observer → transport.output()
+    This is a pipeline-level observer — pass it in ``PipelineTask(observers=[...])``,
+    NOT as a processor in the ``Pipeline([...])`` list. It sees every frame at every
+    processor boundary, so it captures frames an intermediate processor consumes (e.g.
+    ``TranscriptionFrame``, swallowed by the user aggregator) and stays out of the audio path.
 
     Usage::
 
         observer = Observer(api_key=..., workspace_id=..., agent_id=..., call_id=...)
-        observer.attach_context(context)          # LLMContext instance
+        observer.attach_context(context)                      # LLMContext instance
         observer.attach_turn_tracking_observer(turn_tracker)  # optional
+        task = PipelineTask(
+            pipeline,
+            observers=[observer, observer.latency_observer, turn_tracker],
+        )
     """
 
     def attach_context(self, context: LLMContext) -> None:

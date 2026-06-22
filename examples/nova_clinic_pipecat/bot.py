@@ -360,7 +360,6 @@ async def run_bot(
             user_aggregator,
             llm,
             tts,
-            observer,
             transport.output(),
             assistant_aggregator,
         ]
@@ -372,7 +371,7 @@ async def run_bot(
             enable_metrics=True,
             enable_usage_metrics=True,
         ),
-        observers=[observer.latency_observer, turn_tracker],
+        observers=[observer, observer.latency_observer, turn_tracker],
     )
     observer.attach_context(context)
 

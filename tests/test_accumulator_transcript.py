@@ -472,6 +472,62 @@ def test_google_stt_pizza_order_user_role_kickoff_regression(tuner_config):
     assert user_texts[-1] == "Yes."
 
 
+def test_injected_user_message_dropped_via_transcription_any_position(tuner_config):
+    """Primary path: when STT transcriptions are captured (pipeline-level observer), a
+    developer-injected {"role":"user"} message matches no transcription and is dropped
+    regardless of position — including mid-call, where the proactive-greeting fallback would
+    not apply. Real utterances keep their own windows."""
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = 0
+    acc.call_end_abs_ns = 60_000_000_000
+    acc.done = True
+    acc.speech_segments = [
+        _seg(0, "user", 500, 1000, windows=[[500, 1000]]),  # "Yes, my name is Sallym."
+        _seg(1, "bot", 2000, 5000, spoken_text="Hi Sallym."),
+        _seg(2, "bot", 46000, 47000, spoken_text="Are you still there?"),  # answers injected msg
+    ]
+    acc.latency_measurements = [_meas(0, 1, ttfb_ms=100), _meas(0, 2)]
+    # Only the real utterance was transcribed; the mid-call silence handler was not.
+    acc.user_transcriptions = [("Yes, my name is Sallym.", 600)]
+    transcript = [
+        {"role": "user", "content": "Yes, my name is Sallym."},
+        {"role": "assistant", "content": "Hi Sallym."},
+        {"role": "user", "content": "The user has been quiet. Ask if they're still there."},
+        {"role": "assistant", "content": "Are you still there?"},
+    ]
+    payload = acc.build_payload(tuner_config, transcript)
+    user_rows = [s for s in payload.transcript_with_tool_calls if s.role == "user"]
+    agent_rows = [s for s in payload.transcript_with_tool_calls if s.role == "agent"]
+    assert [r.text for r in user_rows] == ["Yes, my name is Sallym."]
+    assert [r.text for r in agent_rows] == ["Hi Sallym.", "Are you still there?"]
+
+
+def test_leading_kickoff_dropped_via_transcription_without_proactive_flag(tuner_config):
+    """Primary path also covers the leading kickoff via transcription matching alone — it does
+    not depend on the proactive-greeting fallback."""
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = 0
+    acc.call_end_abs_ns = 60_000_000_000
+    acc.done = True
+    acc.speech_segments = [
+        _seg(0, "bot", 500, 2000, spoken_text="Hi there! Welcome."),  # NOT flagged proactive
+        _seg(1, "user", 5000, 6000, windows=[[5000, 6000]]),
+        _seg(2, "bot", 7000, 9000, spoken_text="Great, coming up."),
+    ]
+    acc.latency_measurements = [_meas(-1, 0), _meas(1, 2, ttfb_ms=50)]
+    acc.user_transcriptions = [("A margherita please.", 5000)]
+    transcript = [
+        {"role": "user", "content": "Greet the customer and present the menu."},  # injected
+        {"role": "assistant", "content": "Hi there! Welcome."},
+        {"role": "user", "content": "A margherita please."},
+        {"role": "assistant", "content": "Great, coming up."},
+    ]
+    payload = acc.build_payload(tuner_config, transcript)
+    user_rows = [s for s in payload.transcript_with_tool_calls if s.role == "user"]
+    assert [r.text for r in user_rows] == ["A margherita please."]
+    assert user_rows[0].start_ms == 5000
+
+
 def test_outbound_user_speaks_first_kickoff_not_dropped(tuner_config):
     """Guard against over-dropping: when the user speaks first (no proactive greeting), a
     leading user message is real and must be kept."""

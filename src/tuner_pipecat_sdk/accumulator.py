@@ -30,6 +30,12 @@ class CallAccumulator:
     latency_measurements: list[LatencyMeasurement] = field(default_factory=list)
     _next_segment_id: int = field(default=0, repr=False)
 
+    # Finalized STT transcriptions, in order: (text, rel_ms). Real user speech produces a
+    # transcription; developer-injected {"role":"user"} context messages do not. The enricher
+    # uses this as the authoritative signal for which context user messages were actually
+    # spoken (mirrors spoken_text/TTS matching on the bot side).
+    user_transcriptions: list[tuple[str, int]] = field(default_factory=list)
+
     # Active turn tracking
     _active_turn_number: int | None = field(default=None, repr=False)
     # turn_number → user segment id, so on_turn_ended can target the right response.
@@ -214,6 +220,12 @@ class CallAccumulator:
         # Open a new per-utterance window. A coalesced turn (multiple utterances before any
         # bot reply) accrues several windows, preserving per-utterance timing.
         seg.windows.append([started_ms, None])
+
+    def on_transcription(self, text: str, timestamp_ns: int) -> None:
+        """Record a finalized STT transcription. Used by the enricher as the authoritative
+        signal for which context user messages were actually spoken."""
+        if text and text.strip():
+            self.user_transcriptions.append((text, self._rel_ms(timestamp_ns)))
 
     def on_tts_text(self, text: str, timestamp_ns: int) -> None:
         """Record a voiced TTS sentence on the timeline. Assigned to a bot segment by time

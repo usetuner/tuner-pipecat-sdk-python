@@ -110,6 +110,63 @@ def test_observer_exposes_latency_observer(observer):
     assert observer.latency_observer is not None
 
 
+def _pushed(frame, direction):
+    """Build a FramePushed event for the pipeline-level on_push_frame hook."""
+    from unittest.mock import Mock
+
+    from pipecat.observers.base_observer import FramePushed
+
+    return FramePushed(
+        source=Mock(), destination=Mock(), frame=frame, direction=direction, timestamp=0
+    )
+
+
+@pytest.mark.asyncio
+async def test_on_push_frame_routes_transcription_downstream(observer):
+    from pipecat.frames.frames import TranscriptionFrame
+    from pipecat.processors.frame_processor import FrameDirection
+
+    observer._acc.call_start_abs_ns = 1_000_000_000
+    frame = TranscriptionFrame(text="i want pizza", user_id="u1", timestamp="2026-01-01T00:00:00Z")
+    await observer.on_push_frame(_pushed(frame, FrameDirection.DOWNSTREAM))
+    assert [t for t, _ in observer._acc.user_transcriptions] == ["i want pizza"]
+
+
+@pytest.mark.asyncio
+async def test_on_push_frame_ignores_upstream(observer):
+    from pipecat.frames.frames import TranscriptionFrame
+    from pipecat.processors.frame_processor import FrameDirection
+
+    frame = TranscriptionFrame(text="ignored", user_id="u1", timestamp="2026-01-01T00:00:00Z")
+    await observer.on_push_frame(_pushed(frame, FrameDirection.UPSTREAM))
+    assert observer._acc.user_transcriptions == []
+
+
+@pytest.mark.asyncio
+async def test_on_push_frame_dedups_by_frame_id(observer):
+    """A pipeline-level observer sees the same frame once per processor hop — it must be
+    handled exactly once."""
+    from pipecat.frames.frames import TranscriptionFrame
+    from pipecat.processors.frame_processor import FrameDirection
+
+    observer._acc.call_start_abs_ns = 1_000_000_000
+    frame = TranscriptionFrame(text="only once", user_id="u1", timestamp="2026-01-01T00:00:00Z")
+    for _ in range(5):  # simulate the frame traversing five processor boundaries
+        await observer.on_push_frame(_pushed(frame, FrameDirection.DOWNSTREAM))
+    assert len(observer._acc.user_transcriptions) == 1
+    assert observer._acc.user_transcriptions[0][0] == "only once"
+
+
+@pytest.mark.asyncio
+async def test_on_push_frame_interim_transcription_not_recorded(observer):
+    from pipecat.frames.frames import InterimTranscriptionFrame
+    from pipecat.processors.frame_processor import FrameDirection
+
+    frame = InterimTranscriptionFrame(text="par", user_id="u1", timestamp="2026-01-01T00:00:00Z")
+    await observer.on_push_frame(_pushed(frame, FrameDirection.DOWNSTREAM))
+    assert observer._acc.user_transcriptions == []
+
+
 @pytest.mark.asyncio
 async def test_attach_turn_tracking_observer_wiring(observer):
     handlers: dict[str, Any] = {}

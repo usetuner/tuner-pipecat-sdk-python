@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+from collections import deque
 from collections.abc import Callable
 from typing import Any
 
@@ -18,13 +19,15 @@ from pipecat.frames.frames import (
     FunctionCallResultFrame,
     MetricsFrame,
     StartFrame,
+    TranscriptionFrame,
     TTSTextFrame,
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
     VADUserStoppedSpeakingFrame,
 )
+from pipecat.observers.base_observer import BaseObserver, FramePushed
 from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
-from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
+from pipecat.processors.frame_processor import FrameDirection
 
 from ._providers import PROVIDER_EXTRACTORS, ProviderExtractor
 from .accumulator import CallAccumulator
@@ -62,9 +65,15 @@ def _get(obj: Any, key: str) -> Any:
     return getattr(obj, key, None)
 
 
-class _BaseObserver(FrameProcessor):
+class _BaseObserver(BaseObserver):
     """
     Shared frame-processing logic for all Tuner observers.
+
+    This is a pipeline-level observer (``PipelineTask(observers=[...])``), not a
+    processor in the pipeline. It therefore sees every frame at every processor
+    boundary — including frames an intermediate processor consumes without
+    forwarding (e.g. ``TranscriptionFrame``, swallowed by the user aggregator) —
+    and stays entirely out of the audio data path.
 
     Subclasses must call ``attach_context()`` (or an equivalent wrapper) with a
     callable that returns the transcript list before the pipeline starts.
@@ -98,10 +107,6 @@ class _BaseObserver(FrameProcessor):
                 Optional — not collected automatically; pass it when the callee
                 identity is known to your application.
         """
-        # enable_direct_mode=True: frames bypass the internal process queue and are
-        # pushed through immediately (like old pipecat's simple pass-through). Without
-        # this, pipecat 1.0's _start_interruption() clears the queue on every
-        # InterruptionFrame, dropping buffered TTS audio and cutting speech short.
         super().__init__(**kwargs)
         self._config = TunerConfig(
             api_key=api_key,
@@ -123,6 +128,12 @@ class _BaseObserver(FrameProcessor):
         self._acc = CallAccumulator()
         self._acc.call_start_abs_ns = time.time_ns()
         self._flushed = False
+        # As a pipeline-level observer, on_push_frame fires once PER processor hop, so the
+        # same frame is seen many times. Dedup by frame id (bounded deque + set, mirroring
+        # pipecat's UserBotLatencyObserver). All hops of a frame occur back-to-back in one
+        # downstream traversal, so a modest window is sufficient.
+        self._processed_frames: set[int] = set()
+        self._frame_history: deque[int] = deque(maxlen=256)
         self._context_provider: Callable[[], list] | None = None
         self._disconnection_reason_resolver = disconnection_reason_resolver
         self._cost_calculator = cost_calculator
@@ -269,10 +280,20 @@ class _BaseObserver(FrameProcessor):
     # Frame processing
     # ------------------------------------------------------------------
 
-    async def process_frame(self, frame: Any, direction: FrameDirection) -> None:
-        await super().process_frame(frame, direction)
-        self._handle(frame, time.time_ns())
-        await self.push_frame(frame, direction)
+    async def on_push_frame(self, data: FramePushed) -> None:
+        # Pipeline-level observer: invoked for every frame transfer between processors.
+        # Only the downstream pass matters, and each frame must be handled once (it fires
+        # once per hop). Stamp with wall-clock time — the accumulator works in time.time_ns()
+        # relative to call_start_abs_ns, not the pipeline clock.
+        if data.direction != FrameDirection.DOWNSTREAM:
+            return
+        if data.frame.id in self._processed_frames:
+            return
+        self._processed_frames.add(data.frame.id)
+        self._frame_history.append(data.frame.id)
+        if len(self._processed_frames) > len(self._frame_history):
+            self._processed_frames = set(self._frame_history)
+        self._handle(data.frame, time.time_ns())
 
     def _handle(self, frame: Any, timestamp_ns: int) -> None:
         if self._config.debug and isinstance(
@@ -316,6 +337,14 @@ class _BaseObserver(FrameProcessor):
 
         elif isinstance(frame, MetricsFrame):
             self._acc.on_metrics_frame(frame)
+
+        elif isinstance(frame, TranscriptionFrame):
+            # Finalized STT text — the authoritative signal for which context user messages
+            # were actually spoken (vs developer-injected {"role":"user"} messages). Only
+            # visible now that this is a pipeline-level observer: the user aggregator consumes
+            # TranscriptionFrame and never forwards it downstream. InterimTranscriptionFrame is
+            # a sibling, not a subclass, so interim results are naturally excluded.
+            self._acc.on_transcription(frame.text, timestamp_ns)
 
         elif isinstance(frame, TTSTextFrame):
             # Voiced TTS sentence, recorded on a timeline and assigned to a bot segment by

@@ -332,6 +332,38 @@ def _split_user_rows(
     return rows
 
 
+def _drop_injected_user_messages(
+    grouped_messages: list[dict[str, Any]],
+    norm_transcriptions: list[tuple[str, int]],
+    trans_cursor: int,
+) -> tuple[list[dict[str, Any]], int]:
+    """Keep only user messages that were actually transcribed, consuming transcriptions in
+    order. Real speech produces an STT transcription; a developer-injected ``{"role":"user"}``
+    message matches none and is dropped — regardless of position (a leading kickoff, a
+    mid-call silence handler, etc.). This is the user-side mirror of the bot-side TTS
+    ``spoken_text`` matching, and the authoritative real-vs-injected signal.
+
+    Matching uses the same normalized containment rule as the TTS side, since the aggregator
+    builds the context user message from the very transcription(s) we are matching against.
+    Returns ``(kept_messages, new_trans_cursor)``.
+    """
+    kept: list[dict[str, Any]] = []
+    cursor = trans_cursor
+    for msg in grouped_messages:
+        msg_norm = _normalize(msg.get("content", ""))
+        matched_at = -1
+        for i in range(cursor, len(norm_transcriptions)):
+            trans_norm = norm_transcriptions[i][0]
+            if trans_norm and (msg_norm in trans_norm or trans_norm in msg_norm):
+                matched_at = i
+                break
+        if matched_at == -1:
+            continue  # no transcription → developer-injected; drop
+        cursor = matched_at + 1
+        kept.append(msg)
+    return kept, cursor
+
+
 def enrich_transcript(
     acc: CallAccumulator,
     messages: list[dict[str, Any]],
@@ -346,6 +378,11 @@ def enrich_transcript(
     # developer kickoff injected as role=user (e.g. "Greet the customer..."). The assistant/
     # system-role form of the same kickoff is handled by the preamble-collapse below.
     starts_with_proactive_greeting = bool(bot_segs) and bot_segs[0].is_proactive
+    # Authoritative real-vs-injected signal: a real user message was transcribed by STT; a
+    # developer-injected one was not. Empty when no TranscriptionFrames were captured (e.g. a
+    # provider that doesn't emit them) — then we fall back to the proactive-greeting and
+    # no-window heuristics below.
+    norm_transcriptions = [(_normalize(t), ms) for t, ms in acc.user_transcriptions]
     meas_by_bot_id = {
         m.bot_segment_id: m for m in acc.latency_measurements if m.bot_segment_id is not None
     }
@@ -372,6 +409,7 @@ def enrich_transcript(
     message_idx = 0
     win_cursor = 0
     bot_cursor = 0
+    trans_cursor = 0  # next unconsumed STT transcription (real-vs-injected user matching)
     next_turn_index = 0  # stable, unique, sequential index per rendered user/agent row
     seen_user_message = False
     last_agent_interrupted = False  # the user interrupts when the prior agent turn was cut off
@@ -385,15 +423,20 @@ def enrich_transcript(
             continue
 
         if role == "user":
-            # A user message before the proactive greeting (bot_cursor still 0) is a developer
-            # kickoff injected as role=user — the user has not spoken yet. Drop the whole
-            # leading user group without consuming a speech window, so the real utterances that
-            # follow still align 1:1 with their windows instead of being shifted by one.
-            if starts_with_proactive_greeting and bot_cursor == 0:
-                _, message_idx = collect_consecutive_user_messages(messages, message_idx)
+            grouped_messages, message_idx = collect_consecutive_user_messages(messages, message_idx)
+            # Primary, position-independent filter: drop user messages with no matching STT
+            # transcription (developer-injected). Active only when transcriptions were captured.
+            if norm_transcriptions:
+                grouped_messages, trans_cursor = _drop_injected_user_messages(
+                    grouped_messages, norm_transcriptions, trans_cursor
+                )
+            # Fallback when no transcriptions were captured: a user message before the proactive
+            # greeting (bot_cursor still 0) is a role=user kickoff — the user hasn't spoken yet.
+            elif starts_with_proactive_greeting and bot_cursor == 0:
+                continue
+            if not grouped_messages:
                 continue
             seen_user_message = True
-            grouped_messages, message_idx = collect_consecutive_user_messages(messages, message_idx)
             # Each user message maps 1:1 to the next speech window (real utterances only).
             group_wins = user_windows[win_cursor : win_cursor + len(grouped_messages)]
             win_cursor += len(group_wins)
