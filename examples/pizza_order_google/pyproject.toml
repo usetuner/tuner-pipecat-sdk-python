@@ -9,7 +9,4 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-tuner-pipecat-sdk = { path = "/sdk", editable = true }
-
-[tool.setuptools]
-py-modules = []
+tuner-pipecat-sdk = { path = "../../", editable = true }

@@ -359,6 +359,141 @@ def test_injected_user_message_without_speech_excluded_from_transcript(tuner_con
     assert agent_segments[1].start_ms == 46000
 
 
+def test_leading_user_role_kickoff_does_not_steal_real_windows(tuner_config):
+    """A developer kickoff injected as {"role":"user"} (instead of "assistant") precedes the
+    proactive greeting, so it cannot be real speech. It must be dropped — not steal the first
+    real utterance's window and shift every later user message by one (the Google-STT
+    out-of-sync regression where the final utterance fell off the end and was lost)."""
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = 0
+    acc.call_end_abs_ns = 60_000_000_000
+    acc.done = True
+    acc.speech_segments = [
+        _seg(0, "bot", 500, 2000, is_proactive=True, spoken_text="Hi there! Welcome."),
+        _seg(1, "user", 5000, 6000, windows=[[5000, 6000]]),  # "I would like a margherita."
+        _seg(2, "bot", 7000, 9000, spoken_text="Great choice! What size?"),
+        _seg(3, "user", 11000, 12000, windows=[[11000, 12000]]),  # "Small."
+    ]
+    acc.latency_measurements = [
+        _meas(-1, 0, is_proactive=True, ttfb_ms=100),
+        _meas(1, 2, ttfb_ms=50),
+    ]
+    transcript = [
+        {"role": "user", "content": "Greet the customer warmly and present today's menu."},
+        {"role": "assistant", "content": "Hi there! Welcome."},
+        {"role": "user", "content": "I would like a margherita."},
+        {"role": "assistant", "content": "Great choice! What size?"},
+        {"role": "user", "content": "Small."},
+    ]
+    payload = acc.build_payload(tuner_config, transcript)
+    user_rows = [s for s in payload.transcript_with_tool_calls if s.role == "user"]
+    # Injected kickoff dropped; both real utterances kept and correctly timed (not shifted).
+    assert [r.text for r in user_rows] == ["I would like a margherita.", "Small."]
+    assert user_rows[0].start_ms == 5000
+    assert user_rows[1].start_ms == 11000  # the last utterance is NOT dropped
+
+
+def test_google_stt_pizza_order_user_role_kickoff_regression(tuner_config):
+    """Faithful replay of the real Google-STT pizza-order call (role=user kickoff) that
+    regressed. Reconstructed from the observed accumulator state (proactive greeting + three
+    real user turns). Before the fix the injected kickoff stole the first window, shifting
+    every user row by one and dropping the final 'Yes.' — this locks that in so we never have
+    to reproduce it by hand again."""
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = 0
+    acc.call_end_abs_ns = 47_000_000_000
+    acc.done = True
+    # Segments exactly as logged: (id, speaker, start, stop, is_proactive, has_spoken_text)
+    #   (0,'user',1,None,True,False) (1,'bot',930,9605,True,True) (2,'user',11090,12730,...) ...
+    acc.speech_segments = [
+        _seg(0, "user", 1, None, is_proactive=True),  # ghost user turn before the greeting
+        _seg(1, "bot", 930, 9605, is_proactive=True, spoken_text="Welcome to Pipecat Pizza!"),
+        _seg(2, "user", 11090, 12730, windows=[[11090, 12730]]),  # "I would like to order..."
+        _seg(
+            3,
+            "bot",
+            16084,
+            21481,
+            spoken_text=(
+                "Great choice! What size would you like for your margherita pizza? "
+                "We have small, medium, and large."
+            ),
+        ),
+        _seg(4, "user", 22369, 24016, windows=[[22369, 24016]]),  # "I want medium."
+        _seg(
+            5,
+            "bot",
+            26789,
+            31342,
+            spoken_text=(
+                "So that's one medium margherita pizza for a total of 12 dollars "
+                "and 99 cents. Does that sound right?"
+            ),
+        ),
+        _seg(6, "user", 31916, 33801, windows=[[31916, 33801]]),  # "Yes."
+    ]
+    acc.latency_measurements = [
+        _meas(0, 1, is_proactive=True, ttfb_ms=451),
+        _meas(2, 3, ttfb_ms=905),
+        _meas(4, 5, ttfb_ms=508),
+    ]
+    transcript = [
+        {"role": "user", "content": "Greet the customer warmly, present the menu, and ask "
+         "which pizza they would like."},
+        {"role": "assistant", "content": "Welcome to Pipecat Pizza!"},
+        {"role": "user", "content": "I would like to order more greater."},
+        {"role": "assistant", "tool_calls": [
+            {"id": "p1", "function": {"name": "choose_pizza",
+                                      "arguments": '{"pizza": "margherita"}'}}
+        ]},
+        {"role": "tool", "tool_call_id": "p1",
+         "content": '{"pizza": "margherita", "price": 10.99}'},
+        {"role": "assistant", "content": "Great choice! What size would you like for your "
+         "margherita pizza? We have small, medium, and large."},
+        {"role": "user", "content": "I want medium."},
+        {"role": "assistant", "tool_calls": [
+            {"id": "s1", "function": {"name": "choose_size", "arguments": '{"size": "medium"}'}}
+        ]},
+        {"role": "tool", "tool_call_id": "s1", "content": '{"size": "medium", "total": 12.99}'},
+        {"role": "assistant", "content": "So that's one medium margherita pizza for a total "
+         "of 12 dollars and 99 cents. Does that sound right?"},
+        {"role": "user", "content": "Yes."},
+    ]
+    payload = acc.build_payload(tuner_config, transcript)
+    user_rows = [s for s in payload.transcript_with_tool_calls if s.role == "user"]
+    user_texts = [r.text for r in user_rows]
+    # The injected kickoff must NOT be rendered as a user turn.
+    assert "Greet the customer warmly, present the menu, and ask which pizza they would like." \
+        not in user_texts
+    # The three real utterances appear, in order, each timed from its OWN window (not shifted).
+    assert user_texts == ["I would like to order more greater.", "I want medium.", "Yes."]
+    assert [r.start_ms for r in user_rows] == [11090, 22369, 31916]
+    # The final "Yes." is preserved (the old positional code dropped it off the end).
+    assert user_texts[-1] == "Yes."
+
+
+def test_outbound_user_speaks_first_kickoff_not_dropped(tuner_config):
+    """Guard against over-dropping: when the user speaks first (no proactive greeting), a
+    leading user message is real and must be kept."""
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = 0
+    acc.call_end_abs_ns = 10_000_000_000
+    acc.done = True
+    acc.speech_segments = [
+        _seg(0, "user", 150, 2000, windows=[[150, 2000]]),
+        _seg(1, "bot", 2500, 5000, spoken_text="Hi there! This is Sam."),
+    ]
+    acc.latency_measurements = [_meas(0, 1, ttfb_ms=50)]
+    transcript = [
+        {"role": "user", "content": "Hello?"},
+        {"role": "assistant", "content": "Hi there! This is Sam."},
+    ]
+    payload = acc.build_payload(tuner_config, transcript)
+    user_rows = [s for s in payload.transcript_with_tool_calls if s.role == "user"]
+    assert [r.text for r in user_rows] == ["Hello?"]
+    assert user_rows[0].start_ms == 150
+
+
 def test_coalesced_two_utterance_turn_merges_without_stealing_next_segment(tuner_config):
     """Two consecutive user messages = one coalesced turn (one segment, two windows). They
     merge into one row and must NOT consume the next turn's segment (the regression)."""

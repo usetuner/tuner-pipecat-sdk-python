@@ -14,3 +14,4 @@ dist/
 settings.json
 settings.local.json
 launch.json
+gcp-key.json

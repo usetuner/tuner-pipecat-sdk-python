@@ -341,6 +341,11 @@ def enrich_transcript(
     # greeting are excluded — they have no user message dict to align to.
     user_segs = [s for s in acc.speech_segments if s.speaker == "user" and not s.is_proactive]
     bot_segs = [s for s in acc.speech_segments if s.speaker == "bot"]
+    # A proactive greeting means the bot spoke first, before any real user turn. Any user
+    # context message appearing before that greeting therefore cannot be real speech — it is a
+    # developer kickoff injected as role=user (e.g. "Greet the customer..."). The assistant/
+    # system-role form of the same kickoff is handled by the preamble-collapse below.
+    starts_with_proactive_greeting = bool(bot_segs) and bot_segs[0].is_proactive
     meas_by_bot_id = {
         m.bot_segment_id: m for m in acc.latency_measurements if m.bot_segment_id is not None
     }
@@ -380,6 +385,13 @@ def enrich_transcript(
             continue
 
         if role == "user":
+            # A user message before the proactive greeting (bot_cursor still 0) is a developer
+            # kickoff injected as role=user — the user has not spoken yet. Drop the whole
+            # leading user group without consuming a speech window, so the real utterances that
+            # follow still align 1:1 with their windows instead of being shifted by one.
+            if starts_with_proactive_greeting and bot_cursor == 0:
+                _, message_idx = collect_consecutive_user_messages(messages, message_idx)
+                continue
             seen_user_message = True
             grouped_messages, message_idx = collect_consecutive_user_messages(messages, message_idx)
             # Each user message maps 1:1 to the next speech window (real utterances only).
