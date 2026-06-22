@@ -108,3 +108,31 @@ def test_stt_ms_none_when_no_active_user_segment():
     acc.call_start_abs_ns = 1_000_000_000
     acc.on_metrics_frame(_ttfb_frame("GoogleSTTService#0", 0.879))
     assert _user_segs(acc) == []
+
+
+def test_stt_ms_is_pure_ttfb_not_contaminated_by_turn_timing():
+    """Drift guard: stt_node_ttfb must equal the STT service's TTFB ONLY — never the elapsed
+    VAD/turn-finalization time or any other frame-timing overhead. This fires a long turn
+    (~5s between turn-start and user-stop, which a VAD->turn gap would have measured) plus a
+    small 300ms STT TTFB, and pins the result to the metric. If timestamp-gap logic is ever
+    reintroduced — in either order relative to the metric — stt_ms becomes ~5000 and this
+    fails. (on_metrics_frame only writes when stt_ms is still None, so a gap path running
+    first would also be caught: the metric could no longer correct it.)"""
+    base = 1_000_000_000
+    long_turn_ms = 5_000_000_000  # 5s — clearly distinct from the 300ms TTFB
+
+    # user-stop first, then the metric
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = base
+    acc.on_turn_started(1, base)
+    acc.on_user_stopped_speaking(base + long_turn_ms)
+    acc.on_metrics_frame(_ttfb_frame("DeepgramSTTService#0", 0.300))
+    assert _user_segs(acc)[0].stt_ms == 300  # the metric, NOT ~5000ms of turn elapsed
+
+    # metric first, then user-stop (order independence)
+    acc2 = CallAccumulator()
+    acc2.call_start_abs_ns = base
+    acc2.on_turn_started(1, base)
+    acc2.on_metrics_frame(_ttfb_frame("DeepgramSTTService#0", 0.300))
+    acc2.on_user_stopped_speaking(base + long_turn_ms)
+    assert _user_segs(acc2)[0].stt_ms == 300
