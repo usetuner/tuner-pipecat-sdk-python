@@ -887,6 +887,207 @@ def test_unvoiced_draft_before_tool_call_stays_ghost(tuner_config):
     assert voiced.start_ms == 8000
 
 
+# --- Option B: drop developer-injected assistant messages via the LLM-generation signal ---
+
+
+def test_injected_assistant_kickoff_dropped_via_generation(tuner_config):
+    """A leading kickoff injected as a role=assistant message has no matching LLM generation, so
+    it is dropped by the authoritative generation filter (the bot-side mirror of STT matching)."""
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = 0
+    acc.call_end_abs_ns = 60_000_000_000
+    acc.done = True
+    acc.speech_segments = [
+        _seg(0, "bot", 500, 2000, spoken_text="Hi there! Welcome."),
+        _seg(1, "user", 5000, 6000, windows=[[5000, 6000]]),
+        _seg(2, "bot", 7000, 9000, spoken_text="Great, coming up."),
+    ]
+    acc.latency_measurements = [_meas(-1, 0), _meas(1, 2, ttfb_ms=50)]
+    acc.user_transcriptions = [("A margherita please.", 5000)]
+    acc.assistant_generations = [("Hi there! Welcome.", 500), ("Great, coming up.", 7000)]
+    transcript = [
+        {"role": "assistant", "content": "Greet the customer and present the menu."},  # injected
+        {"role": "assistant", "content": "Hi there! Welcome."},  # generated + voiced
+        {"role": "user", "content": "A margherita please."},
+        {"role": "assistant", "content": "Great, coming up."},
+    ]
+    payload = acc.build_payload(tuner_config, transcript)
+    agent_rows = [s for s in payload.transcript_with_tool_calls if s.role == "agent"]
+    assert [r.text for r in agent_rows] == ["Hi there! Welcome.", "Great, coming up."]
+
+
+def test_injected_assistant_separated_by_tool_call_dropped_via_generation(tuner_config):
+    """An injected instruction separated from the real greeting by a tool call is its own
+    consecutive group (preamble-collapse can't reach it). It has no matching generation, so the
+    generation filter drops it; the tool call and the generated greeting stay."""
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = 0
+    acc.call_end_abs_ns = 30_000_000_000
+    acc.done = True
+    acc.speech_segments = [
+        _seg(0, "user", 1000, 2000, windows=[[1000, 2000]]),
+        _seg(1, "bot", 8000, 11000, spoken_text="Hi there! How can I help?"),
+    ]
+    acc.latency_measurements = [_meas(0, 1, ttfb_ms=300)]
+    acc.user_transcriptions = [("hello", 1000)]
+    acc.assistant_generations = [("Hi there! How can I help?", 8000)]
+    transcript = [
+        {"role": "user", "content": "Hello."},
+        {"role": "assistant", "content": "Greet the customer warmly."},  # injected, not generated
+        {
+            "role": "assistant",
+            "tool_calls": [{"id": "g", "function": {"name": "lookup", "arguments": "{}"}}],
+        },
+        {"role": "tool", "tool_call_id": "g", "content": "{}"},
+        {"role": "assistant", "content": "Hi there! How can I help?"},  # generated + voiced
+    ]
+    payload = acc.build_payload(tuner_config, transcript)
+    segs = payload.transcript_with_tool_calls
+    agent_rows = [s for s in segs if s.role == "agent"]
+    assert [r.text for r in agent_rows] == ["Hi there! How can I help?"]
+    assert "agent_function" in [s.role for s in segs]
+
+
+def test_injected_assistant_mid_conversation_dropped_via_generation(tuner_config):
+    """An assistant message injected mid-call (after a real user turn) is past preamble position.
+    With no matching generation it is dropped; the real generated turns are kept."""
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = 0
+    acc.call_end_abs_ns = 30_000_000_000
+    acc.done = True
+    acc.speech_segments = [
+        _seg(0, "user", 1000, 2000, windows=[[1000, 2000]]),
+        _seg(1, "bot", 3000, 5000, spoken_text="Sure, one moment."),
+        _seg(2, "user", 6000, 7000, windows=[[6000, 7000]]),
+        _seg(3, "user", 12000, 13000, windows=[[12000, 13000]]),
+        _seg(4, "bot", 15000, 17000, spoken_text="Your order is confirmed."),
+    ]
+    acc.latency_measurements = [_meas(0, 1, ttfb_ms=50), _meas(3, 4, ttfb_ms=50)]
+    acc.user_transcriptions = [
+        ("place my order", 1000),
+        ("yes please", 6000),
+        ("great", 12000),
+    ]
+    acc.assistant_generations = [("Sure, one moment.", 3000), ("Your order is confirmed.", 15000)]
+    transcript = [
+        {"role": "user", "content": "Place my order."},
+        {"role": "assistant", "content": "Sure, one moment."},  # generated + voiced
+        {"role": "user", "content": "Yes please."},
+        {"role": "assistant", "content": "Reassure the customer their order is safe."},  # injected
+        {"role": "user", "content": "Great."},
+        {"role": "assistant", "content": "Your order is confirmed."},  # generated + voiced
+    ]
+    payload = acc.build_payload(tuner_config, transcript)
+    agent_rows = [s for s in payload.transcript_with_tool_calls if s.role == "agent"]
+    assert [r.text for r in agent_rows] == ["Sure, one moment.", "Your order is confirmed."]
+
+
+def test_generated_unvoiced_draft_kept_as_ghost_with_generations(tuner_config):
+    """A draft the LLM generated but never voiced (superseded by a tool call) DOES match a
+    generation, so the generation filter keeps it. It still has no TTS match, so it renders as an
+    untimed ghost — Option B keeps generated drafts while dropping injected messages."""
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = 0
+    acc.call_end_abs_ns = 30_000_000_000
+    acc.done = True
+    acc.speech_segments = [
+        _seg(0, "user", 1000, 2000, windows=[[1000, 2000]]),
+        _seg(1, "bot", 8000, 11000, spoken_text="What size would you like?"),
+    ]
+    acc.latency_measurements = [_meas(0, 1, ttfb_ms=300)]
+    acc.user_transcriptions = [("i want pizza", 1000)]
+    acc.assistant_generations = [
+        ("Let me look that up for you.", 3000),  # generated, never voiced
+        ("What size would you like?", 8000),  # generated + voiced
+    ]
+    transcript = [
+        {"role": "user", "content": "I want pizza."},
+        {"role": "assistant", "content": "Let me look that up for you."},  # generated draft
+        {
+            "role": "assistant",
+            "tool_calls": [{"id": "x", "function": {"name": "lookup", "arguments": "{}"}}],
+        },
+        {"role": "tool", "tool_call_id": "x", "content": "{}"},
+        {"role": "assistant", "content": "What size would you like?"},  # voiced
+    ]
+    payload = acc.build_payload(tuner_config, transcript)
+    agents = [s for s in payload.transcript_with_tool_calls if s.role == "agent"]
+    draft = next(s for s in agents if "look that up" in s.text)
+    voiced = next(s for s in agents if "size" in s.text)
+    assert draft.start_ms == 0  # kept as ghost
+    assert voiced.start_ms == 8000
+
+
+def test_interrupted_turn_committed_prefix_matches_full_generation(tuner_config):
+    """On interruption pipecat commits only a PREFIX of the turn to the context, while the LLM
+    generation holds the full text. The committed prefix is a substring of the generation, so it
+    matches and the turn is kept (the live-run scenario that broke the TTS-only approach)."""
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = 0
+    acc.call_end_abs_ns = 30_000_000_000
+    acc.done = True
+    full = "Welcome to Pipecat Pizza! Today we have margherita for $10.99. What can I get for you?"
+    acc.speech_segments = [
+        _seg(0, "bot", 1000, 11000, spoken_text=full),
+        _seg(1, "user", 11200, 14000, windows=[[11200, 14000]]),
+    ]
+    acc.latency_measurements = [_meas(-1, 0), _meas(1, None)]
+    acc.user_transcriptions = [("i would like to order", 11200)]
+    acc.assistant_generations = [(full, 1000)]
+    transcript = [
+        {"role": "assistant", "content": "Welcome to Pipecat Pizza!"},  # committed prefix only
+        {"role": "user", "content": "I would like to order."},
+    ]
+    payload = acc.build_payload(tuner_config, transcript)
+    agent_rows = [s for s in payload.transcript_with_tool_calls if s.role == "agent"]
+    assert [r.text for r in agent_rows] == ["Welcome to Pipecat Pizza!"]  # kept, not dropped
+    assert agent_rows[0].start_ms == 1000  # timed
+
+
+def test_injected_assistant_not_dropped_when_no_generations_captured(tuner_config):
+    """Inert fallback: when no LLM frames were captured (assistant_generations empty), the
+    generation filter never runs and mid-conversation behavior is unchanged — an injected
+    assistant message is kept (as an untimed ghost), not dropped. Contrast with the
+    generations-populated case above."""
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = 0
+    acc.call_end_abs_ns = 30_000_000_000
+    acc.done = True
+    acc.speech_segments = [
+        _seg(0, "user", 1000, 2000, windows=[[1000, 2000]]),
+        _seg(1, "bot", 3000, 5000, spoken_text="Sure, one moment."),
+    ]
+    acc.latency_measurements = [_meas(0, 1, ttfb_ms=50)]
+    acc.user_transcriptions = [("place my order", 1000)]
+    # assistant_generations intentionally left empty
+    transcript = [
+        {"role": "user", "content": "Place my order."},
+        {"role": "assistant", "content": "Sure, one moment."},  # voiced
+        {"role": "assistant", "content": "Reassure the customer their order is safe."},  # injected
+    ]
+    payload = acc.build_payload(tuner_config, transcript)
+    agent_texts = [s.text for s in payload.transcript_with_tool_calls if s.role == "agent"]
+    # Without the generation signal the injected message is NOT dropped (kept, untimed).
+    assert "Reassure the customer their order is safe." in " ".join(agent_texts)
+
+
+def test_accumulator_llm_generation_buffering():
+    """on_llm_text chunks between start/end join into one generation; a missed End is flushed on
+    the next Start."""
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = 1_000_000_000
+    acc.on_llm_response_start()
+    acc.on_llm_text("Hi ")
+    acc.on_llm_text("there!")
+    acc.on_llm_response_end(1_002_000_000)  # 2ms after call start
+    assert acc.assistant_generations == [("Hi there!", 2)]
+    # A second response whose End frame never arrives is flushed when the next Start begins.
+    acc.on_llm_response_start()
+    acc.on_llm_text("Dangling text")
+    acc.on_llm_response_start()  # missed End → flush pending
+    assert acc.assistant_generations[-1][0] == "Dangling text"
+
+
 def test_user_interruption_flags_propagate(tuner_config):
     """When the user interrupts the agent, the agent row is flagged interrupted and the
     following user row is flagged as the interrupting turn."""

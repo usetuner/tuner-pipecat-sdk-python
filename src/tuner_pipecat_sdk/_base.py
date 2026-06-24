@@ -17,6 +17,9 @@ from pipecat.frames.frames import (
     EndFrame,
     FunctionCallInProgressFrame,
     FunctionCallResultFrame,
+    LLMFullResponseEndFrame,
+    LLMFullResponseStartFrame,
+    LLMTextFrame,
     MetricsFrame,
     StartFrame,
     TranscriptionFrame,
@@ -349,6 +352,18 @@ class _BaseObserver(BaseObserver):
             # Voiced TTS sentence, recorded on a timeline and assigned to a bot segment by
             # window at bot-stop (TTSTextFrames arrive before BotStartedSpeakingFrame).
             self._acc.on_tts_text(frame.text, timestamp_ns)
+
+        elif isinstance(frame, LLMFullResponseStartFrame):
+            self._acc.on_llm_response_start()
+
+        elif isinstance(frame, LLMFullResponseEndFrame):
+            self._acc.on_llm_response_end(timestamp_ns)
+
+        elif isinstance(frame, LLMTextFrame):
+            # Generated LLM text — the authoritative signal for which context assistant messages
+            # were actually generated (vs developer-injected {"role":"assistant"} messages). The
+            # assistant aggregator builds the context message from exactly these frames.
+            self._acc.on_llm_text(frame.text)
 
         elif isinstance(frame, UserStartedSpeakingFrame):
             self._acc.on_user_started_speaking(timestamp_ns)

@@ -364,6 +364,42 @@ def _drop_injected_user_messages(
     return kept, cursor
 
 
+def _drop_injected_assistant_messages(
+    grouped_messages: list[dict[str, Any]],
+    norm_generations: list[tuple[str, int]],
+    gen_cursor: int,
+) -> tuple[list[dict[str, Any]], list[int], int]:
+    """Keep only assistant messages the LLM actually generated, consuming generations in order.
+    A genuinely-generated message matches an ``LLMFullResponse`` capture; a developer-injected
+    ``{"role":"assistant"}`` context message matches none and is dropped — regardless of position.
+    This is the bot-side mirror of :func:`_drop_injected_user_messages` and uses the same
+    normalized bidirectional-containment rule, since the assistant aggregator builds the context
+    message from the very LLMTextFrames we are matching against (so the committed text equals the
+    generation, or is a prefix of it when the turn was interrupted).
+
+    Returns ``(kept_messages, kept_positions, new_cursor)`` — ``kept_positions`` are the indices
+    within ``grouped_messages`` that survived, so the caller can map back to physical message
+    indices for spoken/ghost detection.
+    """
+    kept: list[dict[str, Any]] = []
+    kept_positions: list[int] = []
+    cursor = gen_cursor
+    for pos, msg in enumerate(grouped_messages):
+        msg_norm = _normalize(msg.get("content", ""))
+        matched_at = -1
+        for i in range(cursor, len(norm_generations)):
+            gen_norm = norm_generations[i][0]
+            if gen_norm and (msg_norm in gen_norm or gen_norm in msg_norm):
+                matched_at = i
+                break
+        if matched_at == -1:
+            continue  # no LLM generation → developer-injected; drop
+        cursor = matched_at + 1
+        kept.append(msg)
+        kept_positions.append(pos)
+    return kept, kept_positions, cursor
+
+
 def enrich_transcript(
     acc: CallAccumulator,
     messages: list[dict[str, Any]],
@@ -383,6 +419,10 @@ def enrich_transcript(
     # provider that doesn't emit them) — then we fall back to the proactive-greeting and
     # no-window heuristics below.
     norm_transcriptions = [(_normalize(t), ms) for t, ms in acc.user_transcriptions]
+    # Authoritative real-vs-injected signal for assistant messages: a genuinely-generated message
+    # matches an LLMFullResponse capture; a developer-injected {"role":"assistant"} message matches
+    # none. Empty when no LLM frames were captured — then we fall back to the preamble-collapse.
+    norm_generations = [(_normalize(t), ms) for t, ms in acc.assistant_generations]
     meas_by_bot_id = {
         m.bot_segment_id: m for m in acc.latency_measurements if m.bot_segment_id is not None
     }
@@ -410,6 +450,7 @@ def enrich_transcript(
     win_cursor = 0
     bot_cursor = 0
     trans_cursor = 0  # next unconsumed STT transcription (real-vs-injected user matching)
+    gen_cursor = 0  # next unconsumed LLM generation (real-vs-injected assistant matching)
     next_turn_index = 0  # stable, unique, sequential index per rendered user/agent row
     seen_user_message = False
     last_agent_interrupted = False  # the user interrupts when the prior agent turn was cut off
@@ -498,15 +539,30 @@ def enrich_transcript(
             continue
 
         if role == "assistant":
+            group_start = message_idx
             grouped_messages, message_idx = collect_consecutive_assistant_messages(
                 messages, message_idx
             )
-            # In preamble position (before any user turn) consecutive assistant messages
-            # are a pre-seeded developer instruction followed by the real LLM response.
-            # Only the last message in the group was generated (and spoken) by the LLM.
-            if not seen_user_message and len(grouped_messages) > 1:
+            phys_indices = list(range(group_start, message_idx))  # 1:1 with grouped_messages
+            # Primary, position-independent filter: drop assistant messages with no matching LLM
+            # generation (developer-injected). Active only when LLM frames were captured.
+            if norm_generations:
+                grouped_messages, kept_positions, gen_cursor = _drop_injected_assistant_messages(
+                    grouped_messages, norm_generations, gen_cursor
+                )
+            # Fallback when no generations were captured: in preamble position (before any user
+            # turn) consecutive assistant messages are a pre-seeded developer instruction followed
+            # by the real LLM response — only the last was generated (and spoken) by the LLM.
+            elif not seen_user_message and len(grouped_messages) > 1:
                 grouped_messages = [grouped_messages[-1]]
-            final_msg_idx = message_idx - 1  # last message in the consecutive group
+                kept_positions = [len(phys_indices) - 1]
+            else:
+                kept_positions = list(range(len(phys_indices)))
+            if not grouped_messages:
+                continue  # all injected → no row
+            # Resolve the last *kept* physical index for spoken/ghost detection (a dropped
+            # trailing message must not be mistaken for the spoken one).
+            final_msg_idx = phys_indices[kept_positions[-1]]
 
             if final_msg_idx in spoken_indices and bot_cursor < len(bot_segs):
                 bot_seg = bot_segs[bot_cursor]

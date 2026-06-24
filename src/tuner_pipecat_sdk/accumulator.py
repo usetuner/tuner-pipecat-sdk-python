@@ -36,6 +36,13 @@ class CallAccumulator:
     # spoken (mirrors spoken_text/TTS matching on the bot side).
     user_transcriptions: list[tuple[str, int]] = field(default_factory=list)
 
+    # Finalized LLM generations, in order: (text, rel_ms). The assistant aggregator builds each
+    # assistant context message from exactly these LLMTextFrames, so a genuinely-generated message
+    # matches one of these; a developer-injected {"role":"assistant"} context message matches none.
+    # The enricher uses this as the authoritative real-vs-injected signal for assistant messages —
+    # the mirror of user_transcriptions on the bot side.
+    assistant_generations: list[tuple[str, int]] = field(default_factory=list)
+
     # Active turn tracking
     _active_turn_number: int | None = field(default=None, repr=False)
     # turn_number → user segment id, so on_turn_ended can target the right response.
@@ -56,6 +63,11 @@ class CallAccumulator:
     # Text generated for a response that was interrupted before it was voiced (no
     # BotStartedSpeaking) falls outside every window and is dropped — never marked spoken.
     _tts_timeline: list[tuple[str, int]] = field(default_factory=list, repr=False)
+
+    # In-progress LLM response text, accumulated across LLMTextFrames between
+    # LLMFullResponseStartFrame and LLMFullResponseEndFrame, then finalized into
+    # assistant_generations at the End frame.
+    _llm_response_buffer: list[str] = field(default_factory=list, repr=False)
 
     # Ordered pairing for latency observer callbacks (on_latency_measured then breakdown).
     _pending_latency_ms_queue: deque[int] = field(default_factory=deque, repr=False)
@@ -228,6 +240,31 @@ class CallAccumulator:
         window at on_bot_stopped (TTSTextFrames arrive before BotStartedSpeakingFrame)."""
         if text and text.strip():
             self._tts_timeline.append((text, self._rel_ms(timestamp_ns)))
+
+    def _finalize_llm_response(self, timestamp_ns: int) -> None:
+        """Join the buffered LLM text into one generation and record it."""
+        joined = "".join(self._llm_response_buffer).strip()
+        if joined:
+            self.assistant_generations.append((joined, self._rel_ms(timestamp_ns)))
+        self._llm_response_buffer = []
+
+    def on_llm_response_start(self) -> None:
+        """Begin a new LLM response. Flush any pending buffer first (robustness if a prior
+        End frame was missed), then reset."""
+        if self._llm_response_buffer:
+            self._finalize_llm_response(0)
+        self._llm_response_buffer = []
+
+    def on_llm_text(self, text: str) -> None:
+        """Accumulate a streamed LLM text chunk for the in-progress response."""
+        if text:
+            self._llm_response_buffer.append(text)
+
+    def on_llm_response_end(self, timestamp_ns: int) -> None:
+        """Finalize the in-progress LLM response into assistant_generations. The assistant
+        aggregator builds the context message from these same chunks, so this is the
+        authoritative real-vs-injected signal for assistant context messages."""
+        self._finalize_llm_response(timestamp_ns)
 
     def on_user_stopped_speaking(self, timestamp_ns: int) -> None:
         """Capture user stop_ms directly from VAD frame.
