@@ -111,7 +111,8 @@ def test_tts_text_for_never_voiced_response_is_dropped():
 def test_on_function_call_result_records_completion_in_registry():
     acc = CallAccumulator()
     acc.call_start_abs_ns = 1_000_000_000
-    acc.on_function_call_result("call_abc", 1_000_000_000 + 250_000_000)
+    frame = SimpleNamespace(function_name="f", tool_call_id="call_abc", result={"ok": True})
+    acc.on_function_call_result(frame, 1_000_000_000 + 250_000_000)
     assert acc.get_tool_completion_ms("call_abc") == 250
 
 

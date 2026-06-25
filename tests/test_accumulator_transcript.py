@@ -1,1142 +1,402 @@
-"""Accumulator transcript enrichment with tools, transitions, and gap-based merging."""
-
-import pytest
-
-from tuner_pipecat_sdk.accumulator import CallAccumulator
-from tuner_pipecat_sdk.models import LatencyMeasurement, SpeechSegment
-
-
-def _seg(seg_id, speaker, start, stop=None, **kw):
-    return SpeechSegment(id=seg_id, speaker=speaker, start_ms=start, stop_ms=stop, **kw)
-
-
-def _meas(user_id, bot_id, **kw):
-    return LatencyMeasurement(user_segment_id=user_id, bot_segment_id=bot_id, **kw)
-
-
-def test_enrich_transcript_tool_call_and_result(tuner_config):
-    acc = CallAccumulator()
-    base_ns = 1_000_000_000
-    acc.call_start_abs_ns = base_ns
-    acc.call_end_abs_ns = base_ns + 2_000_000_000
-    acc.done = True
-    acc.registry.record_invocation_ns("tc-1", base_ns + 60_000_000)
-    acc.registry.record_completion_ns("tc-1", base_ns + 90_000_000)
-    acc.speech_segments = [
-        _seg(0, "user", 100, 150),
-        _seg(1, "bot", 200, 250),
-    ]
-    acc.latency_measurements = [_meas(0, 1, ttfb_ms=50, llm_ms=30, tts_ms=20, e2e_ms=50)]
-    transcript = [
-        {"role": "user", "content": "Transfer me"},
-        {
-            "role": "assistant",
-            "tool_calls": [
-                {"id": "tc-1", "function": {"name": "transfer", "arguments": '{"to": "sales"}'}}
-            ],
-        },
-        {"role": "tool", "tool_call_id": "tc-1", "content": '{"ok": true}'},
-        {"role": "assistant", "content": "Done."},
-    ]
-    payload = acc.build_payload(tuner_config, transcript)
-    roles = [segment.role for segment in payload.transcript_with_tool_calls]
-    assert "agent_function" in roles
-    assert "agent_result" in roles
-    assert "node_transition" not in roles
-    user_segments = [s for s in payload.transcript_with_tool_calls if s.role == "user"]
-    agent_segments = [s for s in payload.transcript_with_tool_calls if s.role == "agent"]
-    assert "asr_node_ttft" not in user_segments[0].metadata
-    assert agent_segments[0].metadata["tts_node_ttfb"] == 50
-
-    func_segments = [s for s in payload.transcript_with_tool_calls if s.role == "agent_function"]
-    result_segments = [s for s in payload.transcript_with_tool_calls if s.role == "agent_result"]
-    assert func_segments[0].start_ms == 60
-    assert result_segments[0].start_ms == 90
-    assert func_segments[0].start_ms != result_segments[0].start_ms
-    assert result_segments[0].text is None
-    assert result_segments[0].tool.result == {"ok": True}
-
-
-def test_consecutive_assistant_messages_merged_into_one_segment(tuner_config):
-    acc = CallAccumulator()
-    acc.call_start_abs_ns = 0
-    acc.call_end_abs_ns = 2_000_000_000
-    acc.done = True
-    acc.speech_segments = [_seg(0, "user", 10, 50), _seg(1, "bot", 100, 300)]
-    acc.latency_measurements = [_meas(0, 1, ttfb_ms=10, llm_ms=20, tts_ms=30)]
-    transcript = [
-        {"role": "user", "content": "Hello"},
-        {"role": "assistant", "content": "Hi there,"},
-        {"role": "assistant", "content": "how can I help?"},
-    ]
-    payload = acc.build_payload(tuner_config, transcript)
-    agent_segments = [s for s in payload.transcript_with_tool_calls if s.role == "agent"]
-    assert len(agent_segments) == 1
-    assert agent_segments[0].text == "Hi there, how can I help?"
-    assert agent_segments[0].start_ms == 100
-    assert agent_segments[0].end_ms == 300
-
-
-def test_enrich_transcript_uses_assistant_turn_events_to_skip_ghost_messages(tuner_config):
-    # Ghost messages appear in the same user-turn window as the spoken text, before a tool call
-    # triggers a node transition. The last plain assistant text in the window is the spoken one.
-    acc = CallAccumulator()
-    acc.call_start_abs_ns = 0
-    acc.call_end_abs_ns = 2_000_000_000
-    acc.done = True
-    acc.speech_segments = [_seg(0, "user", 100, 200), _seg(1, "bot", 300, 500)]
-    acc.latency_measurements = [_meas(0, 1, ttfb_ms=20, llm_ms=10, tts_ms=10)]
-    transcript = [
-        {"role": "user", "content": "hi"},
-        {"role": "assistant", "content": "Draft answer"},  # ghost — not the last in window
-        {
-            "role": "assistant",
-            "tool_calls": [{"id": "c1", "function": {"name": "choose", "arguments": "{}"}}],
-        },
-        {"role": "tool", "tool_call_id": "c1", "content": "ok"},
-        {"role": "assistant", "content": "Spoken answer"},  # spoken — last plain text in window
-    ]
-    payload = acc.build_payload(tuner_config, transcript)
-    agent_segments = [s for s in payload.transcript_with_tool_calls if s.role == "agent"]
-    assert len(agent_segments) == 2
-    assert agent_segments[0].text == "Draft answer"
-    assert agent_segments[0].start_ms == 0
-    assert agent_segments[1].text == "Spoken answer"
-    assert agent_segments[1].start_ms == 300
-
-
-def test_last_plain_assistant_in_window_gets_segment_by_order_not_text(tuner_config):
-    acc = CallAccumulator()
-    acc.call_start_abs_ns = 0
-    acc.call_end_abs_ns = 1_000_000_000
-    acc.done = True
-    acc.speech_segments = [_seg(0, "user", 100, 200), _seg(1, "bot", 300, 600)]
-    acc.latency_measurements = [_meas(0, 1, ttfb_ms=30, llm_ms=10, tts_ms=10)]
-    transcript = [
-        {"role": "user", "content": "hello"},
-        {"role": "assistant", "content": "Draft answer"},
-        {"role": "assistant", "content": "Final spoken answer"},
-    ]
-    payload = acc.build_payload(tuner_config, transcript)
-    agent_segments = [s for s in payload.transcript_with_tool_calls if s.role == "agent"]
-    assert len(agent_segments) == 1
-    assert agent_segments[0].text == "Draft answer Final spoken answer"
-    assert agent_segments[0].start_ms == 300
-    assert agent_segments[0].end_ms == 600
-
-
-def test_agent_metadata_node_comes_from_bot_segment(tuner_config):
-    acc = CallAccumulator()
-    acc.call_start_abs_ns = 0
-    acc.call_end_abs_ns = 1_000_000_000
-    acc.done = True
-    acc.speech_segments = [_seg(0, "user", 100, 200), _seg(1, "bot", 300, 600, node="size")]
-    acc.latency_measurements = [_meas(0, 1, ttfb_ms=30, llm_ms=10, tts_ms=10)]
-    transcript = [
-        {"role": "user", "content": "hello"},
-        {"role": "assistant", "content": "What size pizza would you like?"},
-    ]
-    payload = acc.build_payload(tuner_config, transcript)
-    agent_seg = next(s for s in payload.transcript_with_tool_calls if s.role == "agent")
-    assert agent_seg.metadata["node"] == "size"
-
-
-def test_all_trailing_assistant_messages_after_last_user_are_spoken(tuner_config):
-    acc = CallAccumulator()
-    acc.call_start_abs_ns = 0
-    acc.call_end_abs_ns = 2_000_000_000
-    acc.done = True
-    acc.speech_segments = [_seg(0, "user", 600, 700), _seg(1, "bot", 800, 1200)]
-    acc.latency_measurements = [_meas(0, 1, ttfb_ms=20, llm_ms=10, tts_ms=10)]
-    transcript = [
-        {"role": "user", "content": "thanks"},
-        {"role": "assistant", "content": "Thank you for your order!"},
-        {"role": "assistant", "content": "Enjoy your meal!"},
-    ]
-    payload = acc.build_payload(tuner_config, transcript)
-    agent_segments = [s for s in payload.transcript_with_tool_calls if s.role == "agent"]
-    assert len(agent_segments) == 1
-    assert agent_segments[0].text == "Thank you for your order! Enjoy your meal!"
-    assert agent_segments[0].start_ms == 800
-
-
-def test_agent_result_uses_registry_completion_when_available(tuner_config):
-    """agent_result.start_ms uses the registry completion time, not invocation_ms."""
-    acc = CallAccumulator()
-    base_ns = 1_000_000_000
-    acc.call_start_abs_ns = base_ns
-    acc.call_end_abs_ns = base_ns + 2_000_000_000
-    acc.done = True
-    acc.registry.record_completion_ns("call_xyz", base_ns + 350_000_000)
-    transcript = [
-        {"role": "user", "content": "hello"},
-        {
-            "role": "assistant",
-            "tool_calls": [{"id": "call_xyz", "function": {"name": "greet", "arguments": "{}"}}],
-        },
-        {"role": "tool", "tool_call_id": "call_xyz", "content": '{"ok": true}'},
-        {"role": "assistant", "content": "Done!"},
-    ]
-    payload = acc.build_payload(tuner_config, transcript)
-    result_segs = [s for s in payload.transcript_with_tool_calls if s.role == "agent_result"]
-    assert len(result_segs) == 1
-    assert result_segs[0].start_ms == 350
-    assert result_segs[0].end_ms is None
-
-
-def test_parallel_same_name_tools_use_distinct_invocation_ms_by_id(tuner_config):
-    """Two add_topping calls with different tool_call_ids get distinct invocation times."""
-    acc = CallAccumulator()
-    base_ns = 1_000_000_000
-    acc.call_start_abs_ns = base_ns
-    acc.call_end_abs_ns = base_ns + 2_000_000_000
-    acc.done = True
-    acc.registry.record_invocation_ns("tc-a", base_ns + 100_000_000)
-    acc.registry.record_invocation_ns("tc-b", base_ns + 200_000_000)
-    transcript = [
-        {"role": "user", "content": "add mushrooms and olives"},
-        {
-            "role": "assistant",
-            "tool_calls": [
-                {
-                    "id": "tc-a",
-                    "function": {"name": "add_topping", "arguments": '{"topping": "mushrooms"}'},
-                },
-                {
-                    "id": "tc-b",
-                    "function": {"name": "add_topping", "arguments": '{"topping": "olives"}'},
-                },
-            ],
-        },
-        {"role": "tool", "tool_call_id": "tc-a", "content": '{"ok": true}'},
-        {"role": "tool", "tool_call_id": "tc-b", "content": '{"ok": true}'},
-        {"role": "assistant", "content": "Added both!"},
-    ]
-    payload = acc.build_payload(tuner_config, transcript)
-    func_segs = [s for s in payload.transcript_with_tool_calls if s.role == "agent_function"]
-    assert len(func_segs) == 2
-    assert func_segs[0].start_ms == 100
-    assert func_segs[1].start_ms == 200
-
-
-def test_agent_result_without_registry_completion_is_zero(tuner_config):
-    """Without registry completion, agent_result timing stays unset (0)."""
-    acc = CallAccumulator()
-    base_ns = 1_000_000_000
-    acc.call_start_abs_ns = base_ns
-    acc.call_end_abs_ns = base_ns + 2_000_000_000
-    acc.done = True
-    acc.registry.record_invocation_ns("tc-1", base_ns + 75_000_000)
-    transcript = [
-        {"role": "user", "content": "transfer"},
-        {
-            "role": "assistant",
-            "tool_calls": [{"id": "tc-1", "function": {"name": "transfer", "arguments": "{}"}}],
-        },
-        {"role": "tool", "tool_call_id": "tc-1", "content": '{"ok": true}'},
-        {"role": "assistant", "content": "done"},
-    ]
-    payload = acc.build_payload(tuner_config, transcript)
-    result_seg = next(s for s in payload.transcript_with_tool_calls if s.role == "agent_result")
-    assert result_seg.start_ms == 0
-
-
-def test_payload_monotonic_guard_corrects_agent_end_before_start(tuner_config):
-    acc = CallAccumulator()
-    acc.call_start_abs_ns = 0
-    acc.call_end_abs_ns = 10_000_000_000
-    acc.done = True
-    acc.speech_segments = [_seg(0, "user", 500, 1000), _seg(1, "bot", 5000, 2000)]
-    acc.latency_measurements = [_meas(0, 1, ttfb_ms=10, llm_ms=20, tts_ms=30)]
-    transcript = [
-        {"role": "user", "content": "Hi"},
-        {"role": "assistant", "content": "Hello"},
-    ]
-    payload = acc.build_payload(tuner_config, transcript)
-    agent_seg = next(s for s in payload.transcript_with_tool_calls if s.role == "agent")
-    assert agent_seg.start_ms == 5000
-    assert agent_seg.end_ms == 5000
-
-
-def test_agent_result_with_no_matching_tool_call_has_null_function_name(tuner_config):
-    """Tool result with no matching tool call in context — function_name should be None."""
-    acc = CallAccumulator()
-    base_ns = 1_000_000_000
-    acc.call_start_abs_ns = base_ns
-    acc.call_end_abs_ns = base_ns + 2_000_000_000
-    acc.done = True
-    acc.registry.record_completion_ns("orphan-id", base_ns + 200_000_000)
-    transcript = [
-        {"role": "user", "content": "hello"},
-        {"role": "tool", "tool_call_id": "orphan-id", "content": '{"ok": true}'},
-        {"role": "assistant", "content": "Done!"},
-    ]
-    payload = acc.build_payload(tuner_config, transcript)
-    result_segs = [s for s in payload.transcript_with_tool_calls if s.role == "agent_result"]
-    assert len(result_segs) == 1
-    assert result_segs[0].tool is not None
-    assert result_segs[0].tool.name is None
-    assert result_segs[0].start_ms == 200
-
-
-def test_agent_result_non_json_uses_text_not_tool_result(tuner_config):
-    acc = CallAccumulator()
-    acc.call_start_abs_ns = 0
-    acc.call_end_abs_ns = 2_000_000_000
-    acc.done = True
-    transcript = [
-        {"role": "user", "content": "hello"},
-        {
-            "role": "assistant",
-            "tool_calls": [{"id": "tc-1", "function": {"name": "do_thing", "arguments": "{}"}}],
-        },
-        {"role": "tool", "tool_call_id": "tc-1", "content": "plain text result"},
-    ]
-    payload = acc.build_payload(tuner_config, transcript)
-    result_seg = next(s for s in payload.transcript_with_tool_calls if s.role == "agent_result")
-    assert result_seg.text == "plain text result"
-    assert result_seg.tool.result is None
-
-
-@pytest.mark.parametrize("injected_role", ["assistant", "system"])
-def test_pre_seeded_preamble_instruction_excluded_from_transcript(tuner_config, injected_role):
-    """Developer-injected instructions before the first LLM response — whether
-    role=assistant or role=system — must not appear in the output transcript."""
-    acc = CallAccumulator()
-    acc.call_start_abs_ns = 0
-    acc.call_end_abs_ns = 2_000_000_000
-    acc.done = True
-    # Proactive greeting: bot speaks first, no real user segment.
-    acc.speech_segments = [_seg(0, "bot", 500, 2000, is_proactive=True)]
-    acc.latency_measurements = [
-        _meas(-1, 0, is_proactive=True, ttfb_ms=100, llm_ms=2120, tts_ms=1940)
-    ]
-    transcript = [
-        {
-            "role": injected_role,
-            "content": "Greet the customer warmly and ask which pizza they would like.",
-        },
-        {"role": "assistant", "content": "Hi there, thanks for calling Pipecat Pizza!"},
-    ]
-    payload = acc.build_payload(tuner_config, transcript)
-    agent_segments = [s for s in payload.transcript_with_tool_calls if s.role == "agent"]
-    assert len(agent_segments) == 1
-    assert agent_segments[0].text == "Hi there, thanks for calling Pipecat Pizza!"
-
-
-def test_injected_user_message_without_speech_excluded_from_transcript(tuner_config):
-    """Mid-conversation injected user messages (silence handlers) produce no VAD speech
-    window, so they must not appear as Customer rows; the bot's reply still does."""
-    acc = CallAccumulator()
-    acc.call_start_abs_ns = 0
-    acc.call_end_abs_ns = 60_000_000_000
-    acc.done = True
-    acc.speech_segments = [
-        _seg(0, "user", 500, 1000, windows=[[500, 1000]]),  # one real utterance, one window
-        _seg(1, "bot", 2000, 5000),
-        _seg(2, "bot", 46000, 47000),  # triggered by injected user message — no user window
-    ]
-    acc.latency_measurements = [
-        _meas(0, 1, ttfb_ms=100, llm_ms=1130, tts_ms=1010),
-        _meas(0, 2),  # answers user seg 0 again — no new user turn fired
-    ]
-    transcript = [
-        {"role": "user", "content": "Yes, sir. My name is Sallym."},
-        {"role": "assistant", "content": "Hi Sallym, it's great to connect with you."},
-        {
-            "role": "user",
-            "content": "The user has been quiet. Politely and briefly ask if they're still there.",
-        },
-        {"role": "assistant", "content": "Are you still there?"},
-    ]
-    payload = acc.build_payload(tuner_config, transcript)
-    user_segments = [s for s in payload.transcript_with_tool_calls if s.role == "user"]
-    agent_segments = [s for s in payload.transcript_with_tool_calls if s.role == "agent"]
-    assert len(user_segments) == 1
-    assert user_segments[0].text == "Yes, sir. My name is Sallym."
-    assert len(agent_segments) == 2
-    assert agent_segments[1].text == "Are you still there?"
-    assert agent_segments[1].start_ms == 46000
-
-
-def test_leading_user_role_kickoff_does_not_steal_real_windows(tuner_config):
-    """A developer kickoff injected as {"role":"user"} (instead of "assistant") precedes the
-    proactive greeting, so it cannot be real speech. It must be dropped — not steal the first
-    real utterance's window and shift every later user message by one (the Google-STT
-    out-of-sync regression where the final utterance fell off the end and was lost)."""
-    acc = CallAccumulator()
-    acc.call_start_abs_ns = 0
-    acc.call_end_abs_ns = 60_000_000_000
-    acc.done = True
-    acc.speech_segments = [
-        _seg(0, "bot", 500, 2000, is_proactive=True, spoken_text="Hi there! Welcome."),
-        _seg(1, "user", 5000, 6000, windows=[[5000, 6000]]),  # "I would like a margherita."
-        _seg(2, "bot", 7000, 9000, spoken_text="Great choice! What size?"),
-        _seg(3, "user", 11000, 12000, windows=[[11000, 12000]]),  # "Small."
-    ]
-    acc.latency_measurements = [
-        _meas(-1, 0, is_proactive=True, ttfb_ms=100),
-        _meas(1, 2, ttfb_ms=50),
-    ]
-    transcript = [
-        {"role": "user", "content": "Greet the customer warmly and present today's menu."},
-        {"role": "assistant", "content": "Hi there! Welcome."},
-        {"role": "user", "content": "I would like a margherita."},
-        {"role": "assistant", "content": "Great choice! What size?"},
-        {"role": "user", "content": "Small."},
-    ]
-    payload = acc.build_payload(tuner_config, transcript)
-    user_rows = [s for s in payload.transcript_with_tool_calls if s.role == "user"]
-    # Injected kickoff dropped; both real utterances kept and correctly timed (not shifted).
-    assert [r.text for r in user_rows] == ["I would like a margherita.", "Small."]
-    assert user_rows[0].start_ms == 5000
-    assert user_rows[1].start_ms == 11000  # the last utterance is NOT dropped
-
-
-def test_google_stt_pizza_order_user_role_kickoff_regression(tuner_config):
-    """Faithful replay of the real Google-STT pizza-order call (role=user kickoff) that
-    regressed. Reconstructed from the observed accumulator state (proactive greeting + three
-    real user turns). Before the fix the injected kickoff stole the first window, shifting
-    every user row by one and dropping the final 'Yes.' — this locks that in so we never have
-    to reproduce it by hand again."""
-    acc = CallAccumulator()
-    acc.call_start_abs_ns = 0
-    acc.call_end_abs_ns = 47_000_000_000
-    acc.done = True
-    # Segments exactly as logged: (id, speaker, start, stop, is_proactive, has_spoken_text)
-    #   (0,'user',1,None,True,False) (1,'bot',930,9605,True,True) (2,'user',11090,12730,...) ...
-    acc.speech_segments = [
-        _seg(0, "user", 1, None, is_proactive=True),  # ghost user turn before the greeting
-        _seg(1, "bot", 930, 9605, is_proactive=True, spoken_text="Welcome to Pipecat Pizza!"),
-        _seg(2, "user", 11090, 12730, windows=[[11090, 12730]]),  # "I would like to order..."
-        _seg(
-            3,
-            "bot",
-            16084,
-            21481,
-            spoken_text=(
-                "Great choice! What size would you like for your margherita pizza? "
-                "We have small, medium, and large."
-            ),
-        ),
-        _seg(4, "user", 22369, 24016, windows=[[22369, 24016]]),  # "I want medium."
-        _seg(
-            5,
-            "bot",
-            26789,
-            31342,
-            spoken_text=(
-                "So that's one medium margherita pizza for a total of 12 dollars "
-                "and 99 cents. Does that sound right?"
-            ),
-        ),
-        _seg(6, "user", 31916, 33801, windows=[[31916, 33801]]),  # "Yes."
-    ]
-    acc.latency_measurements = [
-        _meas(0, 1, is_proactive=True, ttfb_ms=451),
-        _meas(2, 3, ttfb_ms=905),
-        _meas(4, 5, ttfb_ms=508),
-    ]
-    transcript = [
-        {"role": "user", "content": "Greet the customer warmly, present the menu, and ask "
-         "which pizza they would like."},
-        {"role": "assistant", "content": "Welcome to Pipecat Pizza!"},
-        {"role": "user", "content": "I would like to order more greater."},
-        {"role": "assistant", "tool_calls": [
-            {"id": "p1", "function": {"name": "choose_pizza",
-                                      "arguments": '{"pizza": "margherita"}'}}
-        ]},
-        {"role": "tool", "tool_call_id": "p1",
-         "content": '{"pizza": "margherita", "price": 10.99}'},
-        {"role": "assistant", "content": "Great choice! What size would you like for your "
-         "margherita pizza? We have small, medium, and large."},
-        {"role": "user", "content": "I want medium."},
-        {"role": "assistant", "tool_calls": [
-            {"id": "s1", "function": {"name": "choose_size", "arguments": '{"size": "medium"}'}}
-        ]},
-        {"role": "tool", "tool_call_id": "s1", "content": '{"size": "medium", "total": 12.99}'},
-        {"role": "assistant", "content": "So that's one medium margherita pizza for a total "
-         "of 12 dollars and 99 cents. Does that sound right?"},
-        {"role": "user", "content": "Yes."},
-    ]
-    payload = acc.build_payload(tuner_config, transcript)
-    user_rows = [s for s in payload.transcript_with_tool_calls if s.role == "user"]
-    user_texts = [r.text for r in user_rows]
-    # The injected kickoff must NOT be rendered as a user turn.
-    assert "Greet the customer warmly, present the menu, and ask which pizza they would like." \
-        not in user_texts
-    # The three real utterances appear, in order, each timed from its OWN window (not shifted).
-    assert user_texts == ["I would like to order more greater.", "I want medium.", "Yes."]
-    assert [r.start_ms for r in user_rows] == [11090, 22369, 31916]
-    # The final "Yes." is preserved (the old positional code dropped it off the end).
-    assert user_texts[-1] == "Yes."
-
-
-def test_injected_user_message_dropped_via_transcription_any_position(tuner_config):
-    """Primary path: when STT transcriptions are captured (pipeline-level observer), a
-    developer-injected {"role":"user"} message matches no transcription and is dropped
-    regardless of position — including mid-call, where the proactive-greeting fallback would
-    not apply. Real utterances keep their own windows."""
-    acc = CallAccumulator()
-    acc.call_start_abs_ns = 0
-    acc.call_end_abs_ns = 60_000_000_000
-    acc.done = True
-    acc.speech_segments = [
-        _seg(0, "user", 500, 1000, windows=[[500, 1000]]),  # "Yes, my name is Sallym."
-        _seg(1, "bot", 2000, 5000, spoken_text="Hi Sallym."),
-        _seg(2, "bot", 46000, 47000, spoken_text="Are you still there?"),  # answers injected msg
-    ]
-    acc.latency_measurements = [_meas(0, 1, ttfb_ms=100), _meas(0, 2)]
-    # Only the real utterance was transcribed; the mid-call silence handler was not.
-    acc.user_transcriptions = [("Yes, my name is Sallym.", 600)]
-    transcript = [
-        {"role": "user", "content": "Yes, my name is Sallym."},
-        {"role": "assistant", "content": "Hi Sallym."},
-        {"role": "user", "content": "The user has been quiet. Ask if they're still there."},
-        {"role": "assistant", "content": "Are you still there?"},
-    ]
-    payload = acc.build_payload(tuner_config, transcript)
-    user_rows = [s for s in payload.transcript_with_tool_calls if s.role == "user"]
-    agent_rows = [s for s in payload.transcript_with_tool_calls if s.role == "agent"]
-    assert [r.text for r in user_rows] == ["Yes, my name is Sallym."]
-    assert [r.text for r in agent_rows] == ["Hi Sallym.", "Are you still there?"]
-
-
-def test_leading_kickoff_dropped_via_transcription_without_proactive_flag(tuner_config):
-    """Primary path also covers the leading kickoff via transcription matching alone — it does
-    not depend on the proactive-greeting fallback."""
-    acc = CallAccumulator()
-    acc.call_start_abs_ns = 0
-    acc.call_end_abs_ns = 60_000_000_000
-    acc.done = True
-    acc.speech_segments = [
-        _seg(0, "bot", 500, 2000, spoken_text="Hi there! Welcome."),  # NOT flagged proactive
-        _seg(1, "user", 5000, 6000, windows=[[5000, 6000]]),
-        _seg(2, "bot", 7000, 9000, spoken_text="Great, coming up."),
-    ]
-    acc.latency_measurements = [_meas(-1, 0), _meas(1, 2, ttfb_ms=50)]
-    acc.user_transcriptions = [("A margherita please.", 5000)]
-    transcript = [
-        {"role": "user", "content": "Greet the customer and present the menu."},  # injected
-        {"role": "assistant", "content": "Hi there! Welcome."},
-        {"role": "user", "content": "A margherita please."},
-        {"role": "assistant", "content": "Great, coming up."},
-    ]
-    payload = acc.build_payload(tuner_config, transcript)
-    user_rows = [s for s in payload.transcript_with_tool_calls if s.role == "user"]
-    assert [r.text for r in user_rows] == ["A margherita please."]
-    assert user_rows[0].start_ms == 5000
-
-
-def test_outbound_user_speaks_first_kickoff_not_dropped(tuner_config):
-    """Guard against over-dropping: when the user speaks first (no proactive greeting), a
-    leading user message is real and must be kept."""
-    acc = CallAccumulator()
-    acc.call_start_abs_ns = 0
-    acc.call_end_abs_ns = 10_000_000_000
-    acc.done = True
-    acc.speech_segments = [
-        _seg(0, "user", 150, 2000, windows=[[150, 2000]]),
-        _seg(1, "bot", 2500, 5000, spoken_text="Hi there! This is Sam."),
-    ]
-    acc.latency_measurements = [_meas(0, 1, ttfb_ms=50)]
-    transcript = [
-        {"role": "user", "content": "Hello?"},
-        {"role": "assistant", "content": "Hi there! This is Sam."},
-    ]
-    payload = acc.build_payload(tuner_config, transcript)
-    user_rows = [s for s in payload.transcript_with_tool_calls if s.role == "user"]
-    assert [r.text for r in user_rows] == ["Hello?"]
-    assert user_rows[0].start_ms == 150
-
-
-def test_coalesced_two_utterance_turn_merges_without_stealing_next_segment(tuner_config):
-    """Two consecutive user messages = one coalesced turn (one segment, two windows). They
-    merge into one row and must NOT consume the next turn's segment (the regression)."""
-    acc = CallAccumulator()
-    acc.call_start_abs_ns = 0
-    acc.call_end_abs_ns = 30_000_000_000
-    acc.done = True
-    acc.speech_segments = [
-        _seg(0, "user", 100, 1000, windows=[[100, 500], [600, 1000]]),  # turn 1: 2 utterances
-        _seg(1, "bot", 1500, 3000),
-        _seg(2, "user", 5000, 6000, windows=[[5000, 6000]]),  # turn 2
-        _seg(3, "bot", 7000, 9000),
-    ]
-    acc.latency_measurements = [_meas(0, 1, ttfb_ms=50), _meas(2, 3, ttfb_ms=50)]
-    transcript = [
-        {"role": "user", "content": "I would like to order"},
-        {"role": "user", "content": "margarita."},
-        {"role": "assistant", "content": "Great choice! What size?"},
-        {"role": "user", "content": "Small."},
-        {"role": "assistant", "content": "Got it."},
-    ]
-    payload = acc.build_payload(tuner_config, transcript)
-    user_rows = [s for s in payload.transcript_with_tool_calls if s.role == "user"]
-    assert len(user_rows) == 2
-    assert user_rows[0].text == "I would like to order margarita."
-    assert user_rows[0].start_ms == 100
-    assert user_rows[0].metadata["fragments"] == 2
-    assert user_rows[1].text == "Small."
-    assert user_rows[1].start_ms == 5000  # kept its own segment — not stolen
-
-
-def test_silence_gap_within_one_turn_splits_via_windows(tuner_config):
-    """User speaks, waits (bot never replies), speaks again — one coalesced turn with two
-    windows far apart. The gap splits them into two rows so the silence stays visible."""
-    acc = CallAccumulator()
-    acc.call_start_abs_ns = 0
-    acc.call_end_abs_ns = 60_000_000_000
-    acc.done = True
-    acc.speech_segments = [
-        _seg(0, "user", 200, 9500, windows=[[200, 1000], [9000, 9500]]),  # 8s gap between
-        _seg(1, "bot", 10000, 12000),
-    ]
-    acc.latency_measurements = [_meas(0, 1, ttfb_ms=100)]
-    transcript = [
-        {"role": "user", "content": "Book me a flight"},
-        {"role": "user", "content": "Are you still there?"},
-        {"role": "assistant", "content": "Yes I am here!"},
-    ]
-    payload = acc.build_payload(tuner_config, transcript)
-    rows = payload.transcript_with_tool_calls
-    user_rows = [s for s in rows if s.role == "user"]
-    assert [r.text for r in user_rows] == ["Book me a flight", "Are you still there?"]
-    assert user_rows[0].start_ms == 200
-    assert user_rows[1].start_ms == 9000  # gap preserved as a separate row
-    # Two rows from one coalesced turn must still get DISTINCT, sequential turn_index.
-    turn_indices = [r.metadata["turn_index"] for r in rows if "turn_index" in r.metadata]
-    assert turn_indices == sorted(set(turn_indices))  # unique and ascending
-
-
-def test_turn_index_is_unique_per_row_across_a_coalesced_turn(tuner_config):
-    """Regression for the duplicate-turn_index bug: a coalesced turn that splits into two
-    rows (two utterances around a tool call, like 'I can take medium.' then 'do you have
-    Coke?') must give each rendered row a distinct, sequential turn_index — not the shared
-    segment id."""
-    acc = CallAccumulator()
-    acc.call_start_abs_ns = 0
-    acc.call_end_abs_ns = 60_000_000_000
-    acc.done = True
-    acc.speech_segments = [
-        _seg(0, "bot", 500, 2000, is_proactive=True),  # greeting
-        # one user turn, two utterances split by a tool call (gap > merge threshold)
-        _seg(1, "user", 5000, 9000, windows=[[5000, 6000], [8000, 9000]]),
-        _seg(2, "bot", 10000, 12000),
-    ]
-    acc.latency_measurements = [
-        _meas(-1, 0, is_proactive=True, ttfb_ms=100),
-        _meas(1, 2, ttfb_ms=50),
-    ]
-    transcript = [
-        {"role": "assistant", "content": "Hi! What would you like?"},
-        {"role": "user", "content": "I can take medium."},
-        {
-            "role": "assistant",
-            "tool_calls": [{"id": "cs", "function": {"name": "choose_size", "arguments": "{}"}}],
-        },
-        {"role": "tool", "tool_call_id": "cs", "content": '{"size": "medium"}'},
-        {"role": "user", "content": "By the way, do you have Coke?"},
-        {"role": "assistant", "content": "Sorry, only pizza."},
-    ]
-    payload = acc.build_payload(tuner_config, transcript)
-    rows = payload.transcript_with_tool_calls
-    user_rows = [s for s in rows if s.role == "user"]
-    # The single coalesced turn produced two distinct rows...
-    assert [r.text for r in user_rows] == ["I can take medium.", "By the way, do you have Coke?"]
-    assert user_rows[0].metadata["turn_index"] != user_rows[1].metadata["turn_index"]
-    # ...and every row carrying a turn_index has a unique, ascending value.
-    indices = [r.metadata["turn_index"] for r in rows if "turn_index" in r.metadata]
-    assert len(indices) == len(set(indices))
-    assert indices == sorted(indices)
-
-
-def test_user_speaks_during_tool_call_is_kept(tuner_config):
-    """A real utterance spoken while a tool runs fires no turn-start, so its VAD window is
-    appended to the active (previous) user segment. It must still be rendered and timed
-    from that window — not dropped."""
-    acc = CallAccumulator()
-    acc.call_start_abs_ns = 0
-    acc.call_end_abs_ns = 60_000_000_000
-    acc.done = True
-    acc.registry.record_invocation_ns("tc1", 28_000_000)
-    acc.speech_segments = [
-        # One user turn, two utterances: "margarita" then "Coke" spoken during the tool call.
-        _seg(0, "user", 27101, 39877, stt_ms=179, windows=[[27101, 27483], [37053, 39877]]),
-        _seg(1, "bot", 40000, 46000),  # "I'm sorry..." reply
-    ]
-    acc.latency_measurements = [_meas(0, 1, ttfb_ms=377)]
-    transcript = [
-        {"role": "user", "content": "I would like to order margarita."},
-        {
-            "role": "assistant",
-            "tool_calls": [{"id": "tc1", "function": {"name": "choose_pizza", "arguments": "{}"}}],
-        },
-        {"role": "tool", "tool_call_id": "tc1", "content": '{"pizza": "margherita"}'},
-        {"role": "user", "content": "Can I also order, a Coke?"},
-        {"role": "assistant", "content": "I'm sorry, we only offer pizzas here."},
-    ]
-    payload = acc.build_payload(tuner_config, transcript)
-    segs = payload.transcript_with_tool_calls
-    user_rows = [s for s in segs if s.role == "user"]
-    assert [r.text for r in user_rows] == [
-        "I would like to order margarita.",
-        "Can I also order, a Coke?",
-    ]
-    coke = next(s for s in segs if s.text == "Can I also order, a Coke?")
-    assert coke.start_ms == 37053  # timed from its own VAD window
-
-
-def test_outbound_call_user_speaks_first_is_not_filtered(tuner_config):
-    """Outbound calls where the callee speaks before the bot must keep the real user row."""
-    acc = CallAccumulator()
-    acc.call_start_abs_ns = 0
-    acc.call_end_abs_ns = 10_000_000_000
-    acc.done = True
-    acc.speech_segments = [_seg(0, "user", 150, 2000), _seg(1, "bot", 2500, 5000)]
-    acc.latency_measurements = [_meas(0, 1, ttfb_ms=50, llm_ms=800, tts_ms=500, e2e_ms=500)]
-    transcript = [
-        {"role": "user", "content": "Hello?"},
-        {"role": "assistant", "content": "Hi there! This is Sam calling from Acme."},
-    ]
-    payload = acc.build_payload(tuner_config, transcript)
-    user_segments = [s for s in payload.transcript_with_tool_calls if s.role == "user"]
-    agent_segments = [s for s in payload.transcript_with_tool_calls if s.role == "agent"]
-    assert len(user_segments) == 1
-    assert user_segments[0].text == "Hello?"
-    assert user_segments[0].start_ms == 150
-    assert len(agent_segments) == 1
-    assert agent_segments[0].start_ms == 2500
-
-
-def test_silence_gap_splits_into_two_user_rows(tuner_config):
-    """The triggering bug: user speaks, waits through a long silence, speaks again — the
-    two utterances must stay as separate rows so the gap is visible."""
-    acc = CallAccumulator()
-    acc.call_start_abs_ns = 0
-    acc.call_end_abs_ns = 60_000_000_000
-    acc.done = True
-    acc.speech_segments = [
-        _seg(0, "user", 200, 1000),  # "Book me a flight"
-        _seg(1, "user", 9000, 9500),  # 8s later: "Are you still there?"
-        _seg(2, "bot", 10000, 12000),
-    ]
-    acc.latency_measurements = [_meas(1, 2, ttfb_ms=100, llm_ms=500, tts_ms=300, e2e_ms=500)]
-    transcript = [
-        {"role": "user", "content": "Book me a flight"},
-        {"role": "user", "content": "Are you still there?"},
-        {"role": "assistant", "content": "Yes I am here!"},
-    ]
-    payload = acc.build_payload(tuner_config, transcript)
-    segs = payload.transcript_with_tool_calls
-    assert [s.role for s in segs] == ["user", "user", "agent"]
-    assert segs[0].text == "Book me a flight"
-    assert segs[0].start_ms == 200
-    assert segs[1].text == "Are you still there?"
-    assert segs[1].start_ms == 9000  # gap preserved — not merged
-
-
-def test_mid_sentence_pause_merges_into_one_user_row(tuner_config):
-    """A short VAD pause between fragments of one thought merges into a single row."""
-    acc = CallAccumulator()
-    acc.call_start_abs_ns = 0
-    acc.call_end_abs_ns = 10_000_000_000
-    acc.done = True
-    acc.speech_segments = [
-        _seg(0, "user", 200, 1000),  # "I want to book a"
-        _seg(1, "user", 1300, 2000),  # 300ms pause: "flight to Cairo"
-        _seg(2, "bot", 2500, 4000),
-    ]
-    acc.latency_measurements = [_meas(1, 2, ttfb_ms=50, llm_ms=200, tts_ms=100)]
-    transcript = [
-        {"role": "user", "content": "I want to book a"},
-        {"role": "user", "content": "flight to Cairo"},
-        {"role": "assistant", "content": "Sure!"},
-    ]
-    payload = acc.build_payload(tuner_config, transcript)
-    segs = payload.transcript_with_tool_calls
-    assert [s.role for s in segs] == ["user", "agent"]
-    assert segs[0].text == "I want to book a flight to Cairo"
-    assert segs[0].metadata["fragments"] == 2
-
-
-def test_user_speaks_then_session_closes_is_orphan(tuner_config):
-    """User speaks, then the session closes before any bot reply: the user row is kept
-    with timing and stt, no LatencyMeasurement, no agent row, no crash."""
-    acc = CallAccumulator()
-    acc.call_start_abs_ns = 0
-    acc.call_end_abs_ns = 5_000_000_000
-    acc.done = True
-    acc.speech_segments = [_seg(0, "user", 500, 2000, stt_ms=150)]
-    acc.latency_measurements = []
-    transcript = [{"role": "user", "content": "Hello, is anyone there?"}]
-    payload = acc.build_payload(tuner_config, transcript)
-    segs = payload.transcript_with_tool_calls
-    assert [s.role for s in segs] == ["user"]
-    assert segs[0].text == "Hello, is anyone there?"
-    assert segs[0].start_ms == 500
-    assert segs[0].end_ms == 2000
-    assert segs[0].metadata["stt_node_ttfb"] == 150
-
-
-def test_proactive_greeting_then_real_turn(tuner_config):
-    """Bot greets first (proactive, no e2e), then a real user→bot exchange follows."""
-    acc = CallAccumulator()
-    acc.call_start_abs_ns = 0
-    acc.call_end_abs_ns = 10_000_000_000
-    acc.done = True
-    acc.speech_segments = [
-        _seg(0, "bot", 800, 2000, is_proactive=True),
-        _seg(1, "user", 5000, 6000),
-        _seg(2, "bot", 7000, 9000),
-    ]
-    acc.latency_measurements = [
-        _meas(-1, 0, is_proactive=True, ttfb_ms=769),
-        _meas(1, 2, ttfb_ms=50, llm_ms=200, tts_ms=100, e2e_ms=1000),
-    ]
-    transcript = [
-        {"role": "assistant", "content": "Hello! Welcome to Pipecat Pizza."},
-        {"role": "user", "content": "Hi there"},
-        {"role": "assistant", "content": "How can I help?"},
-    ]
-    payload = acc.build_payload(tuner_config, transcript)
-    segs = payload.transcript_with_tool_calls
-    assert [s.role for s in segs] == ["agent", "user", "agent"]
-    assert segs[0].text == "Hello! Welcome to Pipecat Pizza."
-    assert segs[0].metadata.get("e2e_latency") is None  # proactive
-    assert segs[2].metadata["e2e_latency"] == 1000
-
-
-def test_speak_tool_speak_both_voiced_are_timed_not_ghosted(tuner_config):
-    """When the bot voices a line, runs tools, then voices another line, the captured TTS
-    text confirms both were spoken — so the first is timed, not wrongly ghosted."""
-    acc = CallAccumulator()
-    acc.call_start_abs_ns = 0
-    acc.call_end_abs_ns = 30_000_000_000
-    acc.done = True
-    acc.speech_segments = [
-        _seg(0, "user", 1000, 2000),
-        _seg(
-            1,
-            "bot",
-            3000,
-            6000,
-            spoken_text="Just to confirm, you'd like a large and a medium. Let me check.",
-        ),
-        _seg(2, "bot", 8000, 11000, spoken_text="Your total is $27.98. Should I confirm?"),
-    ]
-    acc.latency_measurements = [
-        _meas(0, 1, ttfb_ms=400, e2e_ms=1000),
-        _meas(0, 2, ttfb_ms=300),
-    ]
-    acc.user_transcriptions = [("and another one medium", 1000)]
-    transcript = [
-        {"role": "user", "content": "And another one medium."},
-        {
-            "role": "assistant",
-            "content": "Just to confirm, you'd like a large and a medium. Let me check.",
-        },
-        {
-            "role": "assistant",
-            "tool_calls": [{"id": "p", "function": {"name": "choose_pizza", "arguments": "{}"}}],
-        },
-        {"role": "tool", "tool_call_id": "p", "content": "{}"},
-        {
-            "role": "assistant",
-            "tool_calls": [{"id": "s", "function": {"name": "choose_size", "arguments": "{}"}}],
-        },
-        {"role": "tool", "tool_call_id": "s", "content": "{}"},
-        {"role": "assistant", "content": "Your total is $27.98. Should I confirm?"},
-    ]
-    payload = acc.build_payload(tuner_config, transcript)
-    agents = [s for s in payload.transcript_with_tool_calls if s.role == "agent"]
-    assert len(agents) == 2
-    assert agents[0].text.startswith("Just to confirm")
-    assert agents[0].start_ms == 3000  # timed, not a 0/0 ghost
-    assert agents[1].start_ms == 8000
-
-
-def test_unvoiced_draft_before_tool_call_stays_ghost(tuner_config):
-    """A draft the LLM produced but never voiced (superseded by a tool call) matches no TTS
-    text and is correctly left as a ghost."""
-    acc = CallAccumulator()
-    acc.call_start_abs_ns = 0
-    acc.call_end_abs_ns = 30_000_000_000
-    acc.done = True
-    acc.speech_segments = [
-        _seg(0, "user", 1000, 2000),
-        _seg(1, "bot", 8000, 11000, spoken_text="What size would you like?"),
-    ]
-    acc.latency_measurements = [_meas(0, 1, ttfb_ms=300)]
-    acc.user_transcriptions = [("i want pizza", 1000)]
-    transcript = [
-        {"role": "user", "content": "I want pizza."},
-        {"role": "assistant", "content": "Let me look that up for you."},  # never voiced
-        {
-            "role": "assistant",
-            "tool_calls": [{"id": "x", "function": {"name": "lookup", "arguments": "{}"}}],
-        },
-        {"role": "tool", "tool_call_id": "x", "content": "{}"},
-        {"role": "assistant", "content": "What size would you like?"},  # voiced
-    ]
-    payload = acc.build_payload(tuner_config, transcript)
-    agents = [s for s in payload.transcript_with_tool_calls if s.role == "agent"]
-    draft = next(s for s in agents if "look that up" in s.text)
-    voiced = next(s for s in agents if "size" in s.text)
-    assert draft.start_ms == 0  # ghost
-    assert voiced.start_ms == 8000
-
-
-# --- Option B: drop developer-injected assistant messages via the LLM-generation signal ---
-
-
-def test_injected_assistant_kickoff_dropped_via_generation(tuner_config):
-    """A leading kickoff injected as a role=assistant message has no matching LLM generation, so
-    it is dropped by the authoritative generation filter (the bot-side mirror of STT matching)."""
-    acc = CallAccumulator()
-    acc.call_start_abs_ns = 0
-    acc.call_end_abs_ns = 60_000_000_000
-    acc.done = True
-    acc.speech_segments = [
-        _seg(0, "bot", 500, 2000, spoken_text="Hi there! Welcome."),
-        _seg(1, "user", 5000, 6000, windows=[[5000, 6000]]),
-        _seg(2, "bot", 7000, 9000, spoken_text="Great, coming up."),
-    ]
-    acc.latency_measurements = [_meas(-1, 0), _meas(1, 2, ttfb_ms=50)]
-    acc.user_transcriptions = [("A margherita please.", 5000)]
-    acc.assistant_generations = [("Hi there! Welcome.", 500), ("Great, coming up.", 7000)]
-    transcript = [
-        {"role": "assistant", "content": "Greet the customer and present the menu."},  # injected
-        {"role": "assistant", "content": "Hi there! Welcome."},  # generated + voiced
-        {"role": "user", "content": "A margherita please."},
-        {"role": "assistant", "content": "Great, coming up."},
-    ]
-    payload = acc.build_payload(tuner_config, transcript)
-    agent_rows = [s for s in payload.transcript_with_tool_calls if s.role == "agent"]
-    assert [r.text for r in agent_rows] == ["Hi there! Welcome.", "Great, coming up."]
-
-
-def test_injected_assistant_separated_by_tool_call_dropped_via_generation(tuner_config):
-    """An injected instruction separated from the real greeting by a tool call is its own
-    consecutive group (preamble-collapse can't reach it). It has no matching generation, so the
-    generation filter drops it; the tool call and the generated greeting stay."""
-    acc = CallAccumulator()
-    acc.call_start_abs_ns = 0
-    acc.call_end_abs_ns = 30_000_000_000
-    acc.done = True
-    acc.speech_segments = [
-        _seg(0, "user", 1000, 2000, windows=[[1000, 2000]]),
-        _seg(1, "bot", 8000, 11000, spoken_text="Hi there! How can I help?"),
-    ]
-    acc.latency_measurements = [_meas(0, 1, ttfb_ms=300)]
-    acc.user_transcriptions = [("hello", 1000)]
-    acc.assistant_generations = [("Hi there! How can I help?", 8000)]
-    transcript = [
-        {"role": "user", "content": "Hello."},
-        {"role": "assistant", "content": "Greet the customer warmly."},  # injected, not generated
-        {
-            "role": "assistant",
-            "tool_calls": [{"id": "g", "function": {"name": "lookup", "arguments": "{}"}}],
-        },
-        {"role": "tool", "tool_call_id": "g", "content": "{}"},
-        {"role": "assistant", "content": "Hi there! How can I help?"},  # generated + voiced
-    ]
-    payload = acc.build_payload(tuner_config, transcript)
-    segs = payload.transcript_with_tool_calls
-    agent_rows = [s for s in segs if s.role == "agent"]
-    assert [r.text for r in agent_rows] == ["Hi there! How can I help?"]
-    assert "agent_function" in [s.role for s in segs]
-
-
-def test_injected_assistant_mid_conversation_dropped_via_generation(tuner_config):
-    """An assistant message injected mid-call (after a real user turn) is past preamble position.
-    With no matching generation it is dropped; the real generated turns are kept."""
-    acc = CallAccumulator()
-    acc.call_start_abs_ns = 0
-    acc.call_end_abs_ns = 30_000_000_000
-    acc.done = True
-    acc.speech_segments = [
-        _seg(0, "user", 1000, 2000, windows=[[1000, 2000]]),
-        _seg(1, "bot", 3000, 5000, spoken_text="Sure, one moment."),
-        _seg(2, "user", 6000, 7000, windows=[[6000, 7000]]),
-        _seg(3, "user", 12000, 13000, windows=[[12000, 13000]]),
-        _seg(4, "bot", 15000, 17000, spoken_text="Your order is confirmed."),
-    ]
-    acc.latency_measurements = [_meas(0, 1, ttfb_ms=50), _meas(3, 4, ttfb_ms=50)]
-    acc.user_transcriptions = [
-        ("place my order", 1000),
-        ("yes please", 6000),
-        ("great", 12000),
-    ]
-    acc.assistant_generations = [("Sure, one moment.", 3000), ("Your order is confirmed.", 15000)]
-    transcript = [
-        {"role": "user", "content": "Place my order."},
-        {"role": "assistant", "content": "Sure, one moment."},  # generated + voiced
-        {"role": "user", "content": "Yes please."},
-        {"role": "assistant", "content": "Reassure the customer their order is safe."},  # injected
-        {"role": "user", "content": "Great."},
-        {"role": "assistant", "content": "Your order is confirmed."},  # generated + voiced
-    ]
-    payload = acc.build_payload(tuner_config, transcript)
-    agent_rows = [s for s in payload.transcript_with_tool_calls if s.role == "agent"]
-    assert [r.text for r in agent_rows] == ["Sure, one moment.", "Your order is confirmed."]
-
-
-def test_generated_unvoiced_draft_kept_as_ghost_with_generations(tuner_config):
-    """A draft the LLM generated but never voiced (superseded by a tool call) DOES match a
-    generation, so the generation filter keeps it. It still has no TTS match, so it renders as an
-    untimed ghost — Option B keeps generated drafts while dropping injected messages."""
-    acc = CallAccumulator()
-    acc.call_start_abs_ns = 0
-    acc.call_end_abs_ns = 30_000_000_000
-    acc.done = True
-    acc.speech_segments = [
-        _seg(0, "user", 1000, 2000, windows=[[1000, 2000]]),
-        _seg(1, "bot", 8000, 11000, spoken_text="What size would you like?"),
-    ]
-    acc.latency_measurements = [_meas(0, 1, ttfb_ms=300)]
-    acc.user_transcriptions = [("i want pizza", 1000)]
-    acc.assistant_generations = [
-        ("Let me look that up for you.", 3000),  # generated, never voiced
-        ("What size would you like?", 8000),  # generated + voiced
-    ]
-    transcript = [
-        {"role": "user", "content": "I want pizza."},
-        {"role": "assistant", "content": "Let me look that up for you."},  # generated draft
-        {
-            "role": "assistant",
-            "tool_calls": [{"id": "x", "function": {"name": "lookup", "arguments": "{}"}}],
-        },
-        {"role": "tool", "tool_call_id": "x", "content": "{}"},
-        {"role": "assistant", "content": "What size would you like?"},  # voiced
-    ]
-    payload = acc.build_payload(tuner_config, transcript)
-    agents = [s for s in payload.transcript_with_tool_calls if s.role == "agent"]
-    draft = next(s for s in agents if "look that up" in s.text)
-    voiced = next(s for s in agents if "size" in s.text)
-    assert draft.start_ms == 0  # kept as ghost
-    assert voiced.start_ms == 8000
-
-
-def test_interrupted_turn_committed_prefix_matches_full_generation(tuner_config):
-    """On interruption pipecat commits only a PREFIX of the turn to the context, while the LLM
-    generation holds the full text. The committed prefix is a substring of the generation, so it
-    matches and the turn is kept (the live-run scenario that broke the TTS-only approach)."""
-    acc = CallAccumulator()
-    acc.call_start_abs_ns = 0
-    acc.call_end_abs_ns = 30_000_000_000
-    acc.done = True
-    full = "Welcome to Pipecat Pizza! Today we have margherita for $10.99. What can I get for you?"
-    acc.speech_segments = [
-        _seg(0, "bot", 1000, 11000, spoken_text=full),
-        _seg(1, "user", 11200, 14000, windows=[[11200, 14000]]),
-    ]
-    acc.latency_measurements = [_meas(-1, 0), _meas(1, None)]
-    acc.user_transcriptions = [("i would like to order", 11200)]
-    acc.assistant_generations = [(full, 1000)]
-    transcript = [
-        {"role": "assistant", "content": "Welcome to Pipecat Pizza!"},  # committed prefix only
-        {"role": "user", "content": "I would like to order."},
-    ]
-    payload = acc.build_payload(tuner_config, transcript)
-    agent_rows = [s for s in payload.transcript_with_tool_calls if s.role == "agent"]
-    assert [r.text for r in agent_rows] == ["Welcome to Pipecat Pizza!"]  # kept, not dropped
-    assert agent_rows[0].start_ms == 1000  # timed
-
-
-def test_injected_assistant_not_dropped_when_no_generations_captured(tuner_config):
-    """Inert fallback: when no LLM frames were captured (assistant_generations empty), the
-    generation filter never runs and mid-conversation behavior is unchanged — an injected
-    assistant message is kept (as an untimed ghost), not dropped. Contrast with the
-    generations-populated case above."""
-    acc = CallAccumulator()
-    acc.call_start_abs_ns = 0
-    acc.call_end_abs_ns = 30_000_000_000
-    acc.done = True
-    acc.speech_segments = [
-        _seg(0, "user", 1000, 2000, windows=[[1000, 2000]]),
-        _seg(1, "bot", 3000, 5000, spoken_text="Sure, one moment."),
-    ]
-    acc.latency_measurements = [_meas(0, 1, ttfb_ms=50)]
-    acc.user_transcriptions = [("place my order", 1000)]
-    # assistant_generations intentionally left empty
-    transcript = [
-        {"role": "user", "content": "Place my order."},
-        {"role": "assistant", "content": "Sure, one moment."},  # voiced
-        {"role": "assistant", "content": "Reassure the customer their order is safe."},  # injected
-    ]
-    payload = acc.build_payload(tuner_config, transcript)
-    agent_texts = [s.text for s in payload.transcript_with_tool_calls if s.role == "agent"]
-    # Without the generation signal the injected message is NOT dropped (kept, untimed).
-    assert "Reassure the customer their order is safe." in " ".join(agent_texts)
-
-
-def test_accumulator_llm_generation_buffering():
-    """on_llm_text chunks between start/end join into one generation; a missed End is flushed on
-    the next Start."""
-    acc = CallAccumulator()
-    acc.call_start_abs_ns = 1_000_000_000
-    acc.on_llm_response_start()
-    acc.on_llm_text("Hi ")
-    acc.on_llm_text("there!")
-    acc.on_llm_response_end(1_002_000_000)  # 2ms after call start
-    assert acc.assistant_generations == [("Hi there!", 2)]
-    # A second response whose End frame never arrives is flushed when the next Start begins.
-    acc.on_llm_response_start()
-    acc.on_llm_text("Dangling text")
-    acc.on_llm_response_start()  # missed End → flush pending
-    assert acc.assistant_generations[-1][0] == "Dangling text"
-
-
-def test_user_interruption_flags_propagate(tuner_config):
-    """When the user interrupts the agent, the agent row is flagged interrupted and the
-    following user row is flagged as the interrupting turn."""
-    acc = CallAccumulator()
-    acc.call_start_abs_ns = 0
-    acc.call_end_abs_ns = 10_000_000_000
-    acc.done = True
-    acc.speech_segments = [
-        _seg(0, "user", 200, 500),
-        _seg(1, "bot", 800, 1500, interrupted=True, interrupted_at_ms=1200),
-        _seg(2, "user", 1200, 1800),  # the interrupting utterance
-        _seg(3, "bot", 2200, 3000),
-    ]
-    acc.latency_measurements = [
-        _meas(0, 1, ttfb_ms=50, was_interrupted=True, interrupted_at_ms=1200),
-        _meas(2, 3, ttfb_ms=50, e2e_ms=400),
-    ]
-    transcript = [
-        {"role": "user", "content": "Tell me about your menu"},
-        {"role": "assistant", "content": "We have margherita, pepperoni, veggie, and"},
-        {"role": "user", "content": "Just pepperoni please"},
-        {"role": "assistant", "content": "Great choice!"},
-    ]
-    payload = acc.build_payload(tuner_config, transcript)
-    segs = payload.transcript_with_tool_calls
-    assert [s.role for s in segs] == ["user", "agent", "user", "agent"]
-    assert segs[1].metadata["interrupted"] is True  # agent was interrupted
-    assert segs[2].metadata["interrupted"] is True  # this user did the interrupting
-
-
-def test_clean_end_call_hangup_not_marked_interrupted(tuner_config):
-    """TurnTrackingObserver reports was_interrupted=True when the pipeline ends on a clean
-    end_call hangup. With no interrupted_at_ms (no user cut in), the final agent row must
-    NOT be flagged interrupted."""
-    acc = CallAccumulator()
-    acc.call_start_abs_ns = 0
-    acc.call_end_abs_ns = 10_000_000_000
-    acc.done = True
-    acc.speech_segments = [
-        _seg(0, "user", 200, 500, windows=[[200, 500]]),
-        # final bot turn ended by end_call: was_interrupted set by the observer, but the
-        # user never cut in → no interrupted_at_ms.
-        _seg(1, "bot", 800, 3000, interrupted=True),
-    ]
-    acc.latency_measurements = [_meas(0, 1, ttfb_ms=50, was_interrupted=True)]
-    transcript = [
-        {"role": "user", "content": "Yes, confirm."},
-        {"role": "assistant", "content": "Thank you! Have a great day!"},
-    ]
-    payload = acc.build_payload(tuner_config, transcript)
-    agent = next(s for s in payload.transcript_with_tool_calls if s.role == "agent")
-    assert agent.metadata["interrupted"] is False  # clean hangup, not a real interruption
+"""Event-sourced transcript construction.
+
+The transcript is built LIVE from the frame stream (mirroring pipecat's own conversation
+construction), not reconstructed from the final LLM context. These tests script a call through
+the accumulator's on_* event methods via the Replay helper and assert the rendered rows: order
+comes from arrival order, timing from the linked speech segments, and a turn exists iff its
+frames occurred (so developer-injected messages, which emit no STT/LLM frames, simply never
+appear — no dropping logic needed).
+"""
+
+
+def _roles(rows):
+    return [r.role for r in rows]
+
+
+def _texts(rows, role):
+    return [r.text for r in rows if r.role == role]
+
+
+def test_basic_user_then_agent_exchange(replay, tuner_config):
+    rows = (
+        replay()
+        .turn_start(1, 1000)
+        .user_start(1000)
+        .transcription("Hello there.", 1200)
+        .user_stop(1500)
+        .generate("Hi! How can I help?", 1800, 2000)
+        .tts("Hi! How can I help?", 1900)
+        .bot_start(2100)
+        .bot_stop(3000)
+        .latency(0.05, "TTSService", user_start_ms=1000)
+        .turn_end(1)
+        .rows(tuner_config)
+    )
+    assert _roles(rows) == ["user", "agent"]
+    user, agent = rows
+    assert user.text == "Hello there." and user.start_ms == 1000 and user.end_ms == 1500
+    assert agent.text == "Hi! How can I help?" and agent.start_ms == 2100 and agent.end_ms == 3000
+    assert agent.metadata["tts_node_ttfb"] == 50
+
+
+def test_order_is_arrival_order(replay, tuner_config):
+    rows = (
+        replay()
+        .turn_start(1, 1000)
+        .user_start(1000)
+        .transcription("first", 1100)
+        .user_stop(1200)
+        .generate("reply one", 1300, 1400)
+        .bot_start(1500)
+        .bot_stop(1800)
+        .turn_start(2, 3000)
+        .user_start(3000)
+        .transcription("second", 3100)
+        .user_stop(3200)
+        .generate("reply two", 3300, 3400)
+        .bot_start(3500)
+        .bot_stop(3800)
+        .rows(tuner_config)
+    )
+    assert _roles(rows) == ["user", "agent", "user", "agent"]
+    assert [r.text for r in rows] == ["first", "reply one", "second", "reply two"]
+
+
+def test_proactive_greeting_has_no_e2e_latency(replay, tuner_config):
+    rows = (
+        replay()
+        .generate("Welcome to Pizza!", 100, 300)
+        .tts("Welcome to Pizza!", 150)
+        .bot_start(400)
+        .bot_stop(2000)
+        .latency(0.2, "TTSService")  # proactive: no user_turn_start_time
+        .rows(tuner_config)
+    )
+    assert _roles(rows) == ["agent"]
+    assert rows[0].text == "Welcome to Pizza!"
+    assert rows[0].metadata.get("e2e_latency") is None
+    assert rows[0].metadata["tts_node_ttfb"] == 200
+
+
+def test_user_turn_without_transcription_produces_no_row(replay, tuner_config):
+    """A user row requires a TranscriptionFrame. A turn boundary that produces none (a spurious
+    VAD trigger, or pipecat's proactive ghost turn) yields no row.
+
+    This is precisely *why* a developer-injected ``{"role":"user"}`` context message can never
+    appear: the transcript is built only from frames (acc.live_turns), and an injected message —
+    added straight to the LLM context — emits no TranscriptionFrame, so there is no channel
+    through which it could enter. (In the old reconstruction model the injected message lived in
+    the context and had to be detected and dropped; here it is absent by construction.)
+    """
+    rows = (
+        replay()
+        .turn_start(1, 1000)  # boundary fires but no transcription arrives → no user row
+        .user_start(1000)
+        .user_stop(1500)
+        .turn_start(2, 5000)
+        .user_start(5000)
+        .transcription("I would like a pizza.", 5200)
+        .user_stop(5500)
+        .generate("Sure!", 5800, 6000)
+        .bot_start(6100)
+        .bot_stop(6500)
+        .rows(tuner_config)
+    )
+    assert _texts(rows, "user") == ["I would like a pizza."]
+
+
+def test_assistant_response_with_only_tool_call_has_no_text_row(replay, tuner_config):
+    """An agent text row requires generated text (or voiced TTS). An LLM response that emits no
+    text — e.g. one that only makes a tool call — produces no agent row, only the tool rows.
+
+    This is the assistant-side analog: a developer-injected ``{"role":"assistant"}`` context
+    message emits no LLMTextFrame and is never voiced, so it cannot enter the transcript.
+    """
+    rows = (
+        replay()
+        .turn_start(1, 1000)
+        .user_start(1000)
+        .transcription("order a pizza", 1100)
+        .user_stop(1200)
+        .llm_start(1300)  # LLM response with no text — only a tool call
+        .llm_end(1350)
+        .tool_call("choose_pizza", "tc-1", {"pizza": "margherita"}, 1400)
+        .tool_result("choose_pizza", "tc-1", {"ok": True}, 1500)
+        .generate("Great choice!", 1700, 1800)
+        .bot_start(1900)
+        .bot_stop(2300)
+        .rows(tuner_config)
+    )
+    assert _texts(rows, "agent") == ["Great choice!"]
+    assert "agent_function" in _roles(rows)
+
+
+def test_tool_call_and_result_rows(replay, tuner_config):
+    rows = (
+        replay()
+        .turn_start(1, 1000)
+        .user_start(1000)
+        .transcription("order a pizza", 1100)
+        .user_stop(1200)
+        .tool_call("choose_pizza", "tc-1", {"pizza": "margherita"}, 1500)
+        .tool_result("choose_pizza", "tc-1", {"pizza": "margherita", "price": 10.99}, 1700)
+        .generate("Great choice!", 1900, 2000)
+        .bot_start(2100)
+        .bot_stop(2500)
+        .rows(tuner_config)
+    )
+    assert _roles(rows) == ["user", "agent_function", "agent_result", "agent"]
+    func = rows[1]
+    assert func.text == "choose_pizza(pizza=margherita)"
+    assert func.start_ms == 1500
+    assert func.tool.name == "choose_pizza" and func.tool.params == {"pizza": "margherita"}
+    result = rows[2]
+    assert result.text is None  # structured result
+    assert result.start_ms == 1700
+    assert result.tool.result == {"pizza": "margherita", "price": 10.99}
+
+
+def test_parallel_tool_calls_keep_distinct_timing(replay, tuner_config):
+    rows = (
+        replay()
+        .turn_start(1, 1000)
+        .user_start(1000)
+        .transcription("do both", 1100)
+        .user_stop(1200)
+        .tool_call("lookup", "a", {}, 1500)
+        .tool_call("lookup", "b", {}, 1700)
+        .rows(tuner_config)
+    )
+    funcs = [r for r in rows if r.role == "agent_function"]
+    assert [f.start_ms for f in funcs] == [1500, 1700]
+
+
+def test_non_json_tool_result_is_text(replay, tuner_config):
+    rows = (
+        replay()
+        .turn_start(1, 1000)
+        .user_start(1000)
+        .transcription("x", 1100)
+        .user_stop(1200)
+        .tool_call("note", "n1", {}, 1500)
+        .tool_result("note", "n1", "done", 1600)
+        .rows(tuner_config)
+    )
+    result = next(r for r in rows if r.role == "agent_result")
+    assert result.text == "done"
+    assert result.tool.result is None
+
+
+def test_unvoiced_draft_kept_and_timed_at_generation(replay, tuner_config):
+    # A draft the LLM generated but never voiced (superseded by a tool call) is kept, timed at
+    # its generation moment (real ms, correct order) — never 00:00.
+    rows = (
+        replay()
+        .turn_start(1, 1000)
+        .user_start(1000)
+        .transcription("i want pizza", 1100)
+        .user_stop(1200)
+        .generate("Let me look that up.", 1500, 1700)  # generated, never voiced
+        .tool_call("lookup", "t1", {}, 1800)
+        .tool_result("lookup", "t1", {"ok": True}, 1900)
+        .generate("What size?", 2100, 2200)
+        .tts("What size?", 2150)
+        .bot_start(2300)
+        .bot_stop(2800)
+        .rows(tuner_config)
+    )
+    agents = [r for r in rows if r.role == "agent"]
+    draft = next(r for r in agents if "look that up" in r.text)
+    voiced = next(r for r in agents if "size" in r.text)
+    assert draft.start_ms == 1700  # generation moment, not 0
+    assert voiced.start_ms == 2300
+
+
+def test_speak_tool_speak_both_voiced_are_timed(replay, tuner_config):
+    rows = (
+        replay()
+        .turn_start(1, 1000)
+        .user_start(1000)
+        .transcription("confirm", 1100)
+        .user_stop(1200)
+        .generate("Just to confirm.", 1500, 1700)
+        .tts("Just to confirm.", 1600)
+        .bot_start(1800)
+        .bot_stop(2200)
+        .tool_call("check", "t1", {}, 2300)
+        .tool_result("check", "t1", {"ok": True}, 2400)
+        .generate("Your total is $10.", 2600, 2700)
+        .tts("Your total is $10.", 2650)
+        .bot_start(2800)
+        .bot_stop(3200)
+        .rows(tuner_config)
+    )
+    agents = [r for r in rows if r.role == "agent"]
+    assert [a.text for a in agents] == ["Just to confirm.", "Your total is $10."]
+    assert [a.start_ms for a in agents] == [1800, 2800]  # both timed, neither a ghost
+
+
+def test_orphan_user_turn_no_bot_reply(replay, tuner_config):
+    rows = (
+        replay()
+        .turn_start(1, 1000)
+        .user_start(1000)
+        .transcription("anyone there?", 1200)
+        .stt_ttfb(0.3)
+        .user_stop(1500)
+        .end(2000)
+        .rows(tuner_config)
+    )
+    assert _roles(rows) == ["user"]
+    assert rows[0].text == "anyone there?"
+    assert rows[0].metadata["stt_node_ttfb"] == 300
+
+
+def test_coalesced_utterances_in_one_turn_make_one_row(replay, tuner_config):
+    # Several transcriptions within one user turn (intermediate pauses are INCOMPLETE, so only
+    # one UserStoppedSpeaking fires) → one row, exactly as pipecat commits one user message.
+    rows = (
+        replay()
+        .turn_start(1, 1000)
+        .user_start(1000)
+        .transcription("I would like", 1100)
+        .transcription("a margherita", 1600)
+        .user_stop(1800)
+        .rows(tuner_config)
+    )
+    users = [r for r in rows if r.role == "user"]
+    assert len(users) == 1
+    assert users[0].text == "I would like a margherita"
+    assert users[0].metadata["fragments"] == 2
+
+
+def test_separate_user_turn_stops_make_separate_rows(replay, tuner_config):
+    # Two utterances each ending in their own UserStoppedSpeaking → two rows (one per pipecat
+    # user-message boundary), regardless of the gap length.
+    rows = (
+        replay()
+        .turn_start(1, 1000)
+        .user_start(1000)
+        .transcription("hello", 1100)
+        .user_stop(1300)
+        .user_start(5000)
+        .transcription("are you there", 5100)
+        .user_stop(5300)
+        .rows(tuner_config)
+    )
+    users = [r for r in rows if r.role == "user"]
+    assert [u.text for u in users] == ["hello", "are you there"]
+    assert [u.start_ms for u in users] == [1000, 5000]
+    # turn_index is unique and ascending across the split
+    assert users[0].metadata["turn_index"] != users[1].metadata["turn_index"]
+
+
+def test_interruption_flag_propagates(replay, tuner_config):
+    # User cuts in while the bot is speaking → agent row interrupted, next user row flagged.
+    rows = (
+        replay()
+        .turn_start(1, 1000)
+        .user_start(1000)
+        .transcription("question", 1100)
+        .user_stop(1200)
+        .generate("Here is a long answer", 1400, 1600)
+        .tts("Here is a long answer", 1500)
+        .bot_start(1700)
+        .turn_start(2, 2000)  # interrupting turn
+        .user_start(2000)  # interrupts the bot
+        .bot_stop(2050)
+        .transcription("stop", 2100)
+        .user_stop(2300)
+        .turn_end(1, interrupted=True)
+        .rows(tuner_config)
+    )
+    agent = next(r for r in rows if r.role == "agent")
+    assert agent.metadata["interrupted"] is True
+    assert agent.metadata.get("interrupted_at_ms") == 2000
+    # the interrupting user row carries the flag
+    interrupting_user = [r for r in rows if r.role == "user" and r.text == "stop"][0]
+    assert interrupting_user.metadata["interrupted"] is True
+
+
+def test_interrupted_regenerated_greeting_full_text_and_timing(replay, tuner_config):
+    # The greeting is interrupted within ms (voices nothing) and regenerated. The orphan segment
+    # voiced nothing; the real re-greeting and the next turn keep their own timing, and the agent
+    # text is the FULL generation (recovering content the committed context would have truncated).
+    full = "Welcome to Pizza! Today we have margherita and pepperoni. What can I get you?"
+    rows = (
+        replay()
+        # turn 1: greeting interrupted almost immediately (no TTS voiced)
+        .turn_start(1, 100)
+        .generate("Welcome to Pizza!", 200, 300)
+        .bot_start(400)
+        .user_start(450)  # barge-in
+        .bot_stop(460)  # voiced nothing
+        .transcription("okay", 500)
+        .user_stop(700)
+        .turn_end(1, interrupted=True)
+        # turn 2: full re-greeting, voiced
+        .turn_start(2, 800)
+        .generate(full, 900, 1200)
+        .tts(full, 1000)
+        .bot_start(1300)
+        .bot_stop(5000)
+        .latency(0.2, "TTSService")
+        # turn 3: user orders, bot replies
+        .turn_start(3, 7000)
+        .user_start(7000)
+        .transcription("a margherita", 7200)
+        .user_stop(7500)
+        .generate("Coming up!", 7800, 8000)
+        .tts("Coming up!", 7900)
+        .bot_start(8100)
+        .bot_stop(9000)
+        .turn_end(3)
+        .rows(tuner_config)
+    )
+    agents = [r for r in rows if r.role == "agent"]
+    # full generation text is rendered (not a truncated prefix)
+    assert any(a.text == full for a in agents)
+    coming = next(a for a in agents if a.text == "Coming up!")
+    assert coming.start_ms == 8100  # later turn keeps its real timing (no desync to 00:00)
+
+
+def test_latency_metadata_per_node(replay, tuner_config):
+    rows = (
+        replay()
+        .turn_start(1, 1000)
+        .user_start(1000)
+        .transcription("hi", 1100)
+        .stt_ttfb(0.1)
+        .user_stop(1500)
+        .generate("hello", 1800, 2000)
+        .tts("hello", 1900)
+        .bot_start(2100)
+        .bot_stop(2600)
+        .latency(0.05, "TTSService", user_start_ms=1000)
+        .turn_end(1)
+        .rows(tuner_config)
+    )
+    user = next(r for r in rows if r.role == "user")
+    agent = next(r for r in rows if r.role == "agent")
+    assert user.metadata["stt_node_ttfb"] == 100
+    assert agent.metadata["tts_node_ttfb"] == 50
+    assert agent.metadata["e2e_latency"] == 2100 - 1500
+
+
+def test_agent_text_is_generation_even_when_tts_voiced_less(replay, tuner_config):
+    # Decided behavior: agent text mirrors the LLM generation (pipecat UI parity), even if TTS
+    # voiced only part of it before an interruption.
+    rows = (
+        replay()
+        .turn_start(1, 1000)
+        .user_start(1000)
+        .transcription("hi", 1100)
+        .user_stop(1200)
+        .generate("Full generated answer with lots of detail.", 1400, 1600)
+        .tts("Full generated", 1500)  # only part voiced
+        .bot_start(1700)
+        .bot_stop(2000)
+        .rows(tuner_config)
+    )
+    agent = next(r for r in rows if r.role == "agent")
+    assert agent.text == "Full generated answer with lots of detail."

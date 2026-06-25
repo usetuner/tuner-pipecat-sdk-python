@@ -77,8 +77,8 @@ class _BaseObserver(BaseObserver):
     forwarding (e.g. ``TranscriptionFrame``, swallowed by the user aggregator) —
     and stays entirely out of the audio data path.
 
-    Subclasses must call ``attach_context()`` (or an equivalent wrapper) with a
-    callable that returns the transcript list before the pipeline starts.
+    The transcript is built live from the frame stream (``acc.live_turns``); no LLM context
+    needs to be attached.
     """
 
     def __init__(
@@ -136,7 +136,6 @@ class _BaseObserver(BaseObserver):
         # downstream traversal, so a modest window is sufficient.
         self._processed_frames: set[int] = set()
         self._frame_history: deque[int] = deque(maxlen=256)
-        self._context_provider: Callable[[], list] | None = None
         self._disconnection_reason_resolver = disconnection_reason_resolver
         self._cost_calculator = cost_calculator
 
@@ -314,12 +313,6 @@ class _BaseObserver(BaseObserver):
 
         if isinstance(frame, StartFrame):
             self._acc.on_start(timestamp_ns)
-            if self._context_provider is None and not self._flushed:
-                logger.warning(
-                    "[tuner] no context_provider attached at pipeline start — "
-                    "call attach_context() before call end "
-                    "or call data will be lost at flush"
-                )
             if not getattr(frame, "enable_metrics", False):
                 logger.warning(
                     "[tuner] enable_metrics=False — latency breakdown will be absent. "
@@ -335,7 +328,7 @@ class _BaseObserver(BaseObserver):
             self._acc.on_function_call_in_progress(frame, timestamp_ns)
 
         elif isinstance(frame, FunctionCallResultFrame):
-            self._acc.on_function_call_result(frame.tool_call_id, timestamp_ns)
+            self._acc.on_function_call_result(frame, timestamp_ns)
 
         elif isinstance(frame, MetricsFrame):
             self._acc.on_metrics_frame(frame)
@@ -354,7 +347,7 @@ class _BaseObserver(BaseObserver):
             self._acc.on_tts_text(frame.text, timestamp_ns)
 
         elif isinstance(frame, LLMFullResponseStartFrame):
-            self._acc.on_llm_response_start()
+            self._acc.on_llm_response_start(timestamp_ns)
 
         elif isinstance(frame, LLMFullResponseEndFrame):
             self._acc.on_llm_response_end(timestamp_ns)
@@ -398,15 +391,16 @@ class _BaseObserver(BaseObserver):
     # ------------------------------------------------------------------
 
     async def _flush(self) -> None:
-        if self._context_provider is None:
-            logger.warning("[tuner] no context_provider attached — skipping flush")
-            return
-        transcript = self._context_provider()
+        # The transcript is built live from the frame stream (acc.live_turns); it no longer
+        # depends on the LLM context. Capture diagnostics: what the accumulator recorded from
+        # the pipeline. If a turn that clearly fired frames is missing here, the bug is frame
+        # delivery to this observer.
         if self._config.debug:
-            logger.debug("[tuner] transcript ({} messages): {}", len(transcript), transcript)
-        # Capture diagnostics: what the accumulator actually recorded from the pipeline.
-        # If a turn that clearly fired frames is missing a segment here, the bug is frame
-        # delivery to this observer (not transcript reconstruction).
+            logger.debug(
+                "[tuner] live_turns ({}): {}",
+                len(self._acc.live_turns),
+                [(t.kind, t.order, (t.text or "")[:40]) for t in self._acc.live_turns],
+            )
         logger.info(
             "[tuner] segments ({}): {}",
             len(self._acc.speech_segments),
@@ -422,6 +416,6 @@ class _BaseObserver(BaseObserver):
                 for m in self._acc.latency_measurements
             ],
         )
-        payload = self._acc.build_payload(self._config, transcript, self._cost_calculator)
+        payload = self._acc.build_payload(self._config, self._cost_calculator)
         logger.info("[tuner] payload: {}", payload)
         await post_call(self._config, payload)

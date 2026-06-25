@@ -1,11 +1,14 @@
-"""Accumulator payload-shape and metadata tests."""
+"""Accumulator payload metadata, usage, and cost tests.
+
+Transcript-row shape/order is covered by test_accumulator_transcript.py (event-sourced). These
+tests focus on the non-transcript payload: usage counters, timestamps, disconnection, cost.
+"""
 
 from types import SimpleNamespace
 
 import pytest
 
 from tuner_pipecat_sdk.accumulator import CallAccumulator
-from tuner_pipecat_sdk.models import LatencyMeasurement, SpeechSegment
 
 
 def _metric(cls_name: str, **kwargs):
@@ -18,11 +21,7 @@ def test_build_payload_basic(tuner_config):
     acc.call_end_abs_ns = 2_000_000_000
     acc.done = True
     acc.on_metrics_frame(SimpleNamespace(data=[_metric("TTSUsageMetricsData", value=50)]))
-    transcript = [
-        {"role": "user", "content": "Hi"},
-        {"role": "assistant", "content": "Hello!"},
-    ]
-    payload = acc.build_payload(tuner_config, transcript)
+    payload = acc.build_payload(tuner_config)
     assert payload.call_id == tuner_config.call_id
     assert payload.call_type == tuner_config.call_type
     assert payload.start_timestamp == 1
@@ -31,7 +30,6 @@ def test_build_payload_basic(tuner_config):
     assert payload.call_status == "call_ended"
     assert payload.general_meta_data_raw.usage_token.tts_character_count == 50
     assert payload.general_meta_data_raw.ai_models.asr_model == tuner_config.asr_model
-    assert len(payload.transcript_with_tool_calls) >= 2
 
 
 def test_llm_token_uses_pipecat_value(tuner_config):
@@ -44,7 +42,7 @@ def test_llm_token_uses_pipecat_value(tuner_config):
             data=[_metric("LLMUsageMetricsData", value=SimpleNamespace(total_tokens=500))]
         )
     )
-    payload = acc.build_payload(tuner_config, [])
+    payload = acc.build_payload(tuner_config)
     assert payload.general_meta_data_raw.usage_token.llm_token == 500
 
 
@@ -53,7 +51,7 @@ def test_llm_token_is_none_when_pipecat_zero(tuner_config):
     acc.call_start_abs_ns = 0
     acc.call_end_abs_ns = 1_000_000_000
     acc.done = True
-    payload = acc.build_payload(tuner_config, [{"role": "user", "content": "A" * 400}])
+    payload = acc.build_payload(tuner_config)
     assert payload.general_meta_data_raw.usage_token.llm_token is None
 
 
@@ -63,7 +61,7 @@ def test_tts_char_count_uses_pipecat_value(tuner_config):
     acc.call_end_abs_ns = 1_000_000_000
     acc.done = True
     acc.on_metrics_frame(SimpleNamespace(data=[_metric("TTSUsageMetricsData", value=999)]))
-    payload = acc.build_payload(tuner_config, [])
+    payload = acc.build_payload(tuner_config)
     assert payload.general_meta_data_raw.usage_token.tts_character_count == 999
 
 
@@ -72,119 +70,8 @@ def test_tts_char_count_is_none_when_pipecat_zero(tuner_config):
     acc.call_start_abs_ns = 0
     acc.call_end_abs_ns = 1_000_000_000
     acc.done = True
-    payload = acc.build_payload(tuner_config, [])
+    payload = acc.build_payload(tuner_config)
     assert payload.general_meta_data_raw.usage_token.tts_character_count is None
-
-
-def test_enrich_transcript_user_and_assistant(tuner_config):
-    acc = CallAccumulator()
-    acc.call_start_abs_ns = 0
-    acc.call_end_abs_ns = 1_000_000_000
-    acc.done = True
-    acc.speech_segments = [
-        SpeechSegment(id=0, speaker="user", start_ms=50, stop_ms=100),
-        SpeechSegment(id=1, speaker="bot", start_ms=200, stop_ms=300),
-    ]
-    acc.latency_measurements = [
-        LatencyMeasurement(
-            user_segment_id=0, bot_segment_id=1, ttfb_ms=100, llm_ms=50, tts_ms=50, e2e_ms=100
-        )
-    ]
-    transcript = [
-        {"role": "user", "content": "Hi"},
-        {"role": "assistant", "content": "Hello!"},
-    ]
-    payload = acc.build_payload(tuner_config, transcript)
-    roles = [segment.role for segment in payload.transcript_with_tool_calls]
-    assert "user" in roles
-    assert "agent" in roles
-
-
-def test_enrich_transcript_skips_system(tuner_config):
-    acc = CallAccumulator()
-    acc.call_start_abs_ns = 0
-    acc.call_end_abs_ns = 1_000_000_000
-    acc.done = True
-    transcript = [
-        {"role": "system", "content": "You are helpful."},
-        {"role": "user", "content": "Hi"},
-        {"role": "assistant", "content": "Hi!"},
-    ]
-    acc.speech_segments = [
-        SpeechSegment(id=0, speaker="user", start_ms=10, stop_ms=50),
-        SpeechSegment(id=1, speaker="bot", start_ms=80, stop_ms=100),
-    ]
-    acc.latency_measurements = [LatencyMeasurement(user_segment_id=0, bot_segment_id=1)]
-    payload = acc.build_payload(tuner_config, transcript)
-    roles = [segment.role for segment in payload.transcript_with_tool_calls]
-    assert "system" not in roles
-
-
-def test_payload_transcript_preserves_conversation_order(tuner_config):
-    acc = CallAccumulator()
-    base_ns = 1_000_000_000
-    acc.call_start_abs_ns = base_ns
-    acc.call_end_abs_ns = base_ns + 10_000_000_000
-    acc.done = True
-    acc.registry.record_invocation_ns("tc-1", base_ns + 80_000_000)
-    acc.registry.record_completion_ns("tc-1", base_ns + 160_000_000)
-    acc.speech_segments = [
-        SpeechSegment(id=0, speaker="user", start_ms=500, stop_ms=1000),
-        SpeechSegment(id=1, speaker="bot", start_ms=6000, stop_ms=7000),
-    ]
-    acc.latency_measurements = [
-        LatencyMeasurement(
-            user_segment_id=0, bot_segment_id=1, ttfb_ms=10, llm_ms=20, tts_ms=30, e2e_ms=5000
-        )
-    ]
-    transcript = [
-        {"role": "user", "content": "Hi"},
-        {
-            "role": "assistant",
-            "tool_calls": [{"id": "tc-1", "function": {"name": "transfer", "arguments": "{}"}}],
-        },
-        {"role": "tool", "tool_call_id": "tc-1", "content": '{"ok": true}'},
-        {"role": "assistant", "content": "Done"},
-    ]
-
-    payload = acc.build_payload(tuner_config, transcript)
-    roles = [segment.role for segment in payload.transcript_with_tool_calls]
-    assert roles == ["user", "agent_function", "agent_result", "agent"]
-
-
-def test_payload_keeps_initial_greeting_before_first_user(tuner_config):
-    acc = CallAccumulator()
-    base_ns = 1_000_000_000
-    acc.call_start_abs_ns = base_ns
-    acc.call_end_abs_ns = base_ns + 5_000_000_000
-    acc.done = True
-    # Proactive greeting (bot speaks first) followed by a real user→bot exchange.
-    acc.speech_segments = [
-        SpeechSegment(id=0, speaker="bot", start_ms=800, stop_ms=1500, is_proactive=True),
-        SpeechSegment(id=1, speaker="user", start_ms=2000, stop_ms=2300),
-        SpeechSegment(id=2, speaker="bot", start_ms=3000, stop_ms=3800),
-    ]
-    acc.latency_measurements = [
-        LatencyMeasurement(user_segment_id=-1, bot_segment_id=0, is_proactive=True, ttfb_ms=100),
-        LatencyMeasurement(
-            user_segment_id=1, bot_segment_id=2, ttfb_ms=100, llm_ms=50, tts_ms=40, e2e_ms=700
-        ),
-    ]
-    transcript = [
-        {"role": "assistant", "content": "Welcome to Pipecat Pizza!"},
-        {"role": "user", "content": "Hi."},
-        {"role": "assistant", "content": "Hi there! Which pizza would you like?"},
-    ]
-
-    payload = acc.build_payload(tuner_config, transcript)
-    roles = [segment.role for segment in payload.transcript_with_tool_calls]
-    assert roles == ["agent", "user", "agent"]
-
-    greeting = payload.transcript_with_tool_calls[0]
-    assert greeting.text == "Welcome to Pipecat Pizza!"
-    assert greeting.start_ms == 800
-    assert greeting.end_ms == 1500
-    assert greeting.metadata.get("e2e_latency") is None  # proactive → no e2e
 
 
 def test_build_payload_includes_disconnection_reason(tuner_config):
@@ -193,7 +80,7 @@ def test_build_payload_includes_disconnection_reason(tuner_config):
     acc.call_end_abs_ns = 2_000_000_000
     acc.done = True
     acc.set_disconnection_reason("user_hangup")
-    payload = acc.build_payload(tuner_config, [])
+    payload = acc.build_payload(tuner_config)
     assert payload.disconnection_reason == "user_hangup"
 
 
@@ -202,7 +89,7 @@ def test_build_payload_disconnection_reason_none_when_unset(tuner_config):
     acc.call_start_abs_ns = 1_000_000_000
     acc.call_end_abs_ns = 2_000_000_000
     acc.done = True
-    payload = acc.build_payload(tuner_config, [])
+    payload = acc.build_payload(tuner_config)
     assert payload.disconnection_reason is None
 
 
@@ -211,7 +98,7 @@ def test_build_payload_disconnection_reason_omitted_from_dict_when_none(tuner_co
     acc.call_start_abs_ns = 1_000_000_000
     acc.call_end_abs_ns = 2_000_000_000
     acc.done = True
-    payload = acc.build_payload(tuner_config, [])
+    payload = acc.build_payload(tuner_config)
     assert "disconnection_reason" not in payload.to_dict()
 
 
@@ -221,10 +108,8 @@ def test_cost_calculator_invoked_and_stored_in_payload(tuner_config):
     acc.call_start_abs_ns = base_ns
     acc.call_end_abs_ns = base_ns + 60_000_000_000  # 60s call
     acc.done = True
-    # Simulate LLM metrics: 100 prompt + 50 completion = 150 total
     token_value = SimpleNamespace(prompt_tokens=100, completion_tokens=50, total_tokens=150)
     acc.on_metrics_frame(SimpleNamespace(data=[_metric("LLMUsageMetricsData", value=token_value)]))
-    # Simulate TTS metrics: 200 characters
     acc.on_metrics_frame(SimpleNamespace(data=[_metric("TTSUsageMetricsData", value=200)]))
 
     def calculate_cost(usage):
@@ -234,7 +119,7 @@ def test_cost_calculator_invoked_and_stored_in_payload(tuner_config):
         stt_cost = usage.stt_audio_seconds * 0.000_006
         return llm_cost + tts_cost + stt_cost
 
-    payload = acc.build_payload(tuner_config, [], calculate_cost)
+    payload = acc.build_payload(tuner_config, calculate_cost)
 
     expected = 100 * 0.000_003 + 50 * 0.000_015 + 200 * 0.000_030 + 60 * 0.000_006
     assert payload.cost == pytest.approx(expected)
@@ -247,7 +132,7 @@ def test_cost_calculator_none_omits_cost_from_payload(tuner_config):
     acc.call_start_abs_ns = 1_000_000_000
     acc.call_end_abs_ns = 2_000_000_000
     acc.done = True
-    payload = acc.build_payload(tuner_config, [])
+    payload = acc.build_payload(tuner_config)
     assert payload.cost is None
     assert "call_cost" not in payload.to_dict()
 
@@ -274,7 +159,7 @@ def test_cost_calculator_receives_correct_usage_fields(tuner_config):
         })
         return 0.0
 
-    acc.build_payload(tuner_config, [], capture_usage)
+    acc.build_payload(tuner_config, capture_usage)
 
     assert captured["prompt"] == 80
     assert captured["completion"] == 20

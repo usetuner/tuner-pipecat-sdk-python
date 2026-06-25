@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
@@ -55,6 +56,42 @@ class LatencyMeasurement(BaseModel):
     is_proactive: bool = False
     was_interrupted: bool | None = None
     interrupted_at_ms: int | None = None
+
+
+@dataclass
+class LiveTurn:
+    """A transcript row built LIVE from the frame stream, in arrival order — the event-sourced
+    mirror of pipecat's own conversation construction (usePipecatConversation). The transcript is
+    *not* reconstructed from the final LLM context; each turn is materialized when its frames
+    arrive. Timing is read from the linked SpeechSegment/LatencyMeasurement at assembly (where it
+    is final, after latency adjustments); only an unvoiced draft falls back to ``generated_ms``.
+
+    kind: "user" | "agent" | "agent_function" | "agent_result".
+    """
+
+    kind: str
+    order: int
+    # user: each finalized STT transcription in this turn, as (text, rel_ms). A user row groups
+    # exactly the transcriptions between two UserStoppedSpeaking boundaries — the same unit
+    # pipecat's aggregator commits as one user message — so there is no silence-gap split/merge.
+    chunks: list[tuple[str, int]] = field(default_factory=list)
+    # agent: joined LLM-generated text for this response.
+    text: str = ""
+    # user row timing, captured live from the frames (not derived from segments).
+    start_ms: int = 0
+    end_ms: int | None = None
+    stt_ms: int | None = None
+    # Links into the latency/speech substrate (never matched by text).
+    user_segment_id: int | None = None
+    bot_segment_id: int | None = None
+    # agent fallback timing when the turn was generated but never voiced (no bot segment).
+    generated_ms: int | None = None
+    # tool rows:
+    tool_call_id: str | None = None
+    function_name: str | None = None
+    arguments: Any = None
+    result: Any = None
+    occurrence_ms: int = 0
 
 
 class TranscriptWord(BaseModel):

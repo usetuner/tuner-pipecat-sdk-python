@@ -37,7 +37,6 @@ def test_observer_init():
     assert o._config.workspace_id == 2
     assert o._config.base_url == "http://localhost:8000"
     assert o._acc is not None
-    assert o._context_provider is None
     assert o._flushed is False
 
 

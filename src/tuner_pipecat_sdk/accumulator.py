@@ -7,7 +7,7 @@ from typing import Any
 
 from loguru import logger
 
-from .models import CallPayload, CallUsage, LatencyMeasurement, SpeechSegment
+from .models import CallPayload, CallUsage, LatencyMeasurement, LiveTurn, SpeechSegment
 from .payload_builder import build_payload
 from .tool_timing_registry import ToolTimingRegistry
 
@@ -93,6 +93,16 @@ class CallAccumulator:
     # the proactive bot greeting from mid-conversation tool or node transitions.
     _user_has_spoken: bool = field(default=False, repr=False)
 
+    # Event-sourced transcript: turns built live from frames, in arrival order. This is the
+    # transcript substrate (text + order); the speech_segments/measurements above remain the
+    # latency substrate. The two are joined by segment id snapshotted at frame time, never by text.
+    live_turns: list[LiveTurn] = field(default_factory=list)
+    _turn_order: int = field(default=0, repr=False)
+    # The user turn currently accruing transcriptions (one per active user segment).
+    _open_user_turn: LiveTurn | None = field(default=None, repr=False)
+    # The agent turn currently accruing LLM text / awaiting voicing.
+    _open_agent_turn: LiveTurn | None = field(default=None, repr=False)
+
     # misc
     done: bool = False
 
@@ -115,6 +125,17 @@ class CallAccumulator:
         self._next_segment_id += 1
         self.speech_segments.append(seg)
         return seg
+
+    def _append_live(self, turn: LiveTurn) -> LiveTurn:
+        """Append a LiveTurn in arrival/commit order, assigning its order index."""
+        turn.order = self._turn_order
+        self._turn_order += 1
+        self.live_turns.append(turn)
+        return turn
+
+    def _new_turn(self, kind: str, **kwargs: Any) -> LiveTurn:
+        """Create and immediately append a LiveTurn (agent/tool rows)."""
+        return self._append_live(LiveTurn(kind=kind, order=0, **kwargs))
 
     def _segment_by_id(self, segment_id: int | None) -> SpeechSegment | None:
         if segment_id is None:
@@ -208,6 +229,16 @@ class CallAccumulator:
                 bot_seg.interrupted = was_interrupted
         self._active_turn_number = None
 
+    def _ensure_open_user_turn(self, start_ms: int) -> LiveTurn:
+        """Open the in-progress user turn if none is accruing (created but not yet appended —
+        it commits to the transcript at UserStoppedSpeaking, like pipecat's aggregator)."""
+        if self._open_user_turn is None:
+            self._open_user_turn = LiveTurn(
+                kind="user", order=0, start_ms=start_ms,
+                user_segment_id=self._active_user_segment_id,
+            )
+        return self._open_user_turn
+
     def on_user_started_speaking(self, timestamp_ns: int) -> None:
         """Use frame timestamp as the authoritative user-start anchor for the active segment."""
         self._user_has_spoken = True
@@ -217,23 +248,32 @@ class CallAccumulator:
         if bot_seg is not None:
             bot_seg.interrupted_at_ms = self._rel_ms(timestamp_ns)
 
+        started_ms = self._rel_ms(timestamp_ns)
+        self._ensure_open_user_turn(started_ms)
+
         seg = self._segment_by_id(self._active_user_segment_id)
         if seg is None:
             return
-        started_ms = self._rel_ms(timestamp_ns)
         if seg.start_ms == 0:
             seg.start_ms = started_ms
         else:
             seg.start_ms = min(seg.start_ms, started_ms)
-        # Open a new per-utterance window. A coalesced turn (multiple utterances before any
-        # bot reply) accrues several windows, preserving per-utterance timing.
         seg.windows.append([started_ms, None])
 
     def on_transcription(self, text: str, timestamp_ns: int) -> None:
-        """Record a finalized STT transcription. Used by the enricher as the authoritative
-        signal for which context user messages were actually spoken."""
-        if text and text.strip():
-            self.user_transcriptions.append((text, self._rel_ms(timestamp_ns)))
+        """Record a finalized STT transcription and accrue it onto the in-progress user turn.
+
+        A user row groups exactly the transcriptions between two UserStoppedSpeaking boundaries —
+        the same unit pipecat's aggregator commits as one user message — committed (appended) at
+        on_user_stopped_speaking. A turn exists iff a real transcription arrived, so
+        developer-injected ``{"role":"user"}`` context messages (which never transcribe) never
+        appear.
+        """
+        if not (text and text.strip()):
+            return
+        rel = self._rel_ms(timestamp_ns)
+        self.user_transcriptions.append((text, rel))  # kept for diagnostics
+        self._ensure_open_user_turn(rel).chunks.append((text, rel))
 
     def on_tts_text(self, text: str, timestamp_ns: int) -> None:
         """Record a voiced TTS sentence on the timeline. Assigned to a bot segment by time
@@ -248,33 +288,40 @@ class CallAccumulator:
             self.assistant_generations.append((joined, self._rel_ms(timestamp_ns)))
         self._llm_response_buffer = []
 
-    def on_llm_response_start(self) -> None:
+    def on_llm_response_start(self, timestamp_ns: int = 0) -> None:
         """Begin a new LLM response. Flush any pending buffer first (robustness if a prior
-        End frame was missed), then reset."""
+        End frame was missed), then open a fresh agent turn in arrival order."""
         if self._llm_response_buffer:
             self._finalize_llm_response(0)
         self._llm_response_buffer = []
+        # A dangling open agent turn (generated but never voiced — superseded) finalizes here.
+        self._open_agent_turn = self._new_turn("agent", generated_ms=self._rel_ms(timestamp_ns))
 
     def on_llm_text(self, text: str) -> None:
         """Accumulate a streamed LLM text chunk for the in-progress response."""
         if text:
             self._llm_response_buffer.append(text)
+            if self._open_agent_turn is not None:
+                self._open_agent_turn.text += text
 
     def on_llm_response_end(self, timestamp_ns: int) -> None:
-        """Finalize the in-progress LLM response into assistant_generations. The assistant
-        aggregator builds the context message from these same chunks, so this is the
-        authoritative real-vs-injected signal for assistant context messages."""
+        """Finalize the in-progress LLM response. The assistant aggregator builds the context
+        message from these same chunks, so this also feeds the diagnostic generations list."""
         self._finalize_llm_response(timestamp_ns)
+        if self._open_agent_turn is not None:
+            self._open_agent_turn.generated_ms = self._rel_ms(timestamp_ns)
 
     def on_user_stopped_speaking(self, timestamp_ns: int) -> None:
-        """Capture user stop_ms directly from VAD frame.
+        """Capture user stop_ms and COMMIT the in-progress user turn.
 
-        Used as the primary source for interrupted turns where on_latency_breakdown
-        receives user_turn_start_time=None and cannot compute the stop time.
+        UserStoppedSpeaking is pipecat's user-message boundary: the aggregator commits the
+        accumulated transcriptions as one message here. We mirror that — append the open user
+        turn (if it captured any transcription) to the transcript at this moment, so the row
+        grouping and ordering match pipecat exactly. A turn that captured nothing real is dropped.
         """
+        stopped_ms = self._rel_ms(timestamp_ns)
         seg = self._segment_by_id(self._active_user_segment_id)
         if seg is not None:
-            stopped_ms = self._rel_ms(timestamp_ns)
             seg.stop_ms = max(seg.stop_ms or 0, stopped_ms)
             # Close the open window (or open+close one if no start was recorded).
             if seg.windows and seg.windows[-1][1] is None:
@@ -282,8 +329,23 @@ class CallAccumulator:
             else:
                 seg.windows.append([seg.start_ms, stopped_ms])
 
-    def on_function_call_result(self, tool_call_id: str, timestamp_ns: int) -> None:
-        self.registry.record_completion_ns(tool_call_id, timestamp_ns)
+        if self._open_user_turn is not None:
+            if self._open_user_turn.chunks:
+                self._open_user_turn.end_ms = stopped_ms
+                self._append_live(self._open_user_turn)
+            self._open_user_turn = None
+
+    def on_function_call_result(self, frame: Any, timestamp_ns: int) -> None:
+        tool_call_id = getattr(frame, "tool_call_id", None)
+        if tool_call_id:
+            self.registry.record_completion_ns(tool_call_id, timestamp_ns)
+        self._new_turn(
+            "agent_result",
+            tool_call_id=tool_call_id,
+            function_name=getattr(frame, "function_name", None),
+            result=getattr(frame, "result", None),
+            occurrence_ms=self._rel_ms(timestamp_ns),
+        )
 
     def on_bot_stopped(self, timestamp_ns: int) -> None:
         """Record the end of a bot speech segment.
@@ -307,6 +369,9 @@ class CallAccumulator:
                 bot_seg.spoken_text = " ".join(claimed).strip() or None
             self._tts_timeline = [(t, ms) for t, ms in self._tts_timeline if ms > stop_ms]
             self._current_bot_segment_id = None
+            # This agent turn is voiced and done; the next LLM response opens a fresh turn, and a
+            # later BotStarted within a new response won't fold into this one.
+            self._open_agent_turn = None
         else:
             logger.warning("[tuner] bot_stopped with no active bot segment; ignoring event")
 
@@ -314,6 +379,13 @@ class CallAccumulator:
         tool_call_id = getattr(frame, "tool_call_id", None)
         if tool_call_id:
             self.registry.record_invocation_ns(tool_call_id, timestamp_ns)
+        self._new_turn(
+            "agent_function",
+            tool_call_id=tool_call_id,
+            function_name=getattr(frame, "function_name", None),
+            arguments=getattr(frame, "arguments", None),
+            occurrence_ms=self._rel_ms(timestamp_ns),
+        )
 
     def on_bot_started_speaking(self, timestamp_ns: int) -> None:
         """Append a bot SpeechSegment and link a LatencyMeasurement to the user segment
@@ -345,6 +417,15 @@ class CallAccumulator:
             user_segment_id=response_key, bot_segment_id=seg.id, is_proactive=is_proactive
         )
         self.latency_measurements.append(self._pending_measurement)
+
+        # Bind this voicing to the live agent turn so it picks up the segment's (final) timing.
+        # If there's an open generated turn not yet voiced, this is its voicing; otherwise the
+        # bot spoke with no tracked LLM response (e.g. a static/templated greeting) — open one,
+        # its text falls back to the voiced TTS at assembly.
+        if self._open_agent_turn is not None and self._open_agent_turn.bot_segment_id is None:
+            self._open_agent_turn.bot_segment_id = seg.id
+        else:
+            self._open_agent_turn = self._new_turn("agent", bot_segment_id=seg.id)
 
     def on_latency_measured(self, latency_secs: float) -> None:
         self._pending_latency_ms_queue.append(max(0, int(latency_secs * 1000)))
@@ -461,6 +542,13 @@ class CallAccumulator:
         if seg is not None and seg.start_ms > 0 and not seg.stop_ms:
             seg.stop_ms = self._rel_ms(timestamp_ns)
 
+        # Commit any user turn still in progress (call cut off before UserStoppedSpeaking).
+        if self._open_user_turn is not None:
+            if self._open_user_turn.chunks:
+                self._open_user_turn.end_ms = self._rel_ms(timestamp_ns)
+                self._append_live(self._open_user_turn)
+            self._open_user_turn = None
+
     def on_metrics_frame(self, frame: Any) -> None:
         for d in getattr(frame, "data", []):
             cls_name = type(d).__name__
@@ -496,11 +584,15 @@ class CallAccumulator:
                     seg = self._segment_by_id(self._active_user_segment_id)
                     if seg is not None and val > 0 and seg.stt_ms is None:
                         seg.stt_ms = round(val * 1000)
+                    # Also stamp the in-progress user turn (the first STT TTFB of the turn wins).
+                    if self._open_user_turn is not None and val > 0 and (
+                        self._open_user_turn.stt_ms is None
+                    ):
+                        self._open_user_turn.stt_ms = round(val * 1000)
 
     def build_payload(
         self,
         config: Any,
-        transcript: list[dict[str, Any]],
         cost_calculator: Callable[[CallUsage], float] | None = None,
     ) -> CallPayload:
-        return build_payload(self, config, transcript, cost_calculator)
+        return build_payload(self, config, cost_calculator)

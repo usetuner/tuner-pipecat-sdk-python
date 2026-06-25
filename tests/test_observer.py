@@ -23,34 +23,16 @@ def observer():
     )
 
 
-@pytest.fixture
-def mock_context():
-    ctx = MagicMock()
-    ctx.messages = [
-        {"role": "user", "content": "Hi"},
-        {"role": "assistant", "content": "Hello"},
-    ]
-    return ctx
-
-
-def test_attach_context_sets_provider(observer, mock_context):
-    assert observer._context_provider is None
-    observer.attach_context(mock_context)
-    assert observer._context_provider is not None
-    assert observer._context_provider() == mock_context.messages
+def test_attach_context_is_noop(observer):
+    # attach_context is a deprecated no-op: the transcript is built live from frames now.
+    # Calling it must not raise and must not wire any context source.
+    observer.attach_context(MagicMock())
+    assert not hasattr(observer, "_context_provider")
 
 
 @pytest.mark.asyncio
-async def test_flush_without_context_warns_and_does_not_post(observer):
-    assert observer._context_provider is None
-    with patch("tuner_pipecat_sdk._base.post_call", new_callable=AsyncMock) as post_mock:
-        await observer._flush()
-        post_mock.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_flush_with_context_builds_and_posts(observer, mock_context):
-    observer.attach_context(mock_context)
+async def test_flush_builds_and_posts_without_context(observer):
+    # No context is attached; the transcript comes from acc.live_turns. Flush still posts.
     observer._acc.on_start(0)
     observer._acc.on_call_end(1_000_000_000)
 
@@ -64,8 +46,7 @@ async def test_flush_with_context_builds_and_posts(observer, mock_context):
 
 
 @pytest.mark.asyncio
-async def test_handle_end_frame_triggers_flush(observer, mock_context):
-    observer.attach_context(mock_context)
+async def test_handle_end_frame_triggers_flush(observer):
     observer._acc.call_start_abs_ns = 0
     observer._acc.call_end_abs_ns = 1_000_000_000
     observer._acc.done = True
