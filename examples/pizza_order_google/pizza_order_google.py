@@ -323,7 +323,6 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         ),
         observers=[observer, observer.latency_observer, turn_tracker],
     )
-    observer.attach_context(context)
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
