@@ -8,11 +8,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **`pizza_order_google` example** — full Google stack variant of the pizzeria bot: `GoogleSTTService` (Cloud Speech-to-Text V2), `GoogleLLMService` (Gemini 2.5 Flash), and `GoogleTTSService` (Cloud TTS, Chirp 3 HD).
+
 ### Changed
 - **`Observer` is now a pipeline-level observer (BREAKING).** Pass it to `PipelineTask(observers=[...])` instead of inserting it into the `Pipeline([...])` processor list. It now sees every frame at every processor boundary, so it stays out of the audio path and captures frames an intermediate processor consumes — notably `TranscriptionFrame`, which the user aggregator swallows before the old end-of-pipeline position could see it.
-  - Migration: remove `observer` from `Pipeline([...])` and add it to `observers=[observer, observer.latency_observer, turn_tracker]`. `attach_context()` / `attach_turn_tracking_observer()` are unchanged.
+  - Migration: remove `observer` from `Pipeline([...])` and add it to `observers=[observer, observer.latency_observer, turn_tracker]`. `attach_turn_tracking_observer()` is unchanged.
+
+### Deprecated
+- **`attach_context()`** is now a no-op and will be removed in a future release. The transcript is built live from the frame stream and no longer reads the LLM context object. Existing calls are safe to remove.
 
 ### Fixed
+- **Interrupted turns no longer emit a stale assistant message** — the observer now correctly discards partial LLM output when a turn is interrupted before the bot finishes speaking.
 - **Developer-injected `{"role": "user"}` messages (e.g. a `"Greet the customer…"` kickoff) no longer appear as user turns or shift the transcript out of sync.** Real user turns are now matched against captured STT transcriptions; when no transcriptions are available the observer falls back to dropping user messages that precede a proactive greeting.
 - **LLM latency (`llm_node_ttft`) is now populated for providers that emit a TTFB metric but no processing-time metric (e.g. Google/Gemini).** It falls back to the LLM service's TTFB when processing time is absent.
 - **Per-node TTFB attribution corrected.** `tts_node_ttfb` now reports the TTS service's own TTFB instead of the first TTFB in the turn (which was the STT's on real turns).
