@@ -17,6 +17,7 @@ from pipecat.frames.frames import (
     EndFrame,
     FunctionCallInProgressFrame,
     FunctionCallResultFrame,
+    LLMContextAssistantTimestampFrame,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
     LLMTextFrame,
@@ -296,20 +297,33 @@ class _BaseObserver(BaseObserver):
             self._processed_frames = set(self._frame_history)
         self._handle(data.frame, time.time_ns())
 
+    # Frame type-name substrings logged when debug=True. Covers the transcript-relevant frames
+    # (speech boundaries, STT/LLM/TTS/aggregated text, the assistant-commit timestamp frame, tool
+    # calls, interruptions) while skipping high-volume audio frames.
+    _DEBUG_FRAME_NAME_PARTS = (
+        "BotStarted",
+        "BotStopped",
+        "UserStarted",
+        "UserStopped",
+        "Transcription",
+        "Text",  # TTSTextFrame, LLMTextFrame, AggregatedTextFrame, AggregatedTextProgressFrame
+        "LLMFullResponse",
+        "LLMContext",  # LLMContextAssistantTimestampFrame (the commit marker)
+        "Interruption",
+        "FunctionCall",
+        "TTSStarted",
+        "TTSStopped",
+    )
+
     def _handle(self, frame: Any, timestamp_ns: int) -> None:
-        if self._config.debug and isinstance(
-            frame,
-            (
-                BotStartedSpeakingFrame,
-                BotStoppedSpeakingFrame,
-                TTSTextFrame,
-                UserStartedSpeakingFrame,
-                UserStoppedSpeakingFrame,
-            ),
-        ):
-            logger.debug(
-                "[tuner] frame {} @ {}ms", type(frame).__name__, self._acc._rel_ms(timestamp_ns)
-            )
+        if self._config.debug:
+            name = type(frame).__name__
+            if any(part in name for part in self._DEBUG_FRAME_NAME_PARTS):
+                text = getattr(frame, "text", None)
+                extra = f" text={text!r}" if text else ""
+                logger.debug(
+                    "[tuner] frame {} @ {}ms{}", name, self._acc._rel_ms(timestamp_ns), extra
+                )
 
         if isinstance(frame, StartFrame):
             self._acc.on_start(timestamp_ns)
@@ -353,10 +367,15 @@ class _BaseObserver(BaseObserver):
             self._acc.on_llm_response_end(timestamp_ns)
 
         elif isinstance(frame, LLMTextFrame):
-            # Generated LLM text — the authoritative signal for which context assistant messages
-            # were actually generated (vs developer-injected {"role":"assistant"} messages). The
-            # assistant aggregator builds the context message from exactly these frames.
+            # Generated LLM text — accumulated into the in-progress assistant turn (committed only
+            # when its LLMContextAssistantTimestampFrame arrives).
             self._acc.on_llm_text(frame.text)
+
+        elif isinstance(frame, LLMContextAssistantTimestampFrame):
+            # Pipecat pushes this exactly when it commits an assistant message to the LLM context.
+            # It is the authoritative signal for which assistant turns are real — an interrupted
+            # response that never commits never gets this frame, so it never appears.
+            self._acc.on_assistant_commit(timestamp_ns)
 
         elif isinstance(frame, UserStartedSpeakingFrame):
             self._acc.on_user_started_speaking(timestamp_ns)

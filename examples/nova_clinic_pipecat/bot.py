@@ -336,6 +336,7 @@ async def run_bot(
         llm_model="gpt-5-mini-2025-08-07",
         tts_model="openai/tts-1",
         cost_calculator=calculate_cost,
+        debug=True,
     )
     observer.attach_turn_tracking_observer(turn_tracker)
 

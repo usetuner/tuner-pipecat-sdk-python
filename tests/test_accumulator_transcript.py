@@ -46,16 +46,12 @@ def test_order_is_arrival_order(replay, tuner_config):
         .user_start(1000)
         .transcription("first", 1100)
         .user_stop(1200)
-        .generate("reply one", 1300, 1400)
-        .bot_start(1500)
-        .bot_stop(1800)
+        .bot_says("reply one", 1500, 1800)
         .turn_start(2, 3000)
         .user_start(3000)
         .transcription("second", 3100)
         .user_stop(3200)
-        .generate("reply two", 3300, 3400)
-        .bot_start(3500)
-        .bot_stop(3800)
+        .bot_says("reply two", 3500, 3800)
         .rows(tuner_config)
     )
     assert _roles(rows) == ["user", "agent", "user", "agent"]
@@ -187,32 +183,28 @@ def test_non_json_tool_result_is_text(replay, tuner_config):
     assert result.tool.result is None
 
 
-def test_unvoiced_draft_kept_and_timed_at_generation(replay, tuner_config):
-    # A draft the LLM generated but never voiced (superseded by a tool call) is kept, timed at
-    # its generation moment (real ms, correct order) — never 00:00.
+def test_unvoiced_draft_never_committed_is_dropped(replay, tuner_config):
+    # A draft the LLM generated but that was superseded (a tool call ran, then a new response)
+    # never receives a commit (LLMContextAssistantTimestampFrame), so — exactly like pipecat —
+    # it never appears. Only the committed response shows.
     rows = (
         replay()
         .turn_start(1, 1000)
         .user_start(1000)
         .transcription("i want pizza", 1100)
         .user_stop(1200)
-        .generate("Let me look that up.", 1500, 1700)  # generated, never voiced
+        .generate("Let me look that up.", 1500, 1700)  # generated, never voiced, never committed
         .tool_call("lookup", "t1", {}, 1800)
         .tool_result("lookup", "t1", {"ok": True}, 1900)
-        .generate("What size?", 2100, 2200)
-        .tts("What size?", 2150)
-        .bot_start(2300)
-        .bot_stop(2800)
+        .bot_says("What size?", 2300, 2800)  # voiced + committed
         .rows(tuner_config)
     )
     agents = [r for r in rows if r.role == "agent"]
-    draft = next(r for r in agents if "look that up" in r.text)
-    voiced = next(r for r in agents if "size" in r.text)
-    assert draft.start_ms == 1700  # generation moment, not 0
-    assert voiced.start_ms == 2300
+    assert [a.text for a in agents] == ["What size?"]
+    assert agents[0].start_ms == 2300
 
 
-def test_speak_tool_speak_both_voiced_are_timed(replay, tuner_config):
+def test_speak_tool_speak_both_committed_are_timed(replay, tuner_config):
     rows = (
         replay()
         .turn_start(1, 1000)
@@ -223,12 +215,14 @@ def test_speak_tool_speak_both_voiced_are_timed(replay, tuner_config):
         .tts("Just to confirm.", 1600)
         .bot_start(1800)
         .bot_stop(2200)
+        .assistant_commit(2200)
         .tool_call("check", "t1", {}, 2300)
         .tool_result("check", "t1", {"ok": True}, 2400)
         .generate("Your total is $10.", 2600, 2700)
         .tts("Your total is $10.", 2650)
         .bot_start(2800)
         .bot_stop(3200)
+        .assistant_commit(3200)
         .rows(tuner_config)
     )
     agents = [r for r in rows if r.role == "agent"]
@@ -305,6 +299,7 @@ def test_interruption_flag_propagates(replay, tuner_config):
         .turn_start(2, 2000)  # interrupting turn
         .user_start(2000)  # interrupts the bot
         .bot_stop(2050)
+        .assistant_commit(2050)  # the spoken portion is committed
         .transcription("stop", 2100)
         .user_stop(2300)
         .turn_end(1, interrupted=True)
@@ -318,46 +313,85 @@ def test_interruption_flag_propagates(replay, tuner_config):
     assert interrupting_user.metadata["interrupted"] is True
 
 
-def test_interrupted_regenerated_greeting_full_text_and_timing(replay, tuner_config):
-    # The greeting is interrupted within ms (voices nothing) and regenerated. The orphan segment
-    # voiced nothing; the real re-greeting and the next turn keep their own timing, and the agent
-    # text is the FULL generation (recovering content the committed context would have truncated).
+def test_interrupted_uncommitted_greeting_is_dropped(replay, tuner_config):
+    # The greeting is interrupted and regenerated. The interrupted attempt never receives a
+    # commit (LLMContextAssistantTimestampFrame), so — like pipecat — it does not appear. The
+    # committed re-greeting and the next turn show with their real timing.
     full = "Welcome to Pizza! Today we have margherita and pepperoni. What can I get you?"
     rows = (
         replay()
-        # turn 1: greeting interrupted almost immediately (no TTS voiced)
+        # turn 1: greeting interrupted; never committed
         .turn_start(1, 100)
         .generate("Welcome to Pizza!", 200, 300)
         .bot_start(400)
         .user_start(450)  # barge-in
-        .bot_stop(460)  # voiced nothing
+        .bot_stop(460)
         .transcription("okay", 500)
         .user_stop(700)
         .turn_end(1, interrupted=True)
-        # turn 2: full re-greeting, voiced
+        # turn 2: full re-greeting, voiced + committed
         .turn_start(2, 800)
-        .generate(full, 900, 1200)
-        .tts(full, 1000)
-        .bot_start(1300)
-        .bot_stop(5000)
-        .latency(0.2, "TTSService")
-        # turn 3: user orders, bot replies
+        .bot_says(full, 1300, 5000)
+        # turn 3: user orders, bot replies (committed)
         .turn_start(3, 7000)
         .user_start(7000)
         .transcription("a margherita", 7200)
         .user_stop(7500)
-        .generate("Coming up!", 7800, 8000)
-        .tts("Coming up!", 7900)
-        .bot_start(8100)
-        .bot_stop(9000)
+        .bot_says("Coming up!", 8100, 9000)
         .turn_end(3)
         .rows(tuner_config)
     )
     agents = [r for r in rows if r.role == "agent"]
-    # full generation text is rendered (not a truncated prefix)
-    assert any(a.text == full for a in agents)
+    assert [a.text for a in agents] == [full, "Coming up!"]  # interrupted attempt absent
     coming = next(a for a in agents if a.text == "Coming up!")
-    assert coming.start_ms == 8100  # later turn keeps its real timing (no desync to 00:00)
+    assert coming.start_ms == 8100
+
+
+def test_interrupted_assistant_responses_without_commit_are_dropped(replay, tuner_config):
+    """Real nova-clinic trial: the caller interrupts twice while the bot is responding. Pipecat
+    discards those interrupted assistant responses (they never receive an
+    LLMContextAssistantTimestampFrame), committing only the greeting, the later answer, and the
+    final (call-ended) response. Tuner must match that committed set exactly.
+
+    Pipecat committed: greeting, U, U, U, "Of course. Which doctor…", U, final answer.
+    """
+    full_final = (
+        "Thank you for asking. Currently, Dr. Ahmad Waheed is not part of our clinic. "
+        "Our available doctors are Dr. Sarah Patel and Dr. James Lee."
+    )
+    greeting = "Hello, thank you for calling Nova Clinic. How can I help you today?"
+    r = replay()
+    # greeting — committed
+    r.turn_start(1, 0).bot_says(greeting, 4075, 9152)
+    r.user_start(10442).transcription("Hello, I would like to book an appointment.", 13201)
+    r.user_stop(13224)
+    # response 2 — generated, never voiced, interrupted → no commit → dropped
+    r.generate("Of course, I can help you with that. May I have your full name?", 13226, 14907)
+    r.turn_start(2, 15499).user_start(15499)
+    # response 3 — voiced briefly then interrupted → no commit → dropped
+    r.generate("Of course, I can help you with both booking and your doctor inquiry.", 21868, 23541)
+    r.transcription("You know what?", 17381)
+    r.transcription("I would also want to inquire about a doctor.", 21831).user_stop(21866)
+    r.bot_start(26085).bot_stop(27145)  # spoke a bit, no commit
+    r.turn_start(3, 27138).user_start(27138)  # interrupts response 3
+    # response 4 — committed
+    r.transcription("And I want to start first with the doctor inquiry.", 32130).user_stop(32164)
+    r.bot_says("Of course. Which doctor would you like to know more about?", 35470, 41421)
+    # user 4
+    r.turn_start(4, 42340).user_start(42340)
+    r.transcription("Does Dr. Ahmad work here?", 49641).user_stop(49670)
+    # response 5 — spoken; call ends before its own commit frame → committed at call end
+    r.generate(full_final, 49672, 56524).bot_start(53024)
+    rows = r.end(60500).rows(tuner_config)
+
+    assert _roles(rows) == ["agent", "user", "user", "user", "agent", "user", "agent"]
+    agents = _texts(rows, "agent")
+    assert agents[0].startswith("Hello, thank you for calling")
+    assert agents[1] == "Of course. Which doctor would you like to know more about?"
+    assert agents[2] == full_final
+    # the two interrupted responses never appear
+    assert not any("help you with that" in t for t in agents)
+    assert not any("both booking" in t for t in agents)
 
 
 def test_latency_metadata_per_node(replay, tuner_config):

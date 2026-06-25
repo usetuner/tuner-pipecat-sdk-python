@@ -76,6 +76,23 @@ class Replay:
         self.acc.on_bot_stopped(self._ns(ms))
         return self
 
+    def assistant_commit(self, ms: int) -> "Replay":
+        """The LLMContextAssistantTimestampFrame — pipecat's assistant-message commit marker.
+        The in-progress agent turn is appended to the transcript here (and only here)."""
+        self.acc.on_assistant_commit(self._ns(ms))
+        return self
+
+    def bot_says(self, text: str, start_ms: int, end_ms: int) -> "Replay":
+        """Shorthand for a complete, committed bot turn: generate → voice → commit."""
+        return (
+            self.llm_start(start_ms)
+            .llm_text(text)
+            .llm_end(end_ms)
+            .bot_start(start_ms)
+            .bot_stop(end_ms)
+            .assistant_commit(end_ms)
+        )
+
     # tools
     def tool_call(self, name: str, tool_call_id: str, arguments, ms: int) -> "Replay":
         frame = SimpleNamespace(

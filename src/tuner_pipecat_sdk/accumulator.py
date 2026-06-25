@@ -289,13 +289,18 @@ class CallAccumulator:
         self._llm_response_buffer = []
 
     def on_llm_response_start(self, timestamp_ns: int = 0) -> None:
-        """Begin a new LLM response. Flush any pending buffer first (robustness if a prior
-        End frame was missed), then open a fresh agent turn in arrival order."""
+        """Begin a new LLM response — open a fresh (not-yet-committed) agent turn.
+
+        The previous open turn, if it never received a commit (LLMContextAssistantTimestampFrame),
+        is abandoned here: pipecat discards an assistant response that was interrupted before it
+        committed, so we mirror that by simply not appending it.
+        """
         if self._llm_response_buffer:
             self._finalize_llm_response(0)
         self._llm_response_buffer = []
-        # A dangling open agent turn (generated but never voiced — superseded) finalizes here.
-        self._open_agent_turn = self._new_turn("agent", generated_ms=self._rel_ms(timestamp_ns))
+        self._open_agent_turn = LiveTurn(
+            kind="agent", order=0, generated_ms=self._rel_ms(timestamp_ns)
+        )
 
     def on_llm_text(self, text: str) -> None:
         """Accumulate a streamed LLM text chunk for the in-progress response."""
@@ -310,6 +315,19 @@ class CallAccumulator:
         self._finalize_llm_response(timestamp_ns)
         if self._open_agent_turn is not None:
             self._open_agent_turn.generated_ms = self._rel_ms(timestamp_ns)
+
+    def on_assistant_commit(self, timestamp_ns: int) -> None:
+        """Commit the in-progress assistant turn to the transcript.
+
+        Driven by ``LLMContextAssistantTimestampFrame``, which pipecat pushes exactly when it
+        commits an assistant message to the LLM context. An assistant response that never reaches
+        a commit (interrupted before it was committed) is therefore never appended — matching
+        pipecat's committed transcript precisely.
+        """
+        turn = self._open_agent_turn
+        if turn is not None and (turn.text.strip() or turn.bot_segment_id is not None):
+            self._append_live(turn)
+        self._open_agent_turn = None
 
     def on_user_stopped_speaking(self, timestamp_ns: int) -> None:
         """Capture user stop_ms and COMMIT the in-progress user turn.
@@ -369,9 +387,9 @@ class CallAccumulator:
                 bot_seg.spoken_text = " ".join(claimed).strip() or None
             self._tts_timeline = [(t, ms) for t, ms in self._tts_timeline if ms > stop_ms]
             self._current_bot_segment_id = None
-            # This agent turn is voiced and done; the next LLM response opens a fresh turn, and a
-            # later BotStarted within a new response won't fold into this one.
-            self._open_agent_turn = None
+            # NOTE: do NOT clear _open_agent_turn here — the assistant message commits slightly
+            # after the bot stops (LLMContextAssistantTimestampFrame), and that commit is what
+            # appends the turn. Clearing here would drop it.
         else:
             logger.warning("[tuner] bot_stopped with no active bot segment; ignoring event")
 
@@ -418,14 +436,14 @@ class CallAccumulator:
         )
         self.latency_measurements.append(self._pending_measurement)
 
-        # Bind this voicing to the live agent turn so it picks up the segment's (final) timing.
-        # If there's an open generated turn not yet voiced, this is its voicing; otherwise the
-        # bot spoke with no tracked LLM response (e.g. a static/templated greeting) — open one,
-        # its text falls back to the voiced TTS at assembly.
-        if self._open_agent_turn is not None and self._open_agent_turn.bot_segment_id is None:
+        # Bind this voicing to the in-progress (not-yet-committed) agent turn so the committed
+        # row picks up the segment's final timing/latency. If the bot spoke with no tracked LLM
+        # response (e.g. a static/templated greeting), open a turn here; its text falls back to
+        # the voiced TTS at assembly. The turn is appended only when its commit frame arrives.
+        if self._open_agent_turn is None:
+            self._open_agent_turn = LiveTurn(kind="agent", order=0)
+        if self._open_agent_turn.bot_segment_id is None:
             self._open_agent_turn.bot_segment_id = seg.id
-        else:
-            self._open_agent_turn = self._new_turn("agent", bot_segment_id=seg.id)
 
     def on_latency_measured(self, latency_secs: float) -> None:
         self._pending_latency_ms_queue.append(max(0, int(latency_secs * 1000)))
@@ -548,6 +566,17 @@ class CallAccumulator:
                 self._open_user_turn.end_ms = self._rel_ms(timestamp_ns)
                 self._append_live(self._open_user_turn)
             self._open_user_turn = None
+
+        # Commit the final assistant turn if the bot was still speaking when the call ended
+        # (pipecat commits it on the closing Cancel/EndFrame). A turn that produced neither text
+        # nor a bot segment is dropped.
+        turn = self._open_agent_turn
+        if turn is not None and (turn.text.strip() or turn.bot_segment_id is not None):
+            bot_seg = self._segment_by_id(turn.bot_segment_id)
+            if bot_seg is not None and not bot_seg.stop_ms and bot_seg.start_ms > 0:
+                bot_seg.stop_ms = self._rel_ms(timestamp_ns)
+            self._append_live(turn)
+        self._open_agent_turn = None
 
     def on_metrics_frame(self, frame: Any) -> None:
         for d in getattr(frame, "data", []):
