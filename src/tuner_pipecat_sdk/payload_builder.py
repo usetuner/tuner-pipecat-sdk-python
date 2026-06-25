@@ -6,7 +6,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from .models import AiModels, CallPayload, CallUsage, GeneralMetaData, UsageToken
-from .transcript_enricher import enrich_transcript
+from .transcript_builder import build_segments_from_turns
 
 if TYPE_CHECKING:
     from .accumulator import CallAccumulator
@@ -24,10 +24,9 @@ def _ensure_monotonic_bounds(segments: list[Any]) -> list[Any]:
 def build_payload(
     acc: CallAccumulator,
     config: TunerConfig,
-    transcript: list[dict[str, Any]],
     cost_calculator: Callable[[CallUsage], float] | None = None,
 ) -> CallPayload:
-    enriched = _ensure_monotonic_bounds(enrich_transcript(acc, transcript))
+    enriched = _ensure_monotonic_bounds(build_segments_from_turns(acc))
     start_ts = acc.call_start_abs_ns // 1_000_000_000
     end_ts = acc.call_end_abs_ns // 1_000_000_000
 

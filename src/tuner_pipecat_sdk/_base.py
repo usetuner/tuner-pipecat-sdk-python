@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+from collections import deque
 from collections.abc import Callable
 from typing import Any
 
@@ -16,21 +17,26 @@ from pipecat.frames.frames import (
     EndFrame,
     FunctionCallInProgressFrame,
     FunctionCallResultFrame,
+    LLMContextAssistantTimestampFrame,
+    LLMFullResponseEndFrame,
+    LLMFullResponseStartFrame,
+    LLMTextFrame,
     MetricsFrame,
     StartFrame,
+    TranscriptionFrame,
+    TTSTextFrame,
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
-    VADUserStoppedSpeakingFrame,
 )
+from pipecat.observers.base_observer import BaseObserver, FramePushed
 from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
-from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
+from pipecat.processors.frame_processor import FrameDirection
 
 from ._providers import PROVIDER_EXTRACTORS, ProviderExtractor
 from .accumulator import CallAccumulator
 from .client import post_call
 from .config import TunerConfig
 from .models import CallUsage
-
 
 _CI_VERSION_VARS = ("GITHUB_RUN_NUMBER", "CIRCLE_BUILD_NUM", "BUILD_NUMBER")
 
@@ -62,12 +68,18 @@ def _get(obj: Any, key: str) -> Any:
     return getattr(obj, key, None)
 
 
-class _BaseObserver(FrameProcessor):
+class _BaseObserver(BaseObserver):
     """
     Shared frame-processing logic for all Tuner observers.
 
-    Subclasses must call ``attach_context()`` (or an equivalent wrapper) with a
-    callable that returns the transcript list before the pipeline starts.
+    This is a pipeline-level observer (``PipelineTask(observers=[...])``), not a
+    processor in the pipeline. It therefore sees every frame at every processor
+    boundary — including frames an intermediate processor consumes without
+    forwarding (e.g. ``TranscriptionFrame``, swallowed by the user aggregator) —
+    and stays entirely out of the audio data path.
+
+    The transcript is built live from the frame stream (``acc.live_turns``); no LLM context
+    needs to be attached.
     """
 
     def __init__(
@@ -98,10 +110,6 @@ class _BaseObserver(FrameProcessor):
                 Optional — not collected automatically; pass it when the callee
                 identity is known to your application.
         """
-        # enable_direct_mode=True: frames bypass the internal process queue and are
-        # pushed through immediately (like old pipecat's simple pass-through). Without
-        # this, pipecat 1.0's _start_interruption() clears the queue on every
-        # InterruptionFrame, dropping buffered TTS audio and cutting speech short.
         super().__init__(**kwargs)
         self._config = TunerConfig(
             api_key=api_key,
@@ -123,7 +131,12 @@ class _BaseObserver(FrameProcessor):
         self._acc = CallAccumulator()
         self._acc.call_start_abs_ns = time.time_ns()
         self._flushed = False
-        self._context_provider: Callable[[], list] | None = None
+        # As a pipeline-level observer, on_push_frame fires once PER processor hop, so the
+        # same frame is seen many times. Dedup by frame id (bounded deque + set, mirroring
+        # pipecat's UserBotLatencyObserver). All hops of a frame occur back-to-back in one
+        # downstream traversal, so a modest window is sufficient.
+        self._processed_frames: set[int] = set()
+        self._frame_history: deque[int] = deque(maxlen=256)
         self._disconnection_reason_resolver = disconnection_reason_resolver
         self._cost_calculator = cost_calculator
 
@@ -146,12 +159,18 @@ class _BaseObserver(FrameProcessor):
 
         @turn_tracker.event_handler("on_turn_started")
         async def _on_turn_started(_tracker: Any, turn_number: int) -> None:
+            if self._config.debug:
+                logger.debug("[tuner] on_turn_started turn={}", turn_number)
             self._acc.on_turn_started(turn_number, time.time_ns())
 
         @turn_tracker.event_handler("on_turn_ended")
         async def _on_turn_ended(
             _tracker: Any, turn_number: int, _duration: float, was_interrupted: bool
         ) -> None:
+            if self._config.debug:
+                logger.debug(
+                    "[tuner] on_turn_ended turn={} interrupted={}", turn_number, was_interrupted
+                )
             self._acc.on_turn_ended(turn_number, was_interrupted)
 
     def attach_sip_info(
@@ -263,20 +282,51 @@ class _BaseObserver(FrameProcessor):
     # Frame processing
     # ------------------------------------------------------------------
 
-    async def process_frame(self, frame: Any, direction: FrameDirection) -> None:
-        await super().process_frame(frame, direction)
-        self._handle(frame, time.time_ns())
-        await self.push_frame(frame, direction)
+    async def on_push_frame(self, data: FramePushed) -> None:
+        # Pipeline-level observer: invoked for every frame transfer between processors.
+        # Only the downstream pass matters, and each frame must be handled once (it fires
+        # once per hop). Stamp with wall-clock time — the accumulator works in time.time_ns()
+        # relative to call_start_abs_ns, not the pipeline clock.
+        if data.direction != FrameDirection.DOWNSTREAM:
+            return
+        if data.frame.id in self._processed_frames:
+            return
+        self._processed_frames.add(data.frame.id)
+        self._frame_history.append(data.frame.id)
+        if len(self._processed_frames) > len(self._frame_history):
+            self._processed_frames = set(self._frame_history)
+        self._handle(data.frame, time.time_ns())
+
+    # Frame type-name substrings logged when debug=True. Covers the transcript-relevant frames
+    # (speech boundaries, STT/LLM/TTS/aggregated text, the assistant-commit timestamp frame, tool
+    # calls, interruptions) while skipping high-volume audio frames.
+    _DEBUG_FRAME_NAME_PARTS = (
+        "BotStarted",
+        "BotStopped",
+        "UserStarted",
+        "UserStopped",
+        "Transcription",
+        "Text",  # TTSTextFrame, LLMTextFrame, AggregatedTextFrame, AggregatedTextProgressFrame
+        "LLMFullResponse",
+        "LLMContext",  # LLMContextAssistantTimestampFrame (the commit marker)
+        "Interruption",
+        "FunctionCall",
+        "TTSStarted",
+        "TTSStopped",
+    )
 
     def _handle(self, frame: Any, timestamp_ns: int) -> None:
+        if self._config.debug:
+            name = type(frame).__name__
+            if any(part in name for part in self._DEBUG_FRAME_NAME_PARTS):
+                text = getattr(frame, "text", None)
+                extra = f" text={text!r}" if text else ""
+                logger.debug(
+                    "[tuner] frame {} @ {}ms{}", name, self._acc._rel_ms(timestamp_ns), extra
+                )
+
         if isinstance(frame, StartFrame):
             self._acc.on_start(timestamp_ns)
-            if self._context_provider is None and not self._flushed:
-                logger.warning(
-                    "[tuner] no context_provider attached at pipeline start — "
-                    "call attach_context() before call end "
-                    "or call data will be lost at flush"
-                )
             if not getattr(frame, "enable_metrics", False):
                 logger.warning(
                     "[tuner] enable_metrics=False — latency breakdown will be absent. "
@@ -292,26 +342,52 @@ class _BaseObserver(FrameProcessor):
             self._acc.on_function_call_in_progress(frame, timestamp_ns)
 
         elif isinstance(frame, FunctionCallResultFrame):
-            self._acc.on_function_call_result(frame.tool_call_id, timestamp_ns)
+            self._acc.on_function_call_result(frame, timestamp_ns)
 
         elif isinstance(frame, MetricsFrame):
             self._acc.on_metrics_frame(frame)
+
+        elif isinstance(frame, TranscriptionFrame):
+            # Finalized STT text — the authoritative signal for which context user messages
+            # were actually spoken (vs developer-injected {"role":"user"} messages). Only
+            # visible now that this is a pipeline-level observer: the user aggregator consumes
+            # TranscriptionFrame and never forwards it downstream. InterimTranscriptionFrame is
+            # a sibling, not a subclass, so interim results are naturally excluded.
+            self._acc.on_transcription(frame.text, timestamp_ns)
+
+        elif isinstance(frame, TTSTextFrame):
+            # Voiced TTS sentence, recorded on a timeline and assigned to a bot segment by
+            # window at bot-stop (TTSTextFrames arrive before BotStartedSpeakingFrame).
+            self._acc.on_tts_text(frame.text, timestamp_ns)
+
+        elif isinstance(frame, LLMFullResponseStartFrame):
+            self._acc.on_llm_response_start(timestamp_ns)
+
+        elif isinstance(frame, LLMFullResponseEndFrame):
+            self._acc.on_llm_response_end(timestamp_ns)
+
+        elif isinstance(frame, LLMTextFrame):
+            # Generated LLM text — accumulated into the in-progress assistant turn (committed only
+            # when its LLMContextAssistantTimestampFrame arrives).
+            self._acc.on_llm_text(frame.text)
+
+        elif isinstance(frame, LLMContextAssistantTimestampFrame):
+            # Pipecat pushes this exactly when it commits an assistant message to the LLM context.
+            # It is the authoritative signal for which assistant turns are real — an interrupted
+            # response that never commits never gets this frame, so it never appears.
+            self._acc.on_assistant_commit(timestamp_ns)
 
         elif isinstance(frame, UserStartedSpeakingFrame):
             self._acc.on_user_started_speaking(timestamp_ns)
 
         elif isinstance(frame, UserStoppedSpeakingFrame):
             self._acc.on_user_stopped_speaking(timestamp_ns)
-            self._acc.on_user_turn_stopped(timestamp_ns)
 
         elif isinstance(frame, BotStartedSpeakingFrame):
             self._acc.on_bot_started_speaking(timestamp_ns)
 
         elif isinstance(frame, BotStoppedSpeakingFrame):
             self._acc.on_bot_stopped(timestamp_ns)
-
-        elif isinstance(frame, VADUserStoppedSpeakingFrame):
-            self._acc.on_vad_stopped(timestamp_ns)
 
         elif isinstance(frame, CancelFrame | EndFrame):
             if self._disconnection_reason_resolver is not None:
@@ -334,12 +410,31 @@ class _BaseObserver(FrameProcessor):
     # ------------------------------------------------------------------
 
     async def _flush(self) -> None:
-        if self._context_provider is None:
-            logger.warning("[tuner] no context_provider attached — skipping flush")
-            return
-        transcript = self._context_provider()
+        # The transcript is built live from the frame stream (acc.live_turns); it no longer
+        # depends on the LLM context. Capture diagnostics: what the accumulator recorded from
+        # the pipeline. If a turn that clearly fired frames is missing here, the bug is frame
+        # delivery to this observer.
         if self._config.debug:
-            logger.debug("[tuner] transcript ({} messages): {}", len(transcript), transcript)
-        payload = self._acc.build_payload(self._config, transcript, self._cost_calculator)
+            logger.debug(
+                "[tuner] live_turns ({}): {}",
+                len(self._acc.live_turns),
+                [(t.kind, t.order, (t.text or "")[:40]) for t in self._acc.live_turns],
+            )
+        logger.info(
+            "[tuner] segments ({}): {}",
+            len(self._acc.speech_segments),
+            [
+                (s.id, s.speaker, s.start_ms, s.stop_ms, s.is_proactive, bool(s.spoken_text))
+                for s in self._acc.speech_segments
+            ],
+        )
+        logger.info(
+            "[tuner] measurements: {}",
+            [
+                (m.user_segment_id, m.bot_segment_id, m.ttfb_ms)
+                for m in self._acc.latency_measurements
+            ],
+        )
+        payload = self._acc.build_payload(self._config, self._cost_calculator)
         logger.info("[tuner] payload: {}", payload)
         await post_call(self._config, payload)

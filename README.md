@@ -51,7 +51,9 @@ observer.attach_turn_tracking_observer(turn_tracker)
 
 ## Pipeline Setup
 
-Place the observer after TTS in your pipeline:
+`Observer` is a **pipeline-level observer** — register it on the `PipelineTask`
+(`observers=[...]`), not as a processor inside `Pipeline([...])`. It then sees every frame at
+every processor boundary and stays out of the audio path:
 
 ```python
 Pipeline([
@@ -60,13 +62,13 @@ Pipeline([
     context_aggregator.user(),
     llm,
     tts,
-    observer,
     transport.output(),
     context_aggregator.assistant(),
 ])
 ```
 
-Enable metrics on the pipeline task so latency and usage fields are populated:
+Enable metrics on the pipeline task so latency and usage fields are populated, and add the
+observer to `observers=[...]`:
 
 ```python
 from pipecat.pipeline.task import PipelineParams, PipelineTask
@@ -80,7 +82,7 @@ task = PipelineTask(
         enable_metrics=True,
         enable_usage_metrics=True,
     ),
-    observers=[observer.latency_observer, turn_tracker],
+    observers=[observer, observer.latency_observer, turn_tracker],
 )
 ```
 

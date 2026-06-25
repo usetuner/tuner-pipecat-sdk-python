@@ -336,6 +336,7 @@ async def run_bot(
         llm_model="gpt-5-mini-2025-08-07",
         tts_model="openai/tts-1",
         cost_calculator=calculate_cost,
+        debug=True,
     )
     observer.attach_turn_tracking_observer(turn_tracker)
 
@@ -360,7 +361,6 @@ async def run_bot(
             user_aggregator,
             llm,
             tts,
-            observer,
             transport.output(),
             assistant_aggregator,
         ]
@@ -369,12 +369,11 @@ async def run_bot(
     task = PipelineTask(
         pipeline,
         params=PipelineParams(
-            observers=[observer.latency_observer, turn_tracker],
             enable_metrics=True,
             enable_usage_metrics=True,
         ),
+        observers=[observer, observer.latency_observer, turn_tracker],
     )
-    observer.attach_context(context)
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):

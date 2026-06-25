@@ -41,15 +41,29 @@ Then open http://localhost:7860 and click **Connect**.
 
 ## How the SDK fits in
 
+`Observer` is a **pipeline-level observer**, not a processor in the pipeline. The pipeline
+itself is unchanged:
+
 ```
 transport.input()
     └─► STT
         └─► context_aggregator.user()
             └─► LLM
                 └─► TTS
-                    └─► Observer   ← tuner-pipecat-sdk
-                        └─► transport.output()
-                            └─► context_aggregator.assistant()
+                    └─► transport.output()
+                        └─► context_aggregator.assistant()
 ```
 
-`Observer` sits after TTS in the pipeline. It intercepts metrics frames, reads the transcript via `attach_context()`, and posts a structured `CallPayload` to the Tuner API when the call ends.
+You register it on the `PipelineTask` instead of inserting it into `Pipeline([...])`:
+
+```python
+task = PipelineTask(
+    pipeline,
+    observers=[observer, observer.latency_observer, turn_tracker],
+)
+```
+
+Because it observes every frame at every processor boundary, it sees frames an intermediate
+processor consumes (e.g. `TranscriptionFrame`, which the user aggregator swallows) and stays
+out of the audio path. It reads metrics and transcriptions as they flow, reads the transcript
+via `attach_context()`, and posts a structured `CallPayload` to the Tuner API when the call ends.

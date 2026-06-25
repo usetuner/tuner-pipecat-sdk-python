@@ -1,10 +1,11 @@
-"""Tests for data models (PendingTransition, LatencyTurn, CallPayload, etc.)."""
+"""Tests for data models (SpeechSegment, LatencyMeasurement, CallPayload, etc.)."""
 
 from tuner_pipecat_sdk.models import (
     AiModels,
     CallPayload,
     GeneralMetaData,
-    LatencyTurn,
+    LatencyMeasurement,
+    SpeechSegment,
     ToolInfo,
     TranscriptMetadata,
     TranscriptSegment,
@@ -13,21 +14,36 @@ from tuner_pipecat_sdk.models import (
 )
 
 
-def test_latency_turn():
-    t = LatencyTurn(
-        turn_index=0,
-        node="greeting",
+def test_speech_segment():
+    s = SpeechSegment(
+        id=0,
+        speaker="user",
+        start_ms=50,
+        stop_ms=100,
+        stt_ms=40,
+    )
+    assert s.id == 0
+    assert s.speaker == "user"
+    assert s.start_ms == 50
+    assert s.stop_ms == 100
+    assert s.stt_ms == 40
+    assert s.is_proactive is False
+
+
+def test_latency_measurement():
+    m = LatencyMeasurement(
+        user_segment_id=0,
+        bot_segment_id=1,
         ttfb_ms=150,
         llm_ms=80,
         tts_ms=50,
-        bot_started_ms=300,
-        user_stopped_ms=100,
-        user_started_ms=50,
-        bot_stopped_ms=500,
+        e2e_ms=200,
     )
-    assert t.turn_index == 0
-    assert t.ttfb_ms == 150
-    assert t.bot_stopped_ms == 500
+    assert m.user_segment_id == 0
+    assert m.bot_segment_id == 1
+    assert m.ttfb_ms == 150
+    assert m.e2e_ms == 200
+    assert m.is_proactive is False
 
 
 # ---------------------------------------------------------------------------

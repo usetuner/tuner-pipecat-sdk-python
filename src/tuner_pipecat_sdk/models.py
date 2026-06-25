@@ -2,28 +2,96 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
 
-class LatencyTurn(BaseModel):
-    turn_index: int
+class SpeechSegment(BaseModel):
+    """A single raw, timestamped unit of speech — either the user or the bot.
+
+    Append-only and makes no cardinality assumption: a user may produce several
+    consecutive segments before any bot reply (mid-sentence pauses, silence gaps),
+    a bot may produce several segments for one response (speak → tool → speak),
+    and a user segment with no following bot reply is a natural orphan state.
+
+    ``stt_ms`` lives here (user segments only) because STT finalization latency is
+    a property of the user's own utterance — it exists whether or not the bot ever
+    replies, so it must survive on orphan turns.
+    """
+
+    id: int
+    speaker: str  # "user" | "bot"
+    turn_number: int | None = None  # TurnTrackingObserver turn this segment belongs to
+    start_ms: int = 0
+    stop_ms: int | None = None
+    stt_ms: int | None = None
+    spoken_text: str | None = None  # bot segments only — text actually voiced via TTS
+    # User segments only — one [start, stop] per VAD utterance. A coalesced turn (several
+    # utterances before any bot reply) holds several windows, giving per-utterance timing
+    # the single start/stop can't. Used by the enricher to align and gap-split user rows.
+    windows: list[list[int | None]] = Field(default_factory=list)
     node: str | None = None
-    bot_node: str | None = None
-    is_proactive: bool = False
+    interrupted: bool | None = None  # bot segment cut off by the user
+    interrupted_at_ms: int | None = None  # bot segments only — when the user cut in
+    is_proactive: bool = False  # bot segment preceding any user speech
+
+
+class LatencyMeasurement(BaseModel):
+    """Latency of one bot response, derived only when a bot reply follows a user
+    segment (or the proactive greeting). Linked to its speech segments by id.
+
+    Carries only response-derived metrics: nothing here exists independent of a
+    reply. An orphan user segment (no bot response) has no LatencyMeasurement.
+    """
+
+    user_segment_id: int  # FK → SpeechSegment.id (-1 for the proactive greeting)
+    bot_segment_id: int | None = None  # FK → first bot SpeechSegment of the response
     ttfb_ms: int | None = None
     llm_ms: int | None = None
     tts_ms: int | None = None
-    stt_ms: int | None = None
-    bot_started_ms: int = 0
-    user_stopped_ms: int = 0
-    user_started_ms: int = 0
-    bot_stopped_ms: int | None = None
-    interrupted_at_ms: int | None = None
+    e2e_ms: int | None = None  # bot.start_ms - user.stop_ms
+    is_proactive: bool = False
     was_interrupted: bool | None = None
-    llm_completed: bool = False
+    interrupted_at_ms: int | None = None
+
+
+@dataclass
+class LiveTurn:
+    """A transcript row built LIVE from the frame stream, in arrival order — the event-sourced
+    mirror of pipecat's own conversation construction (usePipecatConversation). The transcript is
+    *not* reconstructed from the final LLM context; each turn is materialized when its frames
+    arrive. Timing is read from the linked SpeechSegment/LatencyMeasurement at assembly (where it
+    is final, after latency adjustments); only an unvoiced draft falls back to ``generated_ms``.
+
+    kind: "user" | "agent" | "agent_function" | "agent_result".
+    """
+
+    kind: str
+    order: int
+    # user: each finalized STT transcription in this turn, as (text, rel_ms). A user row groups
+    # exactly the transcriptions between two UserStoppedSpeaking boundaries — the same unit
+    # pipecat's aggregator commits as one user message — so there is no silence-gap split/merge.
+    chunks: list[tuple[str, int]] = field(default_factory=list)
+    # agent: joined LLM-generated text for this response.
+    text: str = ""
+    # user row timing, captured live from the frames (not derived from segments).
+    start_ms: int = 0
+    end_ms: int | None = None
+    stt_ms: int | None = None
+    # Links into the latency/speech substrate (never matched by text).
+    user_segment_id: int | None = None
+    bot_segment_id: int | None = None
+    # agent fallback timing when the turn was generated but never voiced (no bot segment).
+    generated_ms: int | None = None
+    # tool rows:
+    tool_call_id: str | None = None
+    function_name: str | None = None
+    arguments: Any = None
+    result: Any = None
+    occurrence_ms: int = 0
 
 
 class TranscriptWord(BaseModel):
@@ -152,7 +220,8 @@ class CallPayload(BaseModel):
 
 
 __all__ = [
-    "LatencyTurn",
+    "SpeechSegment",
+    "LatencyMeasurement",
     "TranscriptWord",
     "TranscriptMetadata",
     "ToolInfo",

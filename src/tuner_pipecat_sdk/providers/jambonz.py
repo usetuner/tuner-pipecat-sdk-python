@@ -78,7 +78,7 @@ class JambonzCallContext:
     raw_headers: dict[str, str] = field(default_factory=dict)
 
     @classmethod
-    def from_webhook(cls, payload: dict[str, Any]) -> "JambonzCallContext":
+    def from_webhook(cls, payload: dict[str, Any]) -> JambonzCallContext:
         """Extract a context from a raw Jambonz call-hook payload.
 
         SIP Call-ID resolution priority:
@@ -124,7 +124,7 @@ class JambonzCallContext:
         )
 
     @classmethod
-    def fallback(cls, call_sid: str) -> "JambonzCallContext":
+    def fallback(cls, call_sid: str) -> JambonzCallContext:
         """Minimal context when the webhook was never seen.
 
         Use in the WebSocket handler if :meth:`JambonzPendingStore.wait_and_pop`
@@ -194,7 +194,7 @@ class JambonzPendingStore:
             event = self._events.setdefault(call_sid, asyncio.Event())
             try:
                 await asyncio.wait_for(event.wait(), timeout=timeout)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 self._events.pop(call_sid, None)
                 return None
         ctx = self._store.pop(call_sid, None)

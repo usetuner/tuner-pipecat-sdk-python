@@ -37,7 +37,6 @@ def test_observer_init():
     assert o._config.workspace_id == 2
     assert o._config.base_url == "http://localhost:8000"
     assert o._acc is not None
-    assert o._context_provider is None
     assert o._flushed is False
 
 
@@ -85,6 +84,15 @@ def test_handle_metrics_frame_routes_to_accumulator(observer):
         mock_on_metrics.assert_called_once_with(frame)
 
 
+def test_handle_tts_text_frame_routes_to_accumulator(observer):
+    from pipecat.frames.frames import TTSTextFrame
+
+    frame = TTSTextFrame(text="hello there", aggregated_by="sentence")
+    with patch.object(observer._acc, "on_tts_text") as mock_on_tts:
+        observer._handle(frame, 500)
+        mock_on_tts.assert_called_once_with("hello there", 500)
+
+
 def test_handle_function_call_result_records_completion(observer):
     observer._acc.call_start_abs_ns = 1_000_000_000
     frame = FunctionCallResultFrame(
@@ -99,6 +107,63 @@ def test_handle_function_call_result_records_completion(observer):
 
 def test_observer_exposes_latency_observer(observer):
     assert observer.latency_observer is not None
+
+
+def _pushed(frame, direction):
+    """Build a FramePushed event for the pipeline-level on_push_frame hook."""
+    from unittest.mock import Mock
+
+    from pipecat.observers.base_observer import FramePushed
+
+    return FramePushed(
+        source=Mock(), destination=Mock(), frame=frame, direction=direction, timestamp=0
+    )
+
+
+@pytest.mark.asyncio
+async def test_on_push_frame_routes_transcription_downstream(observer):
+    from pipecat.frames.frames import TranscriptionFrame
+    from pipecat.processors.frame_processor import FrameDirection
+
+    observer._acc.call_start_abs_ns = 1_000_000_000
+    frame = TranscriptionFrame(text="i want pizza", user_id="u1", timestamp="2026-01-01T00:00:00Z")
+    await observer.on_push_frame(_pushed(frame, FrameDirection.DOWNSTREAM))
+    assert [t for t, _ in observer._acc.user_transcriptions] == ["i want pizza"]
+
+
+@pytest.mark.asyncio
+async def test_on_push_frame_ignores_upstream(observer):
+    from pipecat.frames.frames import TranscriptionFrame
+    from pipecat.processors.frame_processor import FrameDirection
+
+    frame = TranscriptionFrame(text="ignored", user_id="u1", timestamp="2026-01-01T00:00:00Z")
+    await observer.on_push_frame(_pushed(frame, FrameDirection.UPSTREAM))
+    assert observer._acc.user_transcriptions == []
+
+
+@pytest.mark.asyncio
+async def test_on_push_frame_dedups_by_frame_id(observer):
+    """A pipeline-level observer sees the same frame once per processor hop — it must be
+    handled exactly once."""
+    from pipecat.frames.frames import TranscriptionFrame
+    from pipecat.processors.frame_processor import FrameDirection
+
+    observer._acc.call_start_abs_ns = 1_000_000_000
+    frame = TranscriptionFrame(text="only once", user_id="u1", timestamp="2026-01-01T00:00:00Z")
+    for _ in range(5):  # simulate the frame traversing five processor boundaries
+        await observer.on_push_frame(_pushed(frame, FrameDirection.DOWNSTREAM))
+    assert len(observer._acc.user_transcriptions) == 1
+    assert observer._acc.user_transcriptions[0][0] == "only once"
+
+
+@pytest.mark.asyncio
+async def test_on_push_frame_interim_transcription_not_recorded(observer):
+    from pipecat.frames.frames import InterimTranscriptionFrame
+    from pipecat.processors.frame_processor import FrameDirection
+
+    frame = InterimTranscriptionFrame(text="par", user_id="u1", timestamp="2026-01-01T00:00:00Z")
+    await observer.on_push_frame(_pushed(frame, FrameDirection.DOWNSTREAM))
+    assert observer._acc.user_transcriptions == []
 
 
 @pytest.mark.asyncio
@@ -123,12 +188,15 @@ async def test_attach_turn_tracking_observer_wiring(observer):
         mock_time.time_ns.return_value = 1_000_000_000 + 300_000_000
         await handlers["on_turn_started"](None, 1)
 
-    assert len(observer._acc.latency_turns) == 1
-    assert observer._acc.latency_turns[0].user_started_ms == 300
+    user_segs = [s for s in observer._acc.speech_segments if s.speaker == "user"]
+    assert len(user_segs) == 1
+    assert user_segs[0].start_ms == 300
     assert observer._acc._active_turn_number == 1
 
+    # Bot responds, then the turn ends as interrupted.
+    observer._acc.on_bot_started_speaking(1_000_000_000 + 500_000_000)
     await handlers["on_turn_ended"](None, 1, 2.5, True)
-    assert observer._acc.latency_turns[0].was_interrupted is True
+    assert observer._acc.latency_measurements[0].was_interrupted is True
     assert observer._acc._active_turn_number is None
 
 

@@ -5,12 +5,21 @@
 
 """Pizzeria ordering bot built with Pipecat and the Tuner Observer.
 
+This version uses an all-Google stack:
+- STT:  GoogleSTTService   (Google Cloud Speech-to-Text V2)
+- LLM:  GoogleLLMService   (Gemini 2.5 Flash)
+- TTS:  GoogleTTSService   (Google Cloud TTS, Chirp 3 HD voices)
+
 Requirements:
-- DEEPGRAM_API_KEY
-- OPENAI_API_KEY
+- GOOGLE_APPLICATION_CREDENTIALS (path to a GCP service-account JSON file
+  with Speech-to-Text and Text-to-Speech API access), OR set
+  GOOGLE_CREDENTIALS to the raw JSON string.
+- GOOGLE_API_KEY (for Gemini / GoogleLLMService — this is a separate
+  credential from the GCP service account above; get it from Google AI
+  Studio or a Vertex-enabled API key)
 
 Run the example:
-uv run pizza_order.py
+uv run pizza_order_google.py
 """
 
 import os
@@ -42,9 +51,10 @@ from pipecat.processors.aggregators.llm_response_universal import (
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
-from pipecat.services.deepgram.stt import DeepgramSTTService
-from pipecat.services.deepgram.tts import DeepgramTTSService
-from pipecat.services.openai.llm import OpenAILLMService
+from pipecat.services.google.llm import GoogleLLMService
+from pipecat.services.google.stt import GoogleSTTService
+from pipecat.services.google.tts import GoogleTTSService
+from pipecat.transcriptions.language import Language
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 
 from tuner_pipecat_sdk import CallUsage, Observer
@@ -224,14 +234,32 @@ def build_tools() -> ToolsSchema:
 
 
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
-    stt = DeepgramSTTService(api_key=os.getenv("DEEPGRAM_API_KEY"))
-    tts = DeepgramTTSService(
-        api_key=os.getenv("DEEPGRAM_API_KEY"),
-        voice=os.getenv("DEEPGRAM_VOICE", "aura-2-thalia-en"),
+    # --- STT: Google Cloud Speech-to-Text V2 -----------------------------
+    # Needs GCP service-account credentials (NOT a plain API key).
+    # Either pass a path to the JSON key file, or the raw JSON string.
+    stt = GoogleSTTService(
+        credentials_path=os.getenv("GOOGLE_APPLICATION_CREDENTIALS"),
+        settings=GoogleSTTService.Settings(
+            languages=[Language.EN_US],
+            model="latest_long",
+            enable_automatic_punctuation=True,
+        ),
     )
-    llm = OpenAILLMService(
-        api_key=os.getenv("OPENAI_API_KEY"),
-        settings=OpenAILLMService.Settings(system_instruction=AGENT_INSTRUCTIONS),
+
+    # --- TTS: Google Cloud TTS streaming (Chirp 3 HD / Journey voices) ---
+    tts = GoogleTTSService(
+        credentials_path=os.getenv("GOOGLE_APPLICATION_CREDENTIALS"),
+        settings=GoogleTTSService.Settings(
+            voice=os.getenv("GOOGLE_TTS_VOICE", "en-US-Chirp3-HD-Charon"),
+            language=Language.EN_US,
+        ),
+    )
+
+    # --- LLM: Gemini 2.5 Flash (text in/out, via google-genai) -----------
+    llm = GoogleLLMService(
+        api_key=os.getenv("GOOGLE_API_KEY"),
+        model=os.getenv("GOOGLE_LLM_MODEL", "gemini-2.5-flash"),
+        system_instruction=AGENT_INSTRUCTIONS,
     )
 
     llm.register_function("choose_pizza", choose_pizza)
@@ -251,13 +279,13 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     turn_tracker = TurnTrackingObserver()
 
     def calculate_cost(usage: CallUsage) -> float:
-        # OpenAI gpt-4o-mini pricing (per token)
-        llm_cost  = (usage.llm_prompt_tokens     or 0) * 0.000_000_150
-        llm_cost += (usage.llm_completion_tokens or 0) * 0.000_000_600
-        # Deepgram Aura-2 TTS: $0.030 per 1K characters
+        # Gemini 2.5 Flash pricing (per token) — update if your tier differs
+        llm_cost  = (usage.llm_prompt_tokens     or 0) * 0.000_000_075
+        llm_cost += (usage.llm_completion_tokens or 0) * 0.000_000_300
+        # Google Cloud TTS (Chirp 3 HD): ~$0.030 per 1K characters
         tts_cost  = (usage.tts_characters        or 0) * 0.000_030
-        # Deepgram Nova-3 STT: $0.0043 per audio minute
-        stt_cost  = usage.stt_audio_seconds            * (0.0043 / 60)
+        # Google Cloud STT V2 (standard streaming): ~$0.0240 per audio minute
+        stt_cost  = usage.stt_audio_seconds            * (0.0240 / 60)
         return (llm_cost + tts_cost + stt_cost) * 100
 
     observer = Observer(
@@ -265,10 +293,10 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         workspace_id=int(os.getenv("TUNER_WORKSPACE_ID")),
         agent_id=os.getenv("TUNER_AGENT_ID", "pizzeria-bot"),
         call_id=str(uuid.uuid4()),
-        base_url=os.getenv("TUNER_BASE_URL", "http://localhost:8000"),
-        asr_model=os.getenv("TUNER_ASR_MODEL", "deepgram/nova-3"),
-        llm_model=os.getenv("TUNER_LLM_MODEL", "gpt-4o-mini"),
-        tts_model=os.getenv("TUNER_TTS_MODEL", "deepgram/aura-2-thalia-en"),
+        base_url=os.getenv("TUNER_BASE_URL", "https://voice-api.staging.ginni.ai"),
+        asr_model=os.getenv("TUNER_ASR_MODEL", "google/stt-v2"),
+        llm_model=os.getenv("TUNER_LLM_MODEL", "gemini-2.5-flash"),
+        tts_model=os.getenv("TUNER_TTS_MODEL", "google/chirp3-hd"),
         cost_calculator=calculate_cost,
         debug=True,
     )
@@ -302,7 +330,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         _order.clear()
         context.add_message(
             {
-                "role": "assistant",
+                "role": "user",
                 "content": (
                     "Greet the customer warmly, present the menu, "
                     "and ask which pizza they would like."
