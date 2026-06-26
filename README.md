@@ -44,7 +44,6 @@ observer = Observer(
 
 # Required: attach the LLM context before running the pipeline
 observer.attach_context(context)
-observer.attach_turn_tracking_observer(turn_tracker)
 ```
 
 ---
@@ -75,6 +74,7 @@ from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.observers.turn_tracking_observer import TurnTrackingObserver
 
 turn_tracker = TurnTrackingObserver()
+observer.attach_turn_tracking_observer(turn_tracker)
 
 task = PipelineTask(
     pipeline,
