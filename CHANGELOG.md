@@ -6,7 +6,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
-## [Unreleased]
+## [0.2.4]
 
 ### Added
 - **`pizza_order_google` example** — full Google stack variant of the pizzeria bot: `GoogleSTTService` (Cloud Speech-to-Text V2), `GoogleLLMService` (Gemini 2.5 Flash), and `GoogleTTSService` (Cloud TTS, Chirp 3 HD).

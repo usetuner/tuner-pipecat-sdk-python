@@ -2,7 +2,7 @@
 
 ## `Observer`
 
-`Observer` is a `FrameProcessor` that captures runtime signals and emits one payload per call.
+`Observer` is a pipeline-level observer that captures runtime signals and emits one payload per call. Register it on `PipelineTask(observers=[...])`, not inside `Pipeline([...])`.
 
 Constructor:
 
@@ -20,16 +20,25 @@ Observer(
     llm_model: str = "",
     tts_model: str = "",
     recipient: str | None = None,
+    sip_call_id: str | None = None,
+    sip_headers: dict[str, str] | None = None,
+    cost_calculator: Callable[[CallUsage], float] | None = None,
+    disconnection_reason_resolver: Callable[[], str | None] | None = None,
+    agent_version: int | None = None,
 )
 ```
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `recipient` | `str \| None` | `None` | Phone number or SIP URL of the callee party (e.g. `+15551234567` or `sip:alice@example.com`). **Not collected automatically** — pass this when the callee identity is known to your application. |
+| `sip_call_id` | `str \| None` | `None` | SIP provider call identifier. |
+| `sip_headers` | `dict[str, str] \| None` | `None` | SIP INVITE headers as a flat dict. |
+| `cost_calculator` | `Callable[[CallUsage], float] \| None` | `None` | Returns call cost in USD cents from usage data. |
+| `disconnection_reason_resolver` | `Callable[[], str \| None] \| None` | `None` | Called at flush time to record why the call ended. |
+| `agent_version` | `int \| None` | `None` | Deployment version number — overrides `APP_VERSION` env var. |
 
 Methods:
 
-- `attach_context(context) -> None`
 - `attach_turn_tracking_observer(turn_tracker) -> None`
 - `latency_observer -> UserBotLatencyObserver`
 

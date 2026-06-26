@@ -6,7 +6,7 @@ A pizza ordering bot built with Pipecat and the `tuner-pipecat-sdk` `Observer`.
 - LLM tool-calling order flow: choose pizza → choose size → confirm → end call
 - Running price calculation (pizza price + size surcharge)
 - Confirmation with a cancellation branch
-- Full call observability via the plain `Observer` (`attach_context`)
+- Full call observability via the plain `Observer`
 - Per-call cost reporting via a `cost_calculator`
 
 ## Conversation flow

@@ -22,14 +22,9 @@ pip install tuner-pipecat-sdk
 
 ## Plain Pipecat — `Observer`
 
-Use `Observer` when your pipeline manages context directly via `LLMContext`.
-
 ```python
 import uuid
-from pipecat.processors.aggregators.llm_context import LLMContext
 from tuner_pipecat_sdk import Observer
-
-context = LLMContext()
 
 observer = Observer(
     api_key="YOUR_TUNER_API_KEY",
@@ -41,10 +36,6 @@ observer = Observer(
     llm_model="gpt-4o-mini",
     tts_model="cartesia/sonic",
 )
-
-# Required: attach the LLM context before running the pipeline
-observer.attach_context(context)
-observer.attach_turn_tracking_observer(turn_tracker)
 ```
 
 ---
@@ -75,6 +66,7 @@ from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.observers.turn_tracking_observer import TurnTrackingObserver
 
 turn_tracker = TurnTrackingObserver()
+observer.attach_turn_tracking_observer(turn_tracker)
 
 task = PipelineTask(
     pipeline,
