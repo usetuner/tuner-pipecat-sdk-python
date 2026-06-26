@@ -31,10 +31,7 @@ pip install -e .
 
 ```python
 import uuid
-from pipecat.processors.aggregators.llm_context import LLMContext
 from tuner_pipecat_sdk import Observer
-
-context = LLMContext()
 
 observer = Observer(
     api_key="YOUR_TUNER_API_KEY",
@@ -46,8 +43,6 @@ observer = Observer(
     llm_model="gpt-4o-mini",
     tts_model="cartesia/sonic",
 )
-
-observer.attach_context(context)
 ```
 
 Set `asr_model`, `llm_model`, and `tts_model` to populate

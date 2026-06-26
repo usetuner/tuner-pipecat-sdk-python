@@ -65,5 +65,4 @@ task = PipelineTask(
 
 Because it observes every frame at every processor boundary, it sees frames an intermediate
 processor consumes (e.g. `TranscriptionFrame`, which the user aggregator swallows) and stays
-out of the audio path. It reads metrics and transcriptions as they flow, reads the transcript
-via `attach_context()`, and posts a structured `CallPayload` to the Tuner API when the call ends.
+out of the audio path. It reads metrics and transcriptions as they flow, and posts a structured `CallPayload` to the Tuner API when the call ends.

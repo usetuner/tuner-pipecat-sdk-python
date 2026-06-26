@@ -7,10 +7,8 @@ Turn timing is captured through `attach_turn_tracking_observer(...)`.
 
 ## Recommended Flow
 
-1. Create your `LLMContext`.
-2. Create `Observer` with call metadata and model names.
-3. Call `observer.attach_context(context)` once before starting the task.
-4. Register the observer on the task: `PipelineTask(pipeline, observers=[observer, observer.latency_observer, turn_tracker])` (it is a pipeline-level observer, not a processor in `Pipeline([...])`).
+1. Create `Observer` with call metadata and model names.
+2. Register the observer on the task: `PipelineTask(pipeline, observers=[observer, observer.latency_observer, turn_tracker])` (it is a pipeline-level observer, not a processor in `Pipeline([...])`).
 
 ## Captured Signals
 

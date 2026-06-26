@@ -39,7 +39,6 @@ Observer(
 
 Methods:
 
-- `attach_context(context) -> None`
 - `attach_turn_tracking_observer(turn_tracker) -> None`
 - `latency_observer -> UserBotLatencyObserver`
 
