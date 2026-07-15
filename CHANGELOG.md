@@ -6,6 +6,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.2.5] 2026-07-07
+
+### Added
+- **LangChain/LangGraph observability** — `Observer.wrap_graph()`/`Observer.wrap_chain()` capture tool calls, LangGraph node transitions, and LLM token usage from a LangChain runnable or LangGraph graph driven through pipecat's `LangchainProcessor`, independent of whatever pipecat frames that processor does or doesn't emit. Requires the new optional `langchain` extra (`pip install tuner-pipecat-sdk[langchain]`); everything else about the SDK is unaffected if it isn't installed. See the root README's "LangChain / LangGraph observability" section.
+- `tuner_pipecat_sdk.models.NodeInfo` — LangGraph node-transition details on `TranscriptSegment.node`.
+- `pizza_order_langchain` and `nova_clinic_langgraph` examples demonstrating `wrap_chain()` and `wrap_graph()` respectively.
+- Known limitation: LLM usage/cost and `llm_node_ttft` for LangChain-driven turns depend on a `tuner-langchain` session hook not yet in its `0.1.0` PyPI release — until that ships, those fields read as zero/absent for LangChain-driven turns (tool calls and node transitions are unaffected).
+
+### Fixed
+- **Fixed: wrong default `base_url`.** `Observer` and `TunerConfig` now default to `https://api.usetuner.ai` instead of `http://localhost:8000`.
+  The old default only worked if you had a Tuner server running on your own machine. Everyone else was affected without knowing it: the SDK tried to reach `localhost:8000`, the connection failed, and the failure was only logged — never raised. Your pipeline kept running normally, but the call data never reached Tuner.
+  If you relied on the old localhost default (Tuner-internal dev/test), pass `base_url="http://localhost:8000"` explicitly now.
+
 ## [0.2.4]
 
 ### Added
