@@ -36,6 +36,7 @@ from ._providers import PROVIDER_EXTRACTORS, ProviderExtractor
 from .accumulator import CallAccumulator
 from .client import post_call
 from .config import TunerConfig
+from .langchain_bridge import LangchainIntegration
 from .models import CallUsage
 
 _CI_VERSION_VARS = ("GITHUB_RUN_NUMBER", "CIRCLE_BUILD_NUM", "BUILD_NUMBER")
@@ -105,10 +106,30 @@ class _BaseObserver(BaseObserver):
     ) -> None:
         """
         Args:
+            api_key: Tuner API key.
+            workspace_id: Tuner workspace ID.
+            agent_id: Agent identifier.
+            call_id: Unique call ID (use ``uuid4()``).
+            call_type: Call type label. Defaults to ``"web_call"``.
+            base_url: Tuner API base URL. Defaults to ``"https://api.usetuner.ai"``.
+            recording_url: Recording URL, if available.
+            debug: Log the full transcript at flush. Defaults to ``False``.
+            asr_model: ASR model name, e.g. ``"deepgram/nova-3"``.
+            llm_model: LLM model name, e.g. ``"gpt-4o-mini"``.
+            tts_model: TTS model name, e.g. ``"cartesia/sonic"``.
+            sip_call_id: SIP provider call identifier. See the README's SIP section
+                for provider-specific extraction helpers.
+            sip_headers: SIP INVITE headers as a flat dict.
+            disconnection_reason_resolver: Called at flush time; return a string
+                (or ``None``) describing why the call ended.
+            agent_version: Deployment version number. Overrides the ``APP_VERSION``
+                env var when set.
             recipient: Phone number or SIP URL of the callee party
                 (e.g. ``"+15551234567"`` or ``"sip:alice@example.com"``).
                 Optional — not collected automatically; pass it when the callee
                 identity is known to your application.
+            cost_calculator: Called at flush time with a ``CallUsage``; return the
+                call's cost in USD cents.
         """
         super().__init__(**kwargs)
         self._config = TunerConfig(
@@ -131,6 +152,7 @@ class _BaseObserver(BaseObserver):
         self._acc = CallAccumulator()
         self._acc.call_start_abs_ns = time.time_ns()
         self._flushed = False
+        self._langchain: LangchainIntegration = LangchainIntegration(self._acc)
         # As a pipeline-level observer, on_push_frame fires once PER processor hop, so the
         # same frame is seen many times. Dedup by frame id (bounded deque + set, mirroring
         # pipecat's UserBotLatencyObserver). All hops of a frame occur back-to-back in one
@@ -278,6 +300,33 @@ class _BaseObserver(BaseObserver):
     def latency_observer(self) -> UserBotLatencyObserver:
         return self._latency_observer
 
+    def wrap_graph(self, graph: Any, capture: Any = None) -> Any:
+        """Wrap a LangGraph graph for Tuner observability.
+
+        Returns a drop-in replacement for ``graph`` — pass it straight to
+        pipecat's ``LangchainProcessor`` (or your own processor that drives a
+        LangChain runnable):
+
+            observer = Observer(...)
+            wrapped = observer.wrap_graph(my_compiled_graph)
+            lc = LangchainProcessor(chain=wrapped)
+
+        Captures tool calls, node transitions, and LLM token usage via
+        tuner-langchain's callback handler — independent of whatever pipecat
+        frames the driving processor does or doesn't emit.
+
+        Requires the ``langchain`` extra: ``pip install tuner-pipecat-sdk[langchain]``.
+        """
+        return self._langchain.wrap_graph(graph, capture)
+
+    def wrap_chain(self, chain: Any, capture: Any = None) -> Any:
+        """Wrap a plain LangChain runnable for Tuner observability.
+
+        Same as :meth:`wrap_graph`, for non-graph LangChain pipelines. See that
+        method's docstring for usage and requirements.
+        """
+        return self._langchain.wrap_chain(chain, capture)
+
     # ------------------------------------------------------------------
     # Frame processing
     # ------------------------------------------------------------------
@@ -339,10 +388,21 @@ class _BaseObserver(BaseObserver):
                 )
 
         elif isinstance(frame, FunctionCallInProgressFrame):
-            self._acc.on_function_call_in_progress(frame, timestamp_ns)
+            # When a LangChain accumulator is attached (wrap_graph/wrap_chain), tool
+            # calls are captured via tuner-langchain's callback handler instead —
+            # skip native frame-based capture so a processor that emits both never
+            # double-records the same call. This is a call-wide flag, not scoped to
+            # the wrapped runnable: if a pipeline ever mixed a wrap_graph()/wrap_chain()
+            # runnable with a separate native tool-calling LLM service in the same
+            # call, that native service's tool calls would also be silently skipped
+            # here. Not a supported configuration today (Observer expects at most one
+            # tool-calling surface per call), but worth knowing if that ever changes.
+            if not self._langchain.active:
+                self._acc.on_function_call_in_progress(frame, timestamp_ns)
 
         elif isinstance(frame, FunctionCallResultFrame):
-            self._acc.on_function_call_result(frame, timestamp_ns)
+            if not self._langchain.active:
+                self._acc.on_function_call_result(frame, timestamp_ns)
 
         elif isinstance(frame, MetricsFrame):
             self._acc.on_metrics_frame(frame)

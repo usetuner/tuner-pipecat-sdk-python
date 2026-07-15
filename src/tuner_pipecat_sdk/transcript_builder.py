@@ -23,6 +23,7 @@ from .models import LatencyMeasurement, LiveTurn, SpeechSegment, ToolInfo, Trans
 if TYPE_CHECKING:
     from .accumulator import CallAccumulator
 
+
 def build_segment_metadata(*, interrupted: bool = False, **extra: Any) -> dict[str, Any]:
     return {
         "id": str(uuid.uuid4()),
@@ -32,6 +33,7 @@ def build_segment_metadata(*, interrupted: bool = False, **extra: Any) -> dict[s
 
 
 def parse_json_value(value: Any) -> Any:
+    """Parse `value` as JSON if it's a string; return it unchanged if parsing fails or it isn't a string."""
     try:
         return json.loads(value) if isinstance(value, str) else value
     except Exception:
@@ -66,6 +68,7 @@ def build_user_segment(
 def build_agent_function_segment(
     tool_call: dict[str, Any], invocation_ms: int
 ) -> TranscriptSegment:
+    """Build the transcript row for a tool invocation, formatted as `name(arg=value, ...)`."""
     function_name = tool_call["function"]["name"]
     raw_args = tool_call["function"].get("arguments", "{}")
     parsed_args = parse_json_value(raw_args) or {}
@@ -87,6 +90,8 @@ def build_agent_function_segment(
 
 
 def build_agent_result_segment(turn: LiveTurn, result_ms: int) -> TranscriptSegment:
+    """Build the transcript row for a tool's result. Structured (dict) results are stored on
+    `tool.result`; plain strings are stored as `text` instead."""
     parsed_result = parse_json_value(turn.result)
     is_structured = isinstance(parsed_result, dict)
     return TranscriptSegment(
@@ -113,6 +118,8 @@ def build_agent_text_segment(
     turn_index: int,
     fallback_ms: int = 0,
 ) -> TranscriptSegment:
+    """Build the transcript row for a spoken agent turn, timed from `bot_seg` when the turn was
+    voiced, or from `fallback_ms` (generation time) for a draft that was never spoken."""
     is_proactive = bool(
         (measurement and measurement.is_proactive) or (bot_seg and bot_seg.is_proactive)
     )

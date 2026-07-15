@@ -10,6 +10,8 @@ then sends a structured `CallPayload` to the Tuner API when a call ends.
 - Python **3.11–3.13**. 
 - **Do not use Python 3.14** for installs yet: Pipecat pulls **`onnxruntime~=1.23.2`** and **`numba`** without 3.14 wheels → errors like *No matching distribution found for onnxruntime*.
 - This SDK depends on **`pipecat-ai>=1.0.0`**.
+- LangChain/LangGraph support (`Observer.wrap_graph`/`wrap_chain`) is fully optional —
+  see [LangChain / LangGraph observability](#langchain--langgraph-observability).
 
 ## Installation
 
@@ -80,6 +82,15 @@ task = PipelineTask(
 
 Without these flags the observer will log warnings and LLM/TTS metric fields will be absent from the payload.
 For more example check https://github.com/usetuner/tuner-pipecat-sdk-python/tree/main/examples
+
+## What Happens at Call End
+
+When Pipecat emits `EndFrame` or `CancelFrame`, the observer:
+
+1. Builds a typed `CallPayload` from everything captured during the call.
+2. Sends it to the Tuner API in the background — this does not block your pipeline from shutting down.
+
+If the request fails (network error, timeout, bad API key, Tuner API down), the SDK logs the failure and moves on. It never raises and never blocks or crashes your pipeline. That also means a failed delivery is easy to miss — if a call isn't showing up in Tuner, check your logs for `[tuner] failed to deliver call`.
 
 ## Observer Parameters
 `Observer` accepts the following constructor parameters:
@@ -426,14 +437,84 @@ Token and character counts are `None` when no metrics were collected for that se
 
 The callable must return the cost in **USD cents** (e.g. `0.5` = half a cent, `1.0` = one cent).
 
+## LangChain / LangGraph observability
+
+If your agent's "LLM step" is a LangChain runnable or LangGraph graph — driven through
+pipecat's built-in `LangchainProcessor`, or your own custom processor — install the
+optional `langchain` extra and wrap it with `Observer.wrap_graph()` / `Observer.wrap_chain()`:
+
+```bash
+pip install tuner-pipecat-sdk[langchain]
+```
+
+```python
+from pipecat.processors.frameworks.langchain import LangchainProcessor
+from tuner_pipecat_sdk import Observer
+
+observer = Observer(api_key=..., workspace_id=..., agent_id=..., call_id=...)
+
+wrapped_graph = observer.wrap_graph(my_compiled_graph)   # or observer.wrap_chain(my_chain)
+lc = LangchainProcessor(chain=wrapped_graph)
+
+pipeline = Pipeline([
+    transport.input(),
+    stt,
+    user_aggregator,
+    lc,                 # in place of a native LLM service
+    tts,
+    transport.output(),
+    assistant_aggregator,
+])
+```
+
+This captures tool calls, LangGraph node transitions, and LLM token usage from inside
+the wrapped runnable via [`tuner-langchain`](https://github.com/usetuner/tuner-langchain)'s
+callback handler, and merges them into the same `transcript_with_tool_calls` timeline
+used by plain pipecat pipelines — independent of whatever pipecat frames the driving
+processor does or doesn't emit.
+
+Runnable examples: [`examples/pizza_order_langchain/`](examples/pizza_order_langchain/)
+(`wrap_chain()`, a raw LangChain tool-calling chat model) and
+[`examples/nova_clinic_langgraph/`](examples/nova_clinic_langgraph/) (`wrap_graph()`, a
+LangGraph `create_react_agent` — demonstrates node-transition tracking).
+
+**This extra is entirely optional.** If `tuner-langchain` isn't installed, calling
+`wrap_graph`/`wrap_chain` raises a clear `ImportError` with install instructions;
+everything else about the SDK behaves identically to a plain pipecat pipeline.
+
+**Known limitations (inherited from pipecat, not fixed by this integration):**
+
+- Pipecat's built-in `LangchainProcessor` only forwards the *latest* user message to
+  the chain/graph (no full conversation history) — multi-turn memory has to be handled
+  by your LangChain/LangGraph state itself (e.g. LangGraph checkpointing).
+- `LangchainProcessor` is a bare `FrameProcessor`, not a pipecat `LLMService`, so it
+  never emits pipecat's own latency/processing metrics for the LLM step — the
+  `llm_node_ttft` field would otherwise always be absent for LangChain-driven turns.
+  Instead, it's populated from LangChain's own `on_llm_start`→`on_llm_end` call
+  duration (via the same session hook as usage/cost below). This is a **total call
+  duration, not a strict time-to-first-token** — if a turn makes multiple LLM calls
+  (e.g. a tool-calling round-trip), only the *last* call's duration is reported, not
+  a sum across the turn.
+
 ## Public API
 
 - `tuner_pipecat_sdk.Observer` — for pipecat pipelines
+  - `Observer.wrap_graph(graph, capture=None)` / `Observer.wrap_chain(chain, capture=None)` —
+    optional, requires the `langchain` extra (see above)
 - `tuner_pipecat_sdk.TunerConfig`
 - `tuner_pipecat_sdk.CallUsage` — usage data type for `cost_calculator`
 
-Payload and transcript schemas are available under `tuner_pipecat_sdk.models`.
+Payload and transcript schemas are available under `tuner_pipecat_sdk.models`, including
+`NodeInfo` (LangGraph node transitions) and `ToolInfo` (tool calls/results, shared
+between native and LangChain-sourced rows).
 
 
-## To build the project
-folow the steps in setup_guide.md
+## Building this project
+
+```bash
+pip install -e ".[dev]"   # test, lint, type-check, and publish tooling
+pytest                     # run tests
+ruff check .               # lint
+```
+
+Full environment setup (Python version, examples, publishing to PyPI): see [setup_guide.md](setup_guide.md).

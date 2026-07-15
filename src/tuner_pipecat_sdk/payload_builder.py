@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from .models import AiModels, CallPayload, CallUsage, GeneralMetaData, UsageToken
+from .models import AiModels, CallPayload, CallUsage, GeneralMetaData, SegmentEnricher, UsageToken
 from .transcript_builder import build_segments_from_turns
 
 if TYPE_CHECKING:
@@ -25,8 +25,20 @@ def build_payload(
     acc: CallAccumulator,
     config: TunerConfig,
     cost_calculator: Callable[[CallUsage], float] | None = None,
+    segment_enrichers: list[SegmentEnricher] | None = None,
 ) -> CallPayload:
-    enriched = _ensure_monotonic_bounds(build_segments_from_turns(acc))
+    """Build the final `CallPayload` sent to Tuner from everything collected during the call.
+
+    Applies every registered ``segment_enrichers`` transform (e.g. merging in
+    LangChain/LangGraph segments) to the native pipecat transcript, in order,
+    then clamps segment end times so none end before they start. This module
+    has no idea what a given enricher does or where it came from -- see
+    ``CallAccumulator.register_segment_enricher()``.
+    """
+    enriched_segments = build_segments_from_turns(acc)
+    for enricher in segment_enrichers or []:
+        enriched_segments = enricher(enriched_segments)
+    enriched = _ensure_monotonic_bounds(enriched_segments)
     start_ts = acc.call_start_abs_ns // 1_000_000_000
     end_ts = acc.call_end_abs_ns // 1_000_000_000
 
