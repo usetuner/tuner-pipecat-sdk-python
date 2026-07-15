@@ -90,7 +90,7 @@ class _BaseObserver(BaseObserver):
         agent_id: str,
         call_id: str,
         call_type: str = "web_call",
-        base_url: str = "http://localhost:8000",
+        base_url: str = "https://api.usetuner.ai",
         recording_url: str = "pipecat://no-recording",
         debug: bool = False,
         asr_model: str = "",

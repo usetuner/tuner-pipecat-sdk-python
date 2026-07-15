@@ -101,7 +101,7 @@ If the request fails (network error, timeout, bad API key, Tuner API down), the 
 | `workspace_id` | `int` | — | Tuner workspace ID |
 | `agent_id` | `str` | — | Agent identifier |
 | `call_id` | `str` | — | Unique call ID (use `uuid4()`) |
-| `base_url` | `str` | `http://localhost:8000` | Tuner API base URL |
+| `base_url` | `str` | `https://api.usetuner.ai` | Tuner API base URL |
 | `call_type` | `str` | `"web_call"` | Call type label |
 | `recording_url` | `str` | `"pipecat://no-recording"` | Recording URL if available |
 | `asr_model` | `str` | `""` | ASR model name (e.g. `deepgram/nova-3`) |

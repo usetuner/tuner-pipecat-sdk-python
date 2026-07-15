@@ -265,7 +265,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         workspace_id=int(os.getenv("TUNER_WORKSPACE_ID")),
         agent_id=os.getenv("TUNER_AGENT_ID", "pizzeria-bot"),
         call_id=str(uuid.uuid4()),
-        base_url=os.getenv("TUNER_BASE_URL", "http://localhost:8000"),
+        base_url=os.getenv("TUNER_BASE_URL", "https://api.usetuner.ai"),
         asr_model=os.getenv("TUNER_ASR_MODEL", "deepgram/nova-3"),
         llm_model=os.getenv("TUNER_LLM_MODEL", "gpt-4o-mini"),
         tts_model=os.getenv("TUNER_TTS_MODEL", "deepgram/aura-2-thalia-en"),
