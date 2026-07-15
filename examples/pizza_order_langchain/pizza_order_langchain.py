@@ -3,25 +3,42 @@
 #
 # SPDX-License-Identifier: BSD 2-Clause License
 
-"""Pizzeria ordering bot built with Pipecat and the Tuner Observer.
+"""Pizzeria ordering bot built with Pipecat, a raw LangChain tool-calling loop,
+and the Tuner Observer's `wrap_chain()` LangChain bridge.
+
+Same conversation flow and audio stack as ``examples/pizza_order`` -- the only
+difference is the LLM step is a LangChain chat model with tools bound (via
+pipecat's `LangchainProcessor`) instead of a native `OpenAILLMService`,
+instrumented with `observer.wrap_chain()` so Tuner still captures tool calls
+and LLM usage.
+
+Note: LangChain 1.x removed `AgentExecutor`/`create_tool_calling_agent` from
+`langchain.agents` (the only agent-building API left there, `create_agent`, is
+itself LangGraph-based). This example instead builds the simplest possible
+"raw" LangChain agent: a chat model with tools bound, orchestrated by hand in
+a manual tool-calling loop -- exactly the shape `wrap_chain()` targets (tool
+calls only, no graph nodes).
 
 Requirements:
 - DEEPGRAM_API_KEY
 - OPENAI_API_KEY
 
 Run the example:
-uv run pizza_order.py
+uv run pizza_order_langchain.py
 """
 
 import os
 import uuid
 
 from dotenv import load_dotenv
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.runnables import RunnableConfig, RunnableLambda
+from langchain_core.tools import tool
+from langchain_openai import ChatOpenAI
 from loguru import logger
-from pipecat.adapters.schemas.function_schema import FunctionSchema
-from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.frames.frames import (
+    BotStoppedSpeakingFrame,
     EndTaskFrame,
     Frame,
     LLMFullResponseEndFrame,
@@ -40,11 +57,11 @@ from pipecat.processors.aggregators.llm_response_universal import (
     LLMUserAggregatorParams,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
+from pipecat.processors.frameworks.langchain import LangchainProcessor
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.deepgram.tts import DeepgramTTSService
-from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 
 from tuner_pipecat_sdk import CallUsage, Observer
@@ -142,80 +159,133 @@ class DebugLogProcessor(FrameProcessor):
         await self.push_frame(frame, direction)
 
 
+class EndCallWatcher(FrameProcessor):
+    """Ends the call once the bot has finished voicing its final response.
+
+    LangChain tools (unlike pipecat's ``llm.register_function()`` tools) have no
+    ``FunctionCallParams`` to push an ``EndTaskFrame`` directly from inside the
+    tool call. The ``end_call`` tool below just sets a flag; this processor
+    watches for it and ends the call after the goodbye has been fully spoken.
+    """
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+        await self.push_frame(frame, direction)
+        if isinstance(frame, BotStoppedSpeakingFrame) and _call_state.get("should_end"):
+            _call_state["should_end"] = False
+            await self.push_frame(EndTaskFrame(), FrameDirection.UPSTREAM)
+
+
 # ---------------------------------------------------------------------------
-# Order state + tools
+# Order state + LangChain tools
 # ---------------------------------------------------------------------------
 
-# Single-call demo: keep the in-progress order in module state.
+# Single-call demo: keep the in-progress order in module state (same convention
+# as examples/pizza_order/pizza_order.py).
 _order: dict = {}
+_call_state: dict = {"should_end": False}
 
 
-async def choose_pizza(params):
-    """Record which pizza the customer wants to order."""
-    pizza = params.arguments.get("pizza", "").lower()
+@tool
+def choose_pizza(pizza: str) -> dict:
+    """Record which pizza the customer wants to order.
+
+    Args:
+        pizza: One of: margherita, pepperoni, veggie, bbq chicken.
+    """
+    pizza = pizza.lower()
     price = MENU.get(pizza, 0.0)
     logger.info(f"[ORDER] Pizza chosen: {pizza} (${price:.2f})")
     _order["pizza"] = pizza
     _order["price"] = price
-    await params.result_callback({"pizza": pizza, "price": price})
+    return {"pizza": pizza, "price": price}
 
 
-async def choose_size(params):
-    """Record the pizza size the customer wants."""
-    size = params.arguments.get("size", "").lower()
+@tool
+def choose_size(size: str) -> dict:
+    """Record the pizza size the customer wants.
+
+    Args:
+        size: One of: small, medium, large.
+    """
+    size = size.lower()
     surcharge = SIZE_SURCHARGE.get(size, 0.0)
     total = _order.get("price", 0.0) + surcharge
     logger.info(f"[ORDER] Size chosen: {size} | total=${total:.2f}")
     _order["size"] = size
     _order["total"] = total
-    await params.result_callback({"size": size, "total": total})
+    return {"size": size, "total": total}
 
 
-async def confirm_order(params):
-    """Confirm or cancel the order."""
-    confirmed = bool(params.arguments.get("confirmed"))
+@tool
+def confirm_order(confirmed: bool) -> dict:
+    """Confirm or cancel the order.
+
+    Args:
+        confirmed: True if the customer confirmed the order, False if they cancelled.
+    """
     logger.info(f"[ORDER] Confirmed: {confirmed} | order={_order}")
-    await params.result_callback({"confirmed": confirmed})
+    return {"confirmed": confirmed}
 
 
-async def end_call(params):
+@tool
+def end_call() -> dict:
+    """Call this once you have delivered your final spoken response to the customer."""
     logger.info("[END CALL] Reason: agent_hangup")
-    await params.result_callback({"status": "ending", "reason": "agent_hangup"})
-    await params.llm.push_frame(EndTaskFrame(), FrameDirection.UPSTREAM)
+    _call_state["should_end"] = True
+    return {"status": "ending", "reason": "agent_hangup"}
 
 
-def build_tools() -> ToolsSchema:
-    return ToolsSchema(
-        standard_tools=[
-            FunctionSchema(
-                name="choose_pizza",
-                description="Record which pizza the customer wants to order.",
-                properties={"pizza": {"type": "string", "enum": list(MENU.keys())}},
-                required=["pizza"],
-            ),
-            FunctionSchema(
-                name="choose_size",
-                description="Record the pizza size the customer wants.",
-                properties={"size": {"type": "string", "enum": list(SIZE_SURCHARGE.keys())}},
-                required=["size"],
-            ),
-            FunctionSchema(
-                name="confirm_order",
-                description="Confirm or cancel the order.",
-                properties={"confirmed": {"type": "boolean"}},
-                required=["confirmed"],
-            ),
-            FunctionSchema(
-                name="end_call",
-                description=(
-                    "End the call once you have delivered your final spoken response "
-                    "to the customer."
-                ),
-                properties={},
-                required=[],
-            ),
-        ]
-    )
+TOOLS = [choose_pizza, choose_size, confirm_order, end_call]
+
+
+# ---------------------------------------------------------------------------
+# LangChain agent: a chat model with tools bound, orchestrated by hand
+# ---------------------------------------------------------------------------
+
+TOOLS_BY_NAME = {t.name: t for t in TOOLS}
+
+# Single-call demo: per-session message history, same module-level convention
+# as ``_order``/``_call_state`` above.
+_histories: dict[str, list[BaseMessage]] = {}
+
+
+def _history_for(session_id: str) -> list[BaseMessage]:
+    return _histories.setdefault(session_id, [])
+
+
+def build_agent_chain() -> RunnableLambda:
+    """Build the LangChain "chain" fed to ``observer.wrap_chain()``.
+
+    Wrapped in a single ``RunnableLambda`` (rather than calling the model/tools
+    as bare Python objects) so LangChain's callback manager establishes one
+    root run for the whole turn -- every nested ``model.ainvoke()``/
+    ``tool.ainvoke()`` call below is then correctly attributed as a child of
+    that run, which is what lets tuner-langchain's callback handler resolve a
+    root invocation for each tool call. Without this, each nested call would
+    look like an unrelated, parent-less invocation and tool calls would
+    silently go uncaptured.
+    """
+    model = ChatOpenAI(model="gpt-4o-mini", api_key=os.getenv("OPENAI_API_KEY")).bind_tools(TOOLS)
+
+    async def _run_turn(input: dict, config: RunnableConfig) -> str:
+        session_id = (config.get("configurable") or {}).get("session_id", "default")
+        history = _history_for(session_id)
+        history.append(HumanMessage(content=input["input"]))
+
+        while True:
+            messages = [SystemMessage(content=AGENT_INSTRUCTIONS), *history]
+            response = await model.ainvoke(messages, config=config)
+            history.append(response)
+
+            if not response.tool_calls:
+                return response.content
+
+            for call in response.tool_calls:
+                result = await TOOLS_BY_NAME[call["name"]].ainvoke(call["args"], config=config)
+                history.append(ToolMessage(content=str(result), tool_call_id=call["id"]))
+
+    return RunnableLambda(_run_turn)
 
 
 # ---------------------------------------------------------------------------
@@ -229,26 +299,6 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         api_key=os.getenv("DEEPGRAM_API_KEY"),
         voice=os.getenv("DEEPGRAM_VOICE", "aura-2-thalia-en"),
     )
-    llm = OpenAILLMService(
-        api_key=os.getenv("OPENAI_API_KEY"),
-        settings=OpenAILLMService.Settings(system_instruction=AGENT_INSTRUCTIONS),
-    )
-
-    llm.register_function("choose_pizza", choose_pizza)
-    llm.register_function("choose_size", choose_size)
-    llm.register_function("confirm_order", confirm_order)
-    llm.register_function("end_call", end_call)
-
-    context = LLMContext(tools=build_tools())
-    context_aggregator = LLMContextAggregatorPair(
-        context,
-        user_params=LLMUserAggregatorParams(
-            vad_analyzer=SileroVADAnalyzer(),
-        ),
-    )
-
-    debug_logger = DebugLogProcessor()
-    turn_tracker = TurnTrackingObserver()
 
     def calculate_cost(usage: CallUsage) -> float:
         # OpenAI gpt-4o-mini pricing (per token)
@@ -262,8 +312,8 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
 
     observer = Observer(
         api_key=os.getenv("TUNER_API_KEY", "dev"),
-        workspace_id=int(os.getenv("TUNER_WORKSPACE_ID")),
-        agent_id=os.getenv("TUNER_AGENT_ID", "pizzeria-bot"),
+        workspace_id=int(os.getenv("TUNER_WORKSPACE_ID", "0")),
+        agent_id=os.getenv("TUNER_AGENT_ID", "pizzeria-langchain-bot"),
         call_id=str(uuid.uuid4()),
         base_url=os.getenv("TUNER_BASE_URL", "https://api.usetuner.ai"),
         asr_model=os.getenv("TUNER_ASR_MODEL", "deepgram/nova-3"),
@@ -272,7 +322,33 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         cost_calculator=calculate_cost,
         debug=True,
     )
+    turn_tracker = TurnTrackingObserver()
     observer.attach_turn_tracking_observer(turn_tracker)
+
+    # Build the LangChain agent fresh per call, wrap it for Tuner observability
+    # (tool calls + LLM usage), then hand the wrapped runnable to pipecat's
+    # LangchainProcessor -- the drop-in replacement for a native LLMService.
+    agent_chain = build_agent_chain()
+    wrapped_agent = observer.wrap_chain(agent_chain)
+    lc_processor = LangchainProcessor(chain=wrapped_agent, transcript_key="input")
+
+    # LangchainProcessor sets config={"configurable": {"session_id": participant_id}}
+    # on every call -- this is what the agent chain keys its per-call message
+    # history on above, so multi-turn context works without extra wiring.
+    lc_processor.set_participant_id("webrtc-demo-session")
+
+    # No tools schema needed here -- pipecat doesn't need to know about the
+    # tools, LangChain resolves and executes them internally.
+    context = LLMContext()
+    context_aggregator = LLMContextAggregatorPair(
+        context,
+        user_params=LLMUserAggregatorParams(
+            vad_analyzer=SileroVADAnalyzer(),
+        ),
+    )
+
+    debug_logger = DebugLogProcessor()
+    end_call_watcher = EndCallWatcher()
 
     pipeline = Pipeline(
         [
@@ -280,8 +356,9 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             stt,
             debug_logger,
             context_aggregator.user(),
-            llm,
+            lc_processor,
             tts,
+            end_call_watcher,
             transport.output(),
             context_aggregator.assistant(),
         ]
@@ -300,6 +377,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     async def on_client_connected(transport, client):
         logger.info("[BOT] Client connected — starting pizzeria flow")
         _order.clear()
+        _call_state["should_end"] = False
         context.add_message(
             {
                 "role": "assistant",
