@@ -18,13 +18,8 @@ pip install -e ".[dev]"
 
 ## Examples
 
-See [`examples/`](examples/) for working bots built with this SDK:
-
-| Example | Use case |
-|---------|----------|
-| [`pizza_order/`](examples/pizza_order/) | Pizza ordering with toppings, delivery/pickup branch |
-| [`appointment_booking/`](examples/appointment_booking/) | Medical clinic receptionist, 7-node linear flow |
-| [`customer_support/`](examples/customer_support/) | Multi-branch support agent with escalation |
+See [`examples/`](examples/) for working bots built with this SDK — the full list with
+setup instructions lives in [`examples/README.md`](examples/README.md).
 
 Each example is self-contained. See **Installation** above for how the SDK is resolved. To run one:
 

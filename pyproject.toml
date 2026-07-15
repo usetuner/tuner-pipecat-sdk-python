@@ -34,7 +34,7 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://github.com/usetuner/tuner-pipecat-sdk-python"
-Documentation = "https://github.com/usetuner/tuner-pipecat-sdk-python/tree/main/docs"
+Documentation = "https://github.com/usetuner/tuner-pipecat-sdk-python#readme"
 Repository = "https://github.com/usetuner/tuner-pipecat-sdk-python"
 Issues = "https://github.com/usetuner/tuner-pipecat-sdk-python/issues"
 
