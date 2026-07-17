@@ -35,6 +35,7 @@ import os
 import sys
 from typing import Any
 
+import bot as bot_module
 import httpx
 from fastapi import BackgroundTasks, FastAPI, Request, WebSocket
 from fastapi.responses import Response
@@ -46,8 +47,6 @@ from pipecat.transports.websocket.fastapi import (
     FastAPIWebsocketParams,
     FastAPIWebsocketTransport,
 )
-
-import bot as bot_module
 
 app = FastAPI()
 

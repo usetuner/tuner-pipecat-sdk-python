@@ -477,6 +477,22 @@ wheels = [
 ]
 
 [[package]]
+name = "deepgram-sdk"
+version = "6.1.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "pydantic-core" },
+    { name = "typing-extensions" },
+    { name = "websockets" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/29/91/85360d998685fee6b570e12250e5ac74ca43420d5d22b44a865b6c3f2469/deepgram_sdk-6.1.1.tar.gz", hash = "sha256:78726f42b2386f80d9fdd92a22ac59ad5558b6c0475b29bb57273ddaaa344794", size = 202224, upload-time = "2026-03-27T19:59:57.202Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/6f/7f/818ac35b40e38f225858cea38808c7fdd57292553479cabf0bebf7fcdc91/deepgram_sdk-6.1.1-py3-none-any.whl", hash = "sha256:329f45f2a084e8786d3e90d4a4aee630b85cf8770a3b2ee6323bedb176c47113", size = 576299, upload-time = "2026-03-27T19:59:55.949Z" },
+]
+
+[[package]]
 name = "distro"
 version = "1.9.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1402,7 +1418,7 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "aiohttp" },
-    { name = "pipecat-ai", extra = ["openai", "runner", "webrtc", "websocket"] },
+    { name = "pipecat-ai", extra = ["deepgram", "openai", "runner", "webrtc", "websocket"] },
     { name = "python-dotenv" },
     { name = "tuner-pipecat-sdk" },
 ]
@@ -1410,7 +1426,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.9" },
-    { name = "pipecat-ai", extras = ["openai", "runner", "silero", "webrtc", "websocket"], specifier = ">=1.0.0" },
+    { name = "pipecat-ai", extras = ["openai", "runner", "silero", "webrtc", "websocket", "deepgram"], specifier = ">=1.0.0" },
     { name = "python-dotenv", specifier = ">=1.0.1" },
     { name = "tuner-pipecat-sdk", editable = "../../" },
 ]
@@ -1728,6 +1744,10 @@ wheels = [
 ]
 
 [package.optional-dependencies]
+deepgram = [
+    { name = "deepgram-sdk" },
+    { name = "websockets" },
+]
 openai = [
     { name = "websockets" },
 ]
