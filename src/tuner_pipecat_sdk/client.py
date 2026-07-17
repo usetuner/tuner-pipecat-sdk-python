@@ -14,6 +14,7 @@ from .models import CallPayload
 
 
 async def post_call(config: TunerConfig, payload: CallPayload) -> None:
+    """POST `payload` to Tuner. Fire-and-forget — see module docstring for failure behavior."""
     url = (
         f"{config.base_url}/api/v1/public/call"
         f"?workspace_id={config.workspace_id}"

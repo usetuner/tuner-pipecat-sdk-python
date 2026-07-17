@@ -39,11 +39,11 @@ greet + present menu
    DEEPGRAM_API_KEY=your_deepgram_key
    OPENAI_API_KEY=your_openai_key
 
-   # Optional — Tuner observability (defaults to local dev server)
+   # Optional — Tuner observability
    TUNER_API_KEY=dev
    TUNER_WORKSPACE_ID=1
    TUNER_AGENT_ID=pizza-order-bot
-   TUNER_BASE_URL=http://localhost:8000
+   TUNER_BASE_URL=https://api.usetuner.ai
    ```
 
 ## Run

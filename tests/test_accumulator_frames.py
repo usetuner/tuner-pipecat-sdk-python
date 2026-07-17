@@ -192,6 +192,58 @@ def test_on_latency_breakdown_enriches_measurement():
     assert meas.e2e_ms == 200  # 900 - 700
 
 
+def test_on_latency_breakdown_prefers_langchain_duration_over_pipecat_metrics():
+    """A LangChain/LangGraph-driven turn (via observer.wrap_chain()/wrap_graph())
+    reports LLM duration through record_external_llm_duration_ms(), not pipecat's
+    MetricsFrame machinery (LangchainProcessor never emits it). That value must win
+    even when pipecat-sourced numbers are also present, since those didn't actually
+    come from LangchainProcessor's own frames in this scenario."""
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = 1_000_000_000
+    acc._pending_pipecat_llm_processing_s = 0.03  # should be ignored
+    acc.record_external_llm_duration_ms(45)
+    acc.on_latency_measured(0.2)
+
+    acc.on_turn_started(1, 1_000_000_000 + 500_000_000)
+    acc.on_user_stopped_speaking(1_000_000_000 + 700_000_000)
+    acc.on_bot_started_speaking(1_000_000_000 + 900_000_000)
+    breakdown = SimpleNamespace(
+        user_turn_start_time=1.5,
+        user_turn_secs=0.2,
+        ttfb=[SimpleNamespace(processor="LLM", duration_secs=0.658)],
+        function_calls=[],
+    )
+    acc.on_latency_breakdown(breakdown)
+
+    assert acc.latency_measurements[0].llm_ms == 45
+    # Consumed and reset -- a second breakdown with nothing pending falls through
+    # to the pipecat-sourced fallbacks instead of reusing a stale value.
+    assert acc._pending_external_llm_duration_ms is None
+
+
+def test_on_latency_breakdown_langchain_duration_zero_still_counts_as_measured():
+    """0ms is a valid measured duration, not 'nothing reported' -- must not be
+    treated the same as None (unlike the truthy check pipecat's own processing-time
+    fallback uses)."""
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = 1_000_000_000
+    acc.record_external_llm_duration_ms(0)
+    acc.on_latency_measured(0.2)
+
+    acc.on_turn_started(1, 1_000_000_000 + 500_000_000)
+    acc.on_user_stopped_speaking(1_000_000_000 + 700_000_000)
+    acc.on_bot_started_speaking(1_000_000_000 + 900_000_000)
+    breakdown = SimpleNamespace(
+        user_turn_start_time=1.5,
+        user_turn_secs=0.2,
+        ttfb=[SimpleNamespace(processor="LLM", duration_secs=0.658)],
+        function_calls=[],
+    )
+    acc.on_latency_breakdown(breakdown)
+
+    assert acc.latency_measurements[0].llm_ms == 0
+
+
 # Used for Google/Gemini, which emit a per-processor TTFB metric but no LLM ProcessingMetricsData.
 def test_on_latency_breakdown_llm_ms_falls_back_to_llm_ttfb():
     """Some providers (e.g. Google/Gemini) emit a per-processor TTFB metric but no LLM

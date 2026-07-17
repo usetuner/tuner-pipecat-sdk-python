@@ -28,7 +28,7 @@ def test_config_defaults():
         call_id="call",
     )
     assert c.call_type == "web_call"
-    assert c.base_url == "http://localhost:8000"
+    assert c.base_url == "https://api.usetuner.ai"
     assert c.recording_url == "pipecat://no-recording"
     assert c.debug is False
     assert c.asr_model == ""

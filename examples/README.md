@@ -11,7 +11,10 @@ Every example is self-contained with its own `pyproject.toml`. Run `uv sync` ins
 | Example | Use case | Key concepts |
 |---------|----------|-------------|
 | [`pizza_order/`](pizza_order/) | Pipecat Pizza ordering | LLM tool-calling, running price total, confirmation branch, cost reporting |
+| [`pizza_order_google/`](pizza_order_google/) | Pizza ordering on the Google stack | Google STT/Gemini LLM/Google TTS, cost reporting |
 | [`nova_clinic_pipecat/`](nova_clinic_pipecat/) | Medical clinic receptionist | Tool-calling, SIP/telephony transports, cost reporting |
+| [`pizza_order_langchain/`](pizza_order_langchain/) | Pipecat Pizza ordering via a LangChain agent | `Observer.wrap_chain()`, LLM tool-calling, usage/cost reporting |
+| [`nova_clinic_langgraph/`](nova_clinic_langgraph/) | Medical clinic receptionist via a LangGraph agent | `Observer.wrap_graph()`, node-transition tracking, tool-calling, usage/cost reporting |
 
 ---
 
@@ -54,7 +57,10 @@ transport.input()
                         └─► context_aggregator.assistant()
 ```
 
-You register it on the `PipelineTask` instead of inserting it into `Pipeline([...])`:
+You register it on the `PipelineTask` instead of inserting it into `Pipeline([...])`.
+`observer` itself needs two helpers registered alongside it: `observer.latency_observer`
+computes per-turn latency, and `turn_tracker` (a plain Pipecat `TurnTrackingObserver`)
+tells `observer` where turn boundaries are. All three go in the same list:
 
 ```python
 task = PipelineTask(

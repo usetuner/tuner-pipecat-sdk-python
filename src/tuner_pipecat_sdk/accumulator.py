@@ -7,7 +7,14 @@ from typing import Any
 
 from loguru import logger
 
-from .models import CallPayload, CallUsage, LatencyMeasurement, LiveTurn, SpeechSegment
+from .models import (
+    CallPayload,
+    CallUsage,
+    LatencyMeasurement,
+    LiveTurn,
+    SegmentEnricher,
+    SpeechSegment,
+)
 from .payload_builder import build_payload
 from .tool_timing_registry import ToolTimingRegistry
 
@@ -81,9 +88,34 @@ class CallAccumulator:
     _pipecat_llm_completion_tokens: int = field(default=0, repr=False)
     _pipecat_tts_chars: int = field(default=0, repr=False)
 
+    # call-level externally-sourced counters (summed across all on_llm_end callbacks
+    # reported via a hook like langchain_bridge._AccumulatorUsageSink). Safe to sum
+    # unconditionally alongside the _pipecat_llm_* counters above ONLY because pipecat's
+    # LangchainProcessor never emits MetricsFrame/LLMUsageMetricsData itself — the
+    # externally-sourced number is the only number that ever exists for those turns. If
+    # a future pipecat processor driving such a runnable ever starts emitting usage
+    # MetricsFrames too, this summing would double-count; see test_langchain_bridge.py's
+    # pinned regression test.
+    _external_llm_prompt_tokens: int = field(default=0, repr=False)
+    _external_llm_completion_tokens: int = field(default=0, repr=False)
+
     # per-turn pending pipecat metrics (reset on each latency breakdown)
     _pending_pipecat_llm_processing_s: float = field(default=0.0, repr=False)
     _pending_pipecat_tts_processing_s: float = field(default=0.0, repr=False)
+
+    # per-turn pending externally-sourced LLM call duration (reset on each latency
+    # breakdown), reported via a hook like langchain_bridge._AccumulatorUsageSink from
+    # tuner-langchain's on_llm_end callback. This is total on_llm_start->on_llm_end
+    # duration, not a true time-to-first-token -- see on_latency_breakdown()'s comment.
+    # None (not 0) means "nothing reported this turn", distinct from a genuine 0ms call.
+    _pending_external_llm_duration_ms: int | None = field(default=None, repr=False)
+
+    # Transforms applied to the final transcript segment list at payload-build
+    # time, in registration order -- see register_segment_enricher(). Keeps this
+    # class (and payload_builder.py) ignorant of which optional integrations
+    # exist; each integration (e.g. the LangChain bridge) registers its own
+    # transform instead of being imported and called by name here.
+    _segment_enrichers: list[SegmentEnricher] = field(default_factory=list, repr=False)
 
     # Turn-started calls that arrived before StartFrame (call_start_abs_ns not yet set).
     # Processed retroactively in on_start once the reference timestamp is known.
@@ -154,16 +186,60 @@ class CallAccumulator:
         return self._rel_ms(abs_ns) if abs_ns else None
 
     def get_total_llm_tokens(self) -> int:
-        return self._pipecat_llm_total_tokens
+        return (
+            self._pipecat_llm_total_tokens
+            + self._external_llm_prompt_tokens
+            + self._external_llm_completion_tokens
+        )
 
     def get_llm_prompt_tokens(self) -> int:
-        return self._pipecat_llm_prompt_tokens
+        return self._pipecat_llm_prompt_tokens + self._external_llm_prompt_tokens
 
     def get_llm_completion_tokens(self) -> int:
-        return self._pipecat_llm_completion_tokens
+        return self._pipecat_llm_completion_tokens + self._external_llm_completion_tokens
 
     def get_total_tts_characters(self) -> int:
         return self._pipecat_tts_chars
+
+    def record_external_llm_usage(
+        self, prompt_tokens: int | None, completion_tokens: int | None
+    ) -> None:
+        """Record LLM token usage reported by a turn driven outside pipecat's own
+        frame stream (e.g. a LangChain/LangGraph runnable).
+
+        Called by ``langchain_bridge._AccumulatorUsageSink`` from tuner-langchain's
+        ``on_llm_end`` callback today; any other external integration can reuse the
+        same hook. See the class-level comment on the ``_external_llm_*`` fields for
+        why summing with pipecat-sourced counters is safe today. ``None`` (a provider
+        or turn that didn't report usage) is treated as ``0``, not an error.
+        """
+        self._external_llm_prompt_tokens += max(0, prompt_tokens or 0)
+        self._external_llm_completion_tokens += max(0, completion_tokens or 0)
+
+    def record_external_llm_duration_ms(self, duration_ms: int | None) -> None:
+        """Record the duration of the most recent LLM call in a turn driven outside
+        pipecat's own frame stream (e.g. a LangChain/LangGraph runnable).
+
+        Called by ``langchain_bridge._AccumulatorUsageSink`` from tuner-langchain's
+        ``on_llm_end`` callback. Consumed (and reset) by ``on_latency_breakdown()``.
+        If the turn made multiple LLM calls (e.g. a tool-calling round-trip), only
+        the last one's duration survives -- this is overwritten, not accumulated.
+        """
+        if duration_ms is not None:
+            duration_ms = max(0, duration_ms)
+        self._pending_external_llm_duration_ms = duration_ms
+
+    def register_segment_enricher(self, enricher: SegmentEnricher) -> None:
+        """Register a transform applied to the transcript segment list at
+        payload-build time.
+
+        Called by ``Observer.wrap_graph()``/``wrap_chain()`` the first time
+        either is used, to merge in LangChain-sourced node/tool segments. This
+        accumulator has no idea what the registered callable does or where it
+        came from -- it just applies every registered enricher, in order, to
+        the native segment list before building the payload.
+        """
+        self._segment_enrichers.append(enricher)
 
     @property
     def disconnection_reason(self) -> str | None:
@@ -234,7 +310,9 @@ class CallAccumulator:
         it commits to the transcript at UserStoppedSpeaking, like pipecat's aggregator)."""
         if self._open_user_turn is None:
             self._open_user_turn = LiveTurn(
-                kind="user", order=0, start_ms=start_ms,
+                kind="user",
+                order=0,
+                start_ms=start_ms,
                 user_segment_id=self._active_user_segment_id,
             )
         return self._open_user_turn
@@ -522,13 +600,24 @@ class CallAccumulator:
         # always label TTS, so STT/LLM TTFBs no longer leak into this field.
         measurement.ttfb_ms = tts_ttfb_ms if tts_ttfb_ms is not None else first_ttfb_ms
 
-        # LLM time-to-first-token. Prefer the processing-time metric when present, but fall
-        # back to the LLM's own TTFB — some providers (e.g. Google/Gemini) emit a TTFB metric
-        # but no ProcessingMetricsData, which would otherwise leave LLM latency blank.
+        # LLM latency. Prefer an externally-sourced call duration when this turn went
+        # through observer.wrap_graph()/wrap_chain() — pipecat's LangchainProcessor
+        # is a bare FrameProcessor, not an LLMService, so it never emits the
+        # MetricsFrame data the other two sources below depend on; this is the only
+        # number that ever exists for those turns. Note this is total on_llm_start->
+        # on_llm_end duration, not strictly time-to-first-token like the pipecat-
+        # sourced fallbacks below aim for. Otherwise prefer the processing-time
+        # metric, falling back to the LLM's own TTFB — some providers (e.g.
+        # Google/Gemini) emit a TTFB metric but no ProcessingMetricsData, which
+        # would otherwise leave LLM latency blank.
         measurement.llm_ms = (
-            round(self._pending_pipecat_llm_processing_s * 1000)
-            if self._pending_pipecat_llm_processing_s
-            else llm_ttfb_ms
+            self._pending_external_llm_duration_ms
+            if self._pending_external_llm_duration_ms is not None
+            else (
+                round(self._pending_pipecat_llm_processing_s * 1000)
+                if self._pending_pipecat_llm_processing_s
+                else llm_ttfb_ms
+            )
         )
         measurement.tts_ms = (
             round(self._pending_pipecat_tts_processing_s * 1000)
@@ -547,6 +636,7 @@ class CallAccumulator:
 
         self._pending_pipecat_llm_processing_s = 0.0
         self._pending_pipecat_tts_processing_s = 0.0
+        self._pending_external_llm_duration_ms = None
 
     def on_call_end(self, timestamp_ns: int) -> None:
         if self.done:
@@ -614,8 +704,10 @@ class CallAccumulator:
                     if seg is not None and val > 0 and seg.stt_ms is None:
                         seg.stt_ms = round(val * 1000)
                     # Also stamp the in-progress user turn (the first STT TTFB of the turn wins).
-                    if self._open_user_turn is not None and val > 0 and (
-                        self._open_user_turn.stt_ms is None
+                    if (
+                        self._open_user_turn is not None
+                        and val > 0
+                        and (self._open_user_turn.stt_ms is None)
                     ):
                         self._open_user_turn.stt_ms = round(val * 1000)
 
@@ -624,4 +716,4 @@ class CallAccumulator:
         config: Any,
         cost_calculator: Callable[[CallUsage], float] | None = None,
     ) -> CallPayload:
-        return build_payload(self, config, cost_calculator)
+        return build_payload(self, config, cost_calculator, self._segment_enrichers)

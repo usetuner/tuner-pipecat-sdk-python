@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -133,6 +134,20 @@ class ToolInfo(BaseModel):
     start_ms: int | None = None
 
 
+class NodeInfo(BaseModel):
+    """LangGraph node transition details for node_transition segments.
+
+    Mirrors the ``{"to", "from", "reason"}`` shape tuner-langchain's
+    ``segment_builder.build_node_segment`` already produces.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    to: str | None = None
+    from_: str | None = Field(default=None, alias="from")
+    reason: str | None = None
+
+
 class TranscriptSegment(BaseModel):
     role: str
     text: str | None = None
@@ -142,6 +157,15 @@ class TranscriptSegment(BaseModel):
     words: list[TranscriptWord] | None = None
     duration_ms: int | None = None
     tool: ToolInfo | None = None
+    node: NodeInfo | None = None
+
+
+# A transform applied to the final transcript segment list at payload-build
+# time -- e.g. merging LangChain-sourced node/tool segments into the native
+# pipecat transcript. Lets optional integrations contribute to the payload
+# (via CallAccumulator.register_segment_enricher()) without payload_builder.py
+# or CallAccumulator needing to import or know about any specific integration.
+SegmentEnricher = Callable[[list[TranscriptSegment]], list[TranscriptSegment]]
 
 
 class AiModels(BaseModel):
@@ -225,7 +249,9 @@ __all__ = [
     "TranscriptWord",
     "TranscriptMetadata",
     "ToolInfo",
+    "NodeInfo",
     "TranscriptSegment",
+    "SegmentEnricher",
     "AiModels",
     "UsageToken",
     "CallUsage",

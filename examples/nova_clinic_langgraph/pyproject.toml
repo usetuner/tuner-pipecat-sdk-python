@@ -1,0 +1,19 @@
+[project]
+name = "nova-clinic-langgraph-bot"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    # NOTE: deliberately NOT using pipecat-ai[langchain] -- it pins langchain~=0.3.20,
+    # which conflicts with tuner-langchain's langchain-core>=1.0,<2.0 requirement.
+    # pipecat's LangchainProcessor only imports langchain_core primitives, so it
+    # works fine against the langgraph>=1.0 line declared below.
+    "pipecat-ai[openai,runner,silero,webrtc,websocket]>=1.0.0",
+    "python-dotenv>=1.0.1",
+    "aiohttp>=3.9",
+    "tuner-pipecat-sdk[langchain]",
+    "langgraph>=1.0,<2.0",
+    "langchain-openai>=0.3",
+]
+
+[tool.uv.sources]
+tuner-pipecat-sdk = { path = "../../", editable = true }

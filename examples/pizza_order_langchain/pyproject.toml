@@ -1,0 +1,20 @@
+[project]
+name = "pizza-order-langchain-bot"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    # NOTE: deliberately NOT using pipecat-ai[langchain] -- it pins langchain~=0.3.20,
+    # which conflicts with tuner-langchain's langchain-core>=1.0,<2.0 requirement.
+    # pipecat's LangchainProcessor only imports langchain_core primitives, so it
+    # works fine against the langchain-core>=1.0 line declared below. No need for
+    # the full `langchain` metapackage -- this example only uses langchain-core
+    # primitives (messages, RunnableLambda) directly, no AgentExecutor.
+    "pipecat-ai[webrtc,silero,deepgram,openai,runner]>=1.0.0",
+    "tuner-pipecat-sdk[langchain]",
+    "langchain-core>=1.0,<2.0",
+    "langchain-openai>=0.3",
+    "python-dotenv>=1.0.1",
+]
+
+[tool.uv.sources]
+tuner-pipecat-sdk = { path = "../../", editable = true }

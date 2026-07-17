@@ -1,13 +1,14 @@
 """Tests for Observer: plain pipecat pipeline."""
 
 import asyncio
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 pytest.importorskip("pipecat", reason="pipecat not installed")
 
-from pipecat.frames.frames import EndFrame
+from pipecat.frames.frames import EndFrame, FunctionCallInProgressFrame, FunctionCallResultFrame
 
 from tuner_pipecat_sdk.observer import Observer
 
@@ -43,6 +44,104 @@ async def test_flush_builds_and_posts_without_context(observer):
         assert config.call_id == "call-1"
         assert payload.call_id == "call-1"
         assert payload.call_status == "call_ended"
+
+
+def test_wrap_graph_raises_import_error_when_langchain_unavailable(observer, monkeypatch):
+    monkeypatch.setattr("tuner_pipecat_sdk.langchain_bridge._LANGCHAIN_AVAILABLE", False)
+    with pytest.raises(ImportError, match=r"pip install tuner-pipecat-sdk\[langchain\]"):
+        observer.wrap_graph(object())
+
+
+def test_wrap_chain_raises_import_error_when_langchain_unavailable(observer, monkeypatch):
+    monkeypatch.setattr("tuner_pipecat_sdk.langchain_bridge._LANGCHAIN_AVAILABLE", False)
+    with pytest.raises(ImportError, match=r"pip install tuner-pipecat-sdk\[langchain\]"):
+        observer.wrap_chain(object())
+
+
+@pytest.mark.asyncio
+async def test_wrap_chain_injects_tuner_callback_and_invokes_underlying_runnable(observer):
+    pytest.importorskip("tuner_langchain")
+
+    captured_config = {}
+
+    class _FakeChain:
+        async def ainvoke(self, input, config=None, **kwargs):
+            captured_config.update(config or {})
+            return "ok"
+
+    wrapped = observer.wrap_chain(_FakeChain())
+    result = await wrapped.ainvoke({"input": "hi"})
+
+    assert result == "ok"
+    assert len(captured_config.get("callbacks", [])) == 1
+    assert observer._langchain.active
+
+
+def test_wrap_graph_and_wrap_chain_share_one_lg_accumulator(observer):
+    pytest.importorskip("tuner_langchain")
+
+    class _FakeRunnable:
+        pass
+
+    observer.wrap_chain(_FakeRunnable())
+    first_acc = observer._langchain._lg_accumulator
+    observer.wrap_graph(_FakeRunnable())
+
+    assert observer._langchain._lg_accumulator is first_acc
+
+
+def test_wrap_graph_and_wrap_chain_register_segment_enricher_only_once(observer):
+    """The segment-merging enricher must be registered exactly once, tied to
+    the lazy creation of LangchainIntegration._lg_accumulator -- not once per
+    wrap_* call. Otherwise calling both wrap_chain() then wrap_graph() would
+    merge the same LangChain invocations into the transcript twice."""
+    pytest.importorskip("tuner_langchain")
+
+    class _FakeRunnable:
+        pass
+
+    observer.wrap_chain(_FakeRunnable())
+    observer.wrap_graph(_FakeRunnable())
+    observer.wrap_chain(_FakeRunnable())
+
+    assert len(observer._acc._segment_enrichers) == 1
+
+
+def test_tool_call_frames_skipped_when_lg_accumulator_attached(observer):
+    # Sentinel: the dedup guard only checks "active", so any non-None value proves it.
+    observer._langchain._lg_accumulator = object()
+    now_ns = time.time_ns()
+
+    observer._handle(
+        FunctionCallInProgressFrame(function_name="lookup", tool_call_id="tc-1", arguments={}),
+        now_ns,
+    )
+    observer._handle(
+        FunctionCallResultFrame(
+            function_name="lookup", tool_call_id="tc-1", arguments={}, result={"ok": True}
+        ),
+        now_ns,
+    )
+
+    assert observer._acc.live_turns == []
+
+
+def test_tool_call_frames_captured_natively_when_no_lg_accumulator(observer):
+    now_ns = time.time_ns()
+
+    observer._handle(
+        FunctionCallInProgressFrame(function_name="lookup", tool_call_id="tc-1", arguments={}),
+        now_ns,
+    )
+    observer._handle(
+        FunctionCallResultFrame(
+            function_name="lookup", tool_call_id="tc-1", arguments={}, result={"ok": True}
+        ),
+        now_ns,
+    )
+
+    kinds = [t.kind for t in observer._acc.live_turns]
+    assert kinds == ["agent_function", "agent_result"]
 
 
 @pytest.mark.asyncio

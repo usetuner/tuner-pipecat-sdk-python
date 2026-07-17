@@ -35,7 +35,7 @@ def observer():
 def test_observer_init():
     o = Observer(api_key="k", workspace_id=2, agent_id="a", call_id="c")
     assert o._config.workspace_id == 2
-    assert o._config.base_url == "http://localhost:8000"
+    assert o._config.base_url == "https://api.usetuner.ai"
     assert o._acc is not None
     assert o._flushed is False
 
