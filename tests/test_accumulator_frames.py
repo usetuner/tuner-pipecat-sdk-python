@@ -560,3 +560,126 @@ def test_set_disconnection_reason_ignores_empty_string():
 def test_disconnection_reason_default_is_empty():
     acc = CallAccumulator()
     assert acc.disconnection_reason is None
+
+# ---------------------------------------------------------------------------
+# set_turn_eou — event-driven EOU decision (on_user_turn_stopped)
+# ---------------------------------------------------------------------------
+
+
+def _user_turns(acc):
+    return [t for t in acc.live_turns if t.kind == "user"]
+
+
+def _commit_user_turn(acc, base, text="hello", start_ms=100):
+    """Drive one committed user turn up to (but not including) the stop: start → transcription.
+    The caller then adds vad_stop / user_stop / set_turn_eou as the scenario needs."""
+    acc.on_turn_started(1, base + start_ms * 1_000_000)
+    acc.on_user_started_speaking(base + start_ms * 1_000_000)
+    acc.on_transcription(text, base + (start_ms + 100) * 1_000_000)
+
+
+def test_set_turn_eou_stt_endpoint_records_reason_only():
+    """Server-side STT (Flux) closed the turn: eou_reason='stt_endpoint', no ms (the local
+    VAD anchor is meaningless on the server's clock, so it's deliberately not computed)."""
+    acc = CallAccumulator()
+    base = 1_000_000_000
+    acc.call_start_abs_ns = base
+    _commit_user_turn(acc, base)
+    acc.on_vad_user_stopped_speaking(base + 1400 * 1_000_000)  # anchor present…
+    acc.on_user_stopped_speaking(base + 1500 * 1_000_000)      # …but must be ignored
+    acc.set_turn_eou("ExternalUserTurnStopStrategy", base + 1600 * 1_000_000)
+
+    turn = _user_turns(acc)[0]
+    assert turn.eou_reason == "stt_endpoint"
+    assert turn.eou_ms is None
+
+
+def test_set_turn_eou_silence_timeout_computes_vad_anchored_delay():
+    """A local strategy closed the turn: eou_ms = last VAD stop → turn-stop event."""
+    acc = CallAccumulator()
+    base = 1_000_000_000
+    acc.call_start_abs_ns = base
+    _commit_user_turn(acc, base)
+    acc.on_vad_user_stopped_speaking(base + 1400 * 1_000_000)
+    acc.on_user_stopped_speaking(base + 1500 * 1_000_000)
+    acc.set_turn_eou("SpeechTimeoutUserTurnStopStrategy", base + 1500 * 1_000_000)
+
+    turn = _user_turns(acc)[0]
+    assert turn.eou_reason == "silence_timeout"
+    assert turn.eou_ms == 100  # 1500 − 1400
+
+
+def test_set_turn_eou_targets_still_open_turn_when_event_beats_commit():
+    """If the event arrives BEFORE UserStoppedSpeaking commits, it targets the open turn."""
+    acc = CallAccumulator()
+    base = 1_000_000_000
+    acc.call_start_abs_ns = base
+    _commit_user_turn(acc, base)
+    acc.on_vad_user_stopped_speaking(base + 1400 * 1_000_000)
+    # event first (turn still open), then the commit
+    acc.set_turn_eou("SpeechTimeoutUserTurnStopStrategy", base + 1450 * 1_000_000)
+    acc.on_user_stopped_speaking(base + 1500 * 1_000_000)
+
+    turn = _user_turns(acc)[0]
+    assert turn.eou_reason == "silence_timeout"
+    assert turn.eou_ms == 50  # 1450 − 1400 (event timestamp is the stop anchor)
+
+
+def test_set_turn_eou_targets_committed_turn_when_event_after_commit():
+    """If the event arrives AFTER commit (turn already appended), it back-targets the most
+    recent committed user turn — the race the old frame-driven design mislabeled."""
+    acc = CallAccumulator()
+    base = 1_000_000_000
+    acc.call_start_abs_ns = base
+    _commit_user_turn(acc, base)
+    acc.on_vad_user_stopped_speaking(base + 1400 * 1_000_000)
+    acc.on_user_stopped_speaking(base + 1500 * 1_000_000)  # commits, _open_user_turn → None
+    assert acc._open_user_turn is None
+    acc.set_turn_eou("ExternalUserTurnStopStrategy", base + 1550 * 1_000_000)
+
+    assert _user_turns(acc)[0].eou_reason == "stt_endpoint"
+
+
+def test_set_turn_eou_model_verdict_takes_precedence():
+    """A smart-turn model verdict set during the turn wins; the later event no-ops."""
+    acc = CallAccumulator()
+    base = 1_000_000_000
+    acc.call_start_abs_ns = base
+    _commit_user_turn(acc, base)
+    metric = type(
+        "TurnMetricsData",
+        (),
+        {"is_complete": True, "e2e_processing_time_ms": 42, "probability": 0.9},
+    )()
+    acc.on_metrics_frame(SimpleNamespace(data=[metric]))
+    acc.on_vad_user_stopped_speaking(base + 1400 * 1_000_000)
+    acc.on_user_stopped_speaking(base + 1500 * 1_000_000)
+    acc.set_turn_eou("SpeechTimeoutUserTurnStopStrategy", base + 1500 * 1_000_000)
+
+    turn = _user_turns(acc)[0]
+    assert turn.eou_reason == "model_verdict"  # not silence_timeout
+    assert turn.eou_ms == 42
+    assert turn.eou_confidence == 0.9
+
+
+def test_set_turn_eou_none_strategy_without_anchor_leaves_absent():
+    """A None/unknown strategy with no usable VAD anchor leaves eou absent (honest)."""
+    acc = CallAccumulator()
+    base = 1_000_000_000
+    acc.call_start_abs_ns = base
+    _commit_user_turn(acc, base)
+    acc.on_user_stopped_speaking(base + 1500 * 1_000_000)  # no vad_stop recorded
+    acc.set_turn_eou("NoneType", base + 1500 * 1_000_000)
+
+    turn = _user_turns(acc)[0]
+    assert turn.eou_ms is None
+    assert turn.eou_reason is None
+
+
+def test_set_turn_eou_no_user_turn_is_safe():
+    """No user turn present at all → no crash, nothing to target."""
+    acc = CallAccumulator()
+    base = 1_000_000_000
+    acc.call_start_abs_ns = base
+    acc.set_turn_eou("SpeechTimeoutUserTurnStopStrategy", base + 1500 * 1_000_000)
+    assert _user_turns(acc) == []

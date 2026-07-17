@@ -134,6 +134,10 @@ class CallAccumulator:
     _open_user_turn: LiveTurn | None = field(default=None, repr=False)
     # The agent turn currently accruing LLM text / awaiting voicing.
     _open_agent_turn: LiveTurn | None = field(default=None, repr=False)
+     # Timestamp (ns) of the most recent VAD-detected speech-end within the currently open
+    # user turn. Anchors the silence-timeout EOU fallback below when no turn-analyzer
+    # verdict arrives before the turn commits. Reset after each turn closes.
+    _last_vad_stop_ns: int | None = field(default=None, repr=False)
 
     # misc
     done: bool = False
@@ -407,6 +411,50 @@ class CallAccumulator:
             self._append_live(turn)
         self._open_agent_turn = None
 
+    def on_vad_user_stopped_speaking(self, timestamp_ns: int) -> None:
+        """Track the latest VAD-detected speech-end within the open user turn. A turn can
+        reopen after a VAD stop (the user resumes speaking), so only the LAST one before
+        the turn actually commits is the real silence anchor — this simply records the most
+        recent one seen; set_turn_eou decides whether it's needed."""
+        self._last_vad_stop_ns = timestamp_ns
+
+
+    def set_turn_eou(self, strategy_name: str, stop_timestamp_ns: int) -> None:
+        """Decide EOU for the just-ended user turn, driven by on_user_turn_stopped.
+
+        This event is the one signal that natively knows BOTH that the turn ended and
+        which strategy closed it — so the whole decision happens here, in one place, with
+        no frame/event ordering race.
+
+        The event can fire slightly before or after the UserStoppedSpeakingFrame commits
+        the turn, so target whichever user turn is current: the still-open one if the
+        event beat the commit, else the most recently appended user turn.
+
+        - ExternalUserTurnStopStrategy => server-side STT (Flux) decided on its own clock;
+          local VAD anchor is meaningless -> eou_reason only, no ms.
+        - any other (local) strategy => VAD-anchored silence: last VAD stop -> this stop.
+        - model_verdict (set earlier from TurnMetricsData) is left untouched.
+        """
+        target = self._open_user_turn
+        if target is None:
+            for turn in reversed(self.live_turns):
+                if turn.kind == "user":
+                    target = turn
+                    break
+        if target is None or target.eou_ms is not None or target.eou_reason is not None:
+            return  # nothing to target, or already decided (e.g. model_verdict)
+
+        if strategy_name == "ExternalUserTurnStopStrategy":
+            target.eou_reason = "stt_endpoint"
+        elif self._last_vad_stop_ns is not None:
+            eou_ms = self._rel_ms(stop_timestamp_ns) - self._rel_ms(self._last_vad_stop_ns)
+            if eou_ms > 0:
+                target.eou_ms = eou_ms
+                target.eou_reason = "silence_timeout"
+        # else: local strategy but no VAD anchor -> leave absent (honest).
+
+        self._last_vad_stop_ns = None  # consumed; next turn starts clean
+
     def on_user_stopped_speaking(self, timestamp_ns: int) -> None:
         """Capture user stop_ms and COMMIT the in-progress user turn.
 
@@ -414,6 +462,9 @@ class CallAccumulator:
         accumulated transcriptions as one message here. We mirror that — append the open user
         turn (if it captured any transcription) to the transcript at this moment, so the row
         grouping and ordering match pipecat exactly. A turn that captured nothing real is dropped.
+
+        EOU is NOT decided here — it's driven by on_user_turn_stopped (see set_turn_eou),
+        which is the one signal that natively knows which strategy closed the turn.
         """
         stopped_ms = self._rel_ms(timestamp_ns)
         seg = self._segment_by_id(self._active_user_segment_id)
@@ -710,6 +761,19 @@ class CallAccumulator:
                         and (self._open_user_turn.stt_ms is None)
                     ):
                         self._open_user_turn.stt_ms = round(val * 1000)
+
+            elif cls_name == "TurnMetricsData":
+                # Only an is_complete=True verdict is a real end-of-turn decision — the framework
+                # fires several is_complete=False data points per coalesced turn (VAD paused, model
+                # said "not done yet"); those are diagnostic-only for now and not attached anywhere.
+                # e2e_processing_time_ms is already in ms (unlike the *_secs values above).
+                if getattr(d, "is_complete", False):
+                    eou_ms = round(getattr(d, "e2e_processing_time_ms", 0) or 0)
+                    confidence = getattr(d, "probability", None)
+                    if self._open_user_turn is not None and self._open_user_turn.eou_ms is None:
+                        self._open_user_turn.eou_ms = eou_ms
+                        self._open_user_turn.eou_confidence = confidence
+                        self._open_user_turn.eou_reason = "model_verdict"
 
     def build_payload(
         self,

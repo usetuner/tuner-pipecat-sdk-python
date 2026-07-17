@@ -47,6 +47,21 @@ class Replay:
         self.acc.on_user_stopped_speaking(self._ns(ms))
         return self
 
+    def vad_stop(self, ms: int) -> "Replay":
+        """A VADUserStoppedSpeakingFrame — records the raw VAD speech-end that anchors the
+        silence-timeout EOU. Fires (possibly several times) before the turn actually commits;
+        the last one before user_turn_stopped is the anchor."""
+        self.acc.on_vad_user_stopped_speaking(self._ns(ms))
+        return self
+
+    def user_turn_stopped(self, strategy_name: str, ms: int) -> "Replay":
+        """The on_user_turn_stopped event — pipecat's authoritative turn-close signal, carrying
+        the strategy that closed it. This is what drives EOU (set_turn_eou). strategy_name is
+        the class name pipecat would pass, e.g. 'SpeechTimeoutUserTurnStopStrategy' (VAD/local)
+        or 'ExternalUserTurnStopStrategy' (server-side STT, e.g. Flux)."""
+        self.acc.set_turn_eou(strategy_name, self._ns(ms))
+        return self
+
     # bot generation + voicing
     def llm_start(self, ms: int) -> "Replay":
         self.acc.on_llm_response_start(self._ns(ms))

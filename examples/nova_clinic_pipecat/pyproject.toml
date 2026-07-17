@@ -3,7 +3,7 @@ name = "nova-clinic-bot"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
-    "pipecat-ai[openai,runner,silero,webrtc,websocket]>=1.0.0",
+    "pipecat-ai[openai,runner,silero,webrtc,websocket,deepgram]>=1.0.0",
     "python-dotenv>=1.0.1",
     "aiohttp>=3.9",
     "tuner-pipecat-sdk",

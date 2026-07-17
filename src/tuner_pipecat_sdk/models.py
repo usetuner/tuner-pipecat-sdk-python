@@ -82,6 +82,9 @@ class LiveTurn:
     start_ms: int = 0
     end_ms: int | None = None
     stt_ms: int | None = None
+    eou_ms: int | None = None
+    eou_confidence: float | None = None
+    eou_reason: str | None = None
     # Links into the latency/speech substrate (never matched by text).
     user_segment_id: int | None = None
     bot_segment_id: int | None = None
@@ -120,6 +123,9 @@ class TranscriptMetadata(BaseModel):
     transcript_confidence: float | None = None
     stt_node_ttfb: float | None = None
     asr_node_ttfb: float | None = None
+    eou_delay: float | None = None
+    eou_confidence: float | None = None
+    eou_reason: str | None = None
 
 
 class ToolInfo(BaseModel):

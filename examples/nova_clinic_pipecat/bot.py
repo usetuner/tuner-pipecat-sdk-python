@@ -34,6 +34,41 @@ from tuner_pipecat_sdk import CallUsage, Observer
 
 load_dotenv()
 
+from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
+from pipecat.audio.vad.vad_analyzer import VADParams
+from pipecat.turns.user_start import VADUserTurnStartStrategy
+from pipecat.turns.user_stop import (
+    SpeechTimeoutUserTurnStopStrategy,
+    TurnAnalyzerUserTurnStopStrategy,
+)
+from pipecat.turns.user_turn_strategies import UserTurnStrategies
+
+# TUNER_TEST_STRATEGY = "vad_only" | "stt_endpointing" | "smart_turn"
+_STRATEGY = os.getenv("TUNER_TEST_STRATEGY", "smart_turn")
+
+def _build_user_turn_strategies() -> UserTurnStrategies:
+    if _STRATEGY == "vad_only":
+        stop_strategy = SpeechTimeoutUserTurnStopStrategy(wait_for_transcript=False)
+
+    elif _STRATEGY == "stt_endpointing":
+        stop_strategy = SpeechTimeoutUserTurnStopStrategy(wait_for_transcript=True)
+    else:
+        stop_strategy = TurnAnalyzerUserTurnStopStrategy(
+            turn_analyzer=LocalSmartTurnAnalyzerV3(),
+            wait_for_transcript=True,
+        )
+
+    logger.info(
+        "[tuner-test] stop strategy resolved: {} wait_for_transcript={} user_speech_timeout={}",
+        type(stop_strategy).__name__,
+        getattr(stop_strategy, "_wait_for_transcript", "n/a"),
+        getattr(stop_strategy, "_user_speech_timeout", "n/a"),
+    )
+
+    return UserTurnStrategies(
+        start=[VADUserTurnStartStrategy()],
+        stop=[stop_strategy],
+    )
 
 # ---------------------------------------------------------------------------
 # Prompt
@@ -242,6 +277,13 @@ async def run_bot(
     logger.info("Starting Nova Clinic assistant")
 
     stt = OpenAISTTService(api_key=os.getenv("OPENAI_API_KEY"))
+    #stt = DeepgramFluxSTTService(
+    #    api_key=os.getenv("DEEPGRAM_API_KEY"),
+    #    settings=DeepgramFluxSTTService.Settings(
+    #        eot_threshold=0.7,      # end-of-turn confidence needed to fire END_OF_TURN
+    #        eot_timeout_ms=3000,
+    #    ),
+    #)
     tts = OpenAITTSService(api_key=os.getenv("OPENAI_API_KEY"), voice="alloy")
 
     tools = ToolsSchema(
@@ -312,8 +354,13 @@ async def run_bot(
 
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
         context,
-        user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer()),
+        user_params=LLMUserAggregatorParams(
+            vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=0.2)),
+            #user_turn_strategies=ExternalUserTurnStrategies(),
+            user_turn_strategies=_build_user_turn_strategies(),
+        ),
     )
+
 
     def calculate_cost(usage: CallUsage) -> float:
         # OpenAI gpt-4o-mini pricing (per token / per character / per second)
@@ -339,6 +386,7 @@ async def run_bot(
         debug=True,
     )
     observer.attach_turn_tracking_observer(turn_tracker)
+    observer.attach_user_aggregator(user_aggregator)
 
     # Forward SIP-layer Call-ID + headers when the call arrived over SIP.
     # Preferred path: a typed provider context (e.g. JambonzCallContext) the

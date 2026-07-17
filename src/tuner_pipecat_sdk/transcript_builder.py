@@ -47,6 +47,9 @@ def build_user_segment(
     end_ms: int,
     interrupted: bool,
     stt_ms: int | None = None,
+    eou_ms: int | None = None,
+    eou_confidence: float | None = None,
+    eou_reason: str | None = None,
     fragments: int = 1,
     turn_index: int | None = None,
 ) -> TranscriptSegment:
@@ -60,6 +63,9 @@ def build_user_segment(
             interrupted=interrupted,
             turn_index=turn_index,
             stt_node_ttfb=stt_ms,
+            eou_delay=eou_ms,
+            eou_confidence=eou_confidence,
+            eou_reason=eou_reason,
             fragments=fragments if fragments > 1 else None,
         ),
     )
@@ -177,6 +183,9 @@ def build_segments_from_turns(acc: CallAccumulator) -> list[TranscriptSegment]:
                     end_ms=turn.end_ms if turn.end_ms is not None else 0,
                     interrupted=last_agent_interrupted,
                     stt_ms=turn.stt_ms,
+                    eou_ms=turn.eou_ms,
+                    eou_confidence=turn.eou_confidence,
+                    eou_reason=turn.eou_reason,
                     fragments=len(turn.chunks),
                     turn_index=turn_index,
                 )
