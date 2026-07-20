@@ -42,33 +42,57 @@ from pipecat.turns.user_stop import (
     TurnAnalyzerUserTurnStopStrategy,
 )
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
+from pipecat.services.deepgram.flux.stt import DeepgramFluxSTTService
+from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies
 
-# TUNER_TEST_STRATEGY = "vad_only" | "stt_endpointing" | "smart_turn"
+# TUNER_TEST_STRATEGY = "vad_only" | "vad_transcript" | "smart_turn" | "flux"
 _STRATEGY = os.getenv("TUNER_TEST_STRATEGY", "smart_turn")
 
-def _build_user_turn_strategies() -> UserTurnStrategies:
+def _build_stt_and_turn_strategies():
+    """Resolve the STT service AND turn strategy together from TUNER_TEST_STRATEGY.
+
+    These are coupled: Flux is both a different STT service and a server-side turn
+    strategy, so a single env value must decide both — they can never disagree.
+    Returns (stt_service, user_turn_strategies).
+    """
+    if _STRATEGY == "flux":
+        stt = DeepgramFluxSTTService(
+            api_key=os.getenv("DEEPGRAM_API_KEY"),
+            settings=DeepgramFluxSTTService.Settings(
+                eot_threshold=float(os.getenv("TUNER_FLUX_EOT_THRESHOLD", "0.7")),
+                eot_timeout_ms=int(os.getenv("TUNER_FLUX_EOT_TIMEOUT_MS", "3000")),
+            ),
+        )
+        turn_strategies = ExternalUserTurnStrategies()
+        logger.info("[tuner-test] strategy=flux (server-side turn detection via Deepgram Flux)")
+        return stt, turn_strategies
+
+    # All VAD-family strategies share OpenAI STT; only the stop strategy varies.
+    stt = OpenAISTTService(api_key=os.getenv("OPENAI_API_KEY"))
+
     if _STRATEGY == "vad_only":
         stop_strategy = SpeechTimeoutUserTurnStopStrategy(wait_for_transcript=False)
-
-    elif _STRATEGY == "stt_endpointing":
+    elif _STRATEGY == "vad_transcript":
         stop_strategy = SpeechTimeoutUserTurnStopStrategy(wait_for_transcript=True)
-    else:
+    else:  # smart_turn (default)
         stop_strategy = TurnAnalyzerUserTurnStopStrategy(
             turn_analyzer=LocalSmartTurnAnalyzerV3(),
             wait_for_transcript=True,
         )
 
     logger.info(
-        "[tuner-test] stop strategy resolved: {} wait_for_transcript={} user_speech_timeout={}",
+        "[tuner-test] strategy={} stop={} wait_for_transcript={} user_speech_timeout={}",
+        _STRATEGY,
         type(stop_strategy).__name__,
         getattr(stop_strategy, "_wait_for_transcript", "n/a"),
         getattr(stop_strategy, "_user_speech_timeout", "n/a"),
     )
 
-    return UserTurnStrategies(
+    turn_strategies = UserTurnStrategies(
         start=[VADUserTurnStartStrategy()],
         stop=[stop_strategy],
     )
+    return stt, turn_strategies
 
 # ---------------------------------------------------------------------------
 # Prompt
@@ -276,14 +300,7 @@ async def run_bot(
 ):
     logger.info("Starting Nova Clinic assistant")
 
-    stt = OpenAISTTService(api_key=os.getenv("OPENAI_API_KEY"))
-    #stt = DeepgramFluxSTTService(
-    #    api_key=os.getenv("DEEPGRAM_API_KEY"),
-    #    settings=DeepgramFluxSTTService.Settings(
-    #        eot_threshold=0.7,      # end-of-turn confidence needed to fire END_OF_TURN
-    #        eot_timeout_ms=3000,
-    #    ),
-    #)
+    stt, user_turn_strategies = _build_stt_and_turn_strategies()
     tts = OpenAITTSService(api_key=os.getenv("OPENAI_API_KEY"), voice="alloy")
 
     tools = ToolsSchema(
@@ -356,8 +373,7 @@ async def run_bot(
         context,
         user_params=LLMUserAggregatorParams(
             vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=0.2)),
-            #user_turn_strategies=ExternalUserTurnStrategies(),
-            user_turn_strategies=_build_user_turn_strategies(),
+            user_turn_strategies=user_turn_strategies
         ),
     )
 
