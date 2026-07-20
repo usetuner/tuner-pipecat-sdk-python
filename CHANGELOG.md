@@ -6,6 +6,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.2.6] 2026-07-20
+
+### Added
+- **End-of-utterance (EOU) delay capture** — wire `observer.attach_user_aggregator(user_aggregator)` to record how long the pipeline took to decide the user was done talking. Adds `eou_delay`, `eou_confidence`, and `eou_reason` to each user row's metadata. Three reasons: `silence_timeout` (local VAD threshold), `model_verdict` (a turn-completion model, e.g. Smart Turn), and `stt_endpoint` (server-side STT, e.g. Deepgram Flux). Each turn's EOU is decided and attributed independently, so a signal that arrives late for one turn never lands on a different turn.
+
+---
+
 ## [0.2.5] 2026-07-07
 
 ### Added
@@ -98,6 +105,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Initial development: accumulator, HTTP client, frame handling, turn tracking, and first round of examples.
 
-[Unreleased]: https://github.com/usetuner/tuner-pipecat-sdk-python/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/usetuner/tuner-pipecat-sdk-python/compare/v0.2.6...HEAD
 [0.1.1]: https://github.com/usetuner/tuner-pipecat-sdk-python/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/usetuner/tuner-pipecat-sdk-python/compare/v0.0.x...v0.1.0
