@@ -683,3 +683,64 @@ def test_set_turn_eou_no_user_turn_is_safe():
     acc.call_start_abs_ns = base
     acc.set_turn_eou("SpeechTimeoutUserTurnStopStrategy", base + 1500 * 1_000_000)
     assert _user_turns(acc) == []
+
+
+def test_set_turn_eou_stale_vad_anchor_does_not_leak_into_next_turn():
+    """A VAD anchor left over from a turn that was already decided by a model_verdict (so
+    set_turn_eou early-returns for it) must not survive to be misapplied as the next turn's
+    silence-timeout anchor when that next turn has no VAD stop of its own yet."""
+    acc = CallAccumulator()
+    base = 1_000_000_000
+    acc.call_start_abs_ns = base
+
+    # Turn 1: VAD stop recorded, then a model_verdict decides it before it commits.
+    _commit_user_turn(acc, base, text="first turn", start_ms=100)
+    metric = type(
+        "TurnMetricsData",
+        (),
+        {"is_complete": True, "e2e_processing_time_ms": 42, "probability": 0.9},
+    )()
+    acc.on_metrics_frame(SimpleNamespace(data=[metric]))
+    acc.on_vad_user_stopped_speaking(base + 1400 * 1_000_000)
+    acc.on_user_stopped_speaking(base + 1500 * 1_000_000)
+    # Late-arriving event for turn 1: already decided (model_verdict) → early return.
+    acc.set_turn_eou("SpeechTimeoutUserTurnStopStrategy", base + 1550 * 1_000_000)
+
+    # Turn 2: commits with NO vad_stop of its own (its VAD frame hasn't reached the
+    # observer yet — the exact race set_turn_eou's docstring anticipates).
+    _commit_user_turn(acc, base, text="second turn", start_ms=3000)
+    acc.on_user_stopped_speaking(base + 3500 * 1_000_000)
+    acc.set_turn_eou("SpeechTimeoutUserTurnStopStrategy", base + 3500 * 1_000_000)
+
+    turns = _user_turns(acc)
+    assert turns[0].eou_reason == "model_verdict"
+    assert turns[0].eou_ms == 42
+    # Turn 2 must be left honestly absent, not computed from turn 1's stale VAD anchor.
+    assert turns[1].eou_ms is None
+    assert turns[1].eou_reason is None
+
+
+def test_metrics_verdict_does_not_overwrite_already_decided_open_turn():
+    """A still-open turn already decided by set_turn_eou (event beat the commit, e.g.
+    stt_endpoint — which leaves eou_ms unset) must not be clobbered by a late-arriving
+    TurnMetricsData model_verdict for what TurnMetricsData (no turn id) can't tell is a
+    different signal for the same turn."""
+    acc = CallAccumulator()
+    base = 1_000_000_000
+    acc.call_start_abs_ns = base
+    _commit_user_turn(acc, base)
+    # Event beats the commit: the still-open turn is decided as stt_endpoint (eou_ms unset).
+    acc.set_turn_eou("ExternalUserTurnStopStrategy", base + 1450 * 1_000_000)
+
+    metric = type(
+        "TurnMetricsData",
+        (),
+        {"is_complete": True, "e2e_processing_time_ms": 42, "probability": 0.9},
+    )()
+    acc.on_metrics_frame(SimpleNamespace(data=[metric]))
+
+    acc.on_user_stopped_speaking(base + 1500 * 1_000_000)
+
+    turn = _user_turns(acc)[0]
+    assert turn.eou_reason == "stt_endpoint"  # not overwritten by model_verdict
+    assert turn.eou_ms is None

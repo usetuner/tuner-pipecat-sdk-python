@@ -435,6 +435,14 @@ class CallAccumulator:
         - any other (local) strategy => VAD-anchored silence: last VAD stop -> this stop.
         - model_verdict (set earlier from TurnMetricsData) is left untouched.
         """
+        # Consumed unconditionally, before the early-return below: every on_user_turn_stopped
+        # event closes out whatever VAD anchor is pending, even on a target that turns out to
+        # be already-decided (e.g. model_verdict) or absent. Otherwise a stale anchor from a
+        # turn that never used it survives and can misfire onto a later turn that hasn't had
+        # its own VAD stop yet, mislabeling it "silence_timeout" against the wrong anchor.
+        last_vad_stop_ns = self._last_vad_stop_ns
+        self._last_vad_stop_ns = None
+
         target = self._open_user_turn
         if target is None:
             for turn in reversed(self.live_turns):
@@ -446,14 +454,12 @@ class CallAccumulator:
 
         if strategy_name == "ExternalUserTurnStopStrategy":
             target.eou_reason = "stt_endpoint"
-        elif self._last_vad_stop_ns is not None:
-            eou_ms = self._rel_ms(stop_timestamp_ns) - self._rel_ms(self._last_vad_stop_ns)
+        elif last_vad_stop_ns is not None:
+            eou_ms = self._rel_ms(stop_timestamp_ns) - self._rel_ms(last_vad_stop_ns)
             if eou_ms > 0:
                 target.eou_ms = eou_ms
                 target.eou_reason = "silence_timeout"
         # else: local strategy but no VAD anchor -> leave absent (honest).
-
-        self._last_vad_stop_ns = None  # consumed; next turn starts clean
 
     def on_user_stopped_speaking(self, timestamp_ns: int) -> None:
         """Capture user stop_ms and COMMIT the in-progress user turn.
@@ -770,7 +776,17 @@ class CallAccumulator:
                 if getattr(d, "is_complete", False):
                     eou_ms = round(getattr(d, "e2e_processing_time_ms", 0) or 0)
                     confidence = getattr(d, "probability", None)
-                    if self._open_user_turn is not None and self._open_user_turn.eou_ms is None:
+                    # Guard on eou_reason too, not just eou_ms: set_turn_eou can decide a
+                    # still-open turn (e.g. stt_endpoint, which leaves eou_ms unset) before this
+                    # metric arrives. TurnMetricsData carries no turn id, so a verdict that's
+                    # late enough to land after the open turn already moved on to the next one
+                    # can't be routed to its real turn — checking eou_reason at least stops it
+                    # from clobbering an already-decided turn's verdict.
+                    if (
+                        self._open_user_turn is not None
+                        and self._open_user_turn.eou_ms is None
+                        and self._open_user_turn.eou_reason is None
+                    ):
                         self._open_user_turn.eou_ms = eou_ms
                         self._open_user_turn.eou_confidence = confidence
                         self._open_user_turn.eou_reason = "model_verdict"
