@@ -104,11 +104,10 @@ different depending on the value:
 |---|---|---|
 | `silence_timeout` | Local VAD silence threshold | ms from the last VAD-detected speech-end to the turn closing |
 | `model_verdict` | A turn-completion model (e.g. Smart Turn) decided the turn was done | the model's own end-to-end decision time; `eou_confidence` carries its probability |
-| `stt_endpoint` | Server-side STT (e.g. Deepgram Flux) decided end-of-turn on its own clock | absent — a local VAD delay wouldn't mean anything here |
+| `stt_endpoint` | Server-side STT (e.g. Deepgram Flux) decided end-of-turn on its own clock | not populated — the decision happens server-side, independent of local VAD |
 
 All three fields are simply omitted from a row's metadata when nothing decided that turn's
-end (e.g. a pipeline that doesn't use Pipecat's turn-strategy stack yet) — never a fabricated
-zero or guess.
+end (e.g. a pipeline that doesn't use Pipecat's turn-strategy stack yet)
 
 ## What Happens at Call End
 
