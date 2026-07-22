@@ -27,6 +27,7 @@ from pipecat.frames.frames import (
     TTSTextFrame,
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
+    VADUserStoppedSpeakingFrame,
 )
 from pipecat.observers.base_observer import BaseObserver, FramePushed
 from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
@@ -195,6 +196,23 @@ class _BaseObserver(BaseObserver):
                 )
             self._acc.on_turn_ended(turn_number, was_interrupted)
 
+    def attach_user_aggregator(self, user_aggregator: Any) -> None:
+        """Wire the user aggregator's turn-stop event into the accumulator.
+
+        on_user_turn_stopped is the single authoritative end-of-turn signal that knows
+        which strategy closed the turn, so EOU is decided entirely from here — no
+        dependency on UserStoppedSpeakingFrame ordering.
+        """
+
+        @user_aggregator.event_handler("on_user_turn_stopped")
+        async def _on_user_turn_stopped(
+            _aggregator: Any, strategy: Any, _message: Any
+        ) -> None:
+            strategy_name = type(strategy).__name__
+            if self._config.debug:
+                logger.debug("[tuner] user turn stopped via strategy: {}", strategy_name)
+            self._acc.set_turn_eou(strategy_name, time.time_ns())
+
     def attach_sip_info(
         self,
         sip_call_id: str | None = None,
@@ -362,6 +380,7 @@ class _BaseObserver(BaseObserver):
         "FunctionCall",
         "TTSStarted",
         "TTSStopped",
+        "UtteranceEnd",
     )
 
     def _handle(self, frame: Any, timestamp_ns: int) -> None:
@@ -436,6 +455,9 @@ class _BaseObserver(BaseObserver):
             # It is the authoritative signal for which assistant turns are real — an interrupted
             # response that never commits never gets this frame, so it never appears.
             self._acc.on_assistant_commit(timestamp_ns)
+
+        elif isinstance(frame, VADUserStoppedSpeakingFrame):
+            self._acc.on_vad_user_stopped_speaking(timestamp_ns)
 
         elif isinstance(frame, UserStartedSpeakingFrame):
             self._acc.on_user_started_speaking(timestamp_ns)

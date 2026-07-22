@@ -25,6 +25,7 @@ from __future__ import annotations
 import os
 import sys
 
+import bot as bot_module
 from fastapi import FastAPI, Request, WebSocket
 from fastapi.responses import Response
 from loguru import logger
@@ -35,12 +36,11 @@ from pipecat.transports.websocket.fastapi import (
     FastAPIWebsocketParams,
     FastAPIWebsocketTransport,
 )
+
 from tuner_pipecat_sdk.providers.twilio import (
     TwilioCallContext,
     build_sip_forwarding_twiml,
 )
-
-import bot as bot_module
 
 app = FastAPI()
 

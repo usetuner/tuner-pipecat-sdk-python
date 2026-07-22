@@ -83,6 +83,33 @@ task = PipelineTask(
 Without these flags the observer will log warnings and LLM/TTS metric fields will be absent from the payload.
 For more example check https://github.com/usetuner/tuner-pipecat-sdk-python/tree/main/examples
 
+## End-of-Utterance (EOU) Delay
+
+Wire the user context aggregator to capture **how long the pipeline took to decide the user
+was done talking** — the gap between the user going silent and the turn actually closing.
+This lands on every user row's `eou_delay`, `eou_confidence`, and `eou_reason` metadata fields.
+
+```python
+user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
+    context,
+    user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer()),
+)
+observer.attach_user_aggregator(user_aggregator)
+```
+
+`eou_reason` tells you which signal closed the turn, and `eou_delay` is calculated differently depending on that signal: for VAD-driven turns the SDK measures it directly from the frame stream, while for model-driven turns it's the turn-detection model's own reported figure.
+
+| `eou_reason` | What closed the turn | `eou_delay` measures | Source |
+|---|---|---|---|
+| `silence_timeout` | Local VAD silence threshold | ms from the last VAD-detected speech-end to the turn closing | Measured by the SDK from the frame stream (wall-clock) |
+| `model_verdict` | A turn-completion model (e.g. Smart Turn) decided the turn was done | the model's own end-to-end decision time; `eou_confidence` carries its probability | Reported by pipecat `(TurnMetricsData.e2e_processing_time_ms)` — the model's internal timing, not a wall-clock measurement |
+| `stt_endpoint` | Server-side STT (e.g. Deepgram Flux) decided end-of-turn on its own clock | not populated — the decision happens server-side, independent of local VAD | — |
+
+
+
+All three fields are simply omitted from a row's metadata when nothing decided that turn's
+end (e.g. a pipeline that doesn't use Pipecat's turn-strategy stack yet)
+
 ## What Happens at Call End
 
 When Pipecat emits `EndFrame` or `CancelFrame`, the observer:

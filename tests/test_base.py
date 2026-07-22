@@ -199,6 +199,33 @@ async def test_attach_turn_tracking_observer_wiring(observer):
     assert observer._acc.latency_measurements[0].was_interrupted is True
     assert observer._acc._active_turn_number is None
 
+@pytest.mark.asyncio
+async def test_attach_user_aggregator_wiring(observer):
+    """attach_user_aggregator subscribes to the aggregator's on_user_turn_stopped event and,
+    when it fires, drives set_turn_eou with the strategy class name — the single signal that
+    decides EOU (no dependency on UserStoppedSpeaking frame ordering)."""
+    handlers: dict[str, Any] = {}
+
+    class FakeUserAggregator:
+        def event_handler(self, event_name: str):
+            def decorator(func):
+                handlers[event_name] = func
+                return func
+
+            return decorator
+
+    observer.attach_user_aggregator(FakeUserAggregator())
+    assert "on_user_turn_stopped" in handlers
+
+    # Fire the event with a fake strategy object; the handler passes its class name through.
+    class ExternalUserTurnStopStrategy:  # name is what set_turn_eou keys on
+        pass
+
+    with patch.object(observer._acc, "set_turn_eou") as mock_set_eou:
+        with patch("tuner_pipecat_sdk._base.time") as mock_time:
+            mock_time.time_ns.return_value = 123_456_789
+            await handlers["on_user_turn_stopped"](None, ExternalUserTurnStopStrategy(), None)
+        mock_set_eou.assert_called_once_with("ExternalUserTurnStopStrategy", 123_456_789)
 
 def test_cancel_frame_with_resolver_sets_reason(observer):
     from pipecat.frames.frames import CancelFrame

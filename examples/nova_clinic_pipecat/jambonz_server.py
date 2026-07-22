@@ -44,9 +44,9 @@ from __future__ import annotations
 
 import os
 import sys
-from typing import Any, Optional
+from typing import Any
 
-
+import bot as bot_module
 from fastapi import FastAPI, Request, WebSocket
 from fastapi.responses import JSONResponse
 from loguru import logger
@@ -63,12 +63,11 @@ from pipecat.transports.websocket.fastapi import (
     FastAPIWebsocketParams,
     FastAPIWebsocketTransport,
 )
+
 from tuner_pipecat_sdk.providers.jambonz import (
     JambonzCallContext,
     JambonzPendingStore,
 )
-
-import bot as bot_module
 
 app = FastAPI()
 
@@ -91,7 +90,7 @@ class JambonzFrameSerializer(FrameSerializer):
         self,
         call_sid: str,
         jambonz_sample_rate: int = JAMBONZ_SAMPLE_RATE,
-        params: Optional["FrameSerializer.InputParams"] = None,
+        params: FrameSerializer.InputParams | None = None,
     ) -> None:
         super().__init__(params or FrameSerializer.InputParams())
         self._call_sid = call_sid

@@ -434,3 +434,104 @@ def test_agent_text_is_generation_even_when_tts_voiced_less(replay, tuner_config
     )
     agent = next(r for r in rows if r.role == "agent")
     assert agent.text == "Full generated answer with lots of detail."
+
+
+def test_eou_silence_timeout_reaches_user_row(replay, tuner_config):
+    """VAD/local strategy closes the turn → user row carries eou_delay + eou_reason."""
+    rows = (
+        replay()
+        .turn_start(1, 1000)
+        .user_start(1000)
+        .transcription("I want to book an appointment.", 1200)
+        .vad_stop(1400)
+        .user_stop(1500)
+        .user_turn_stopped("SpeechTimeoutUserTurnStopStrategy", 1500)
+        .rows(tuner_config)
+    )
+    user = next(r for r in rows if r.role == "user")
+    assert user.metadata["eou_reason"] == "silence_timeout"
+    assert user.metadata["eou_delay"] == 100  # 1500 − 1400
+
+
+def test_eou_stt_endpoint_reaches_user_row_without_delay(replay, tuner_config):
+    """Server-side STT (Flux) closes the turn → eou_reason='stt_endpoint', no eou_delay
+    (the local VAD anchor is meaningless on the server's clock)."""
+    rows = (
+        replay()
+        .turn_start(1, 1000)
+        .user_start(1000)
+        .transcription("I want to book an appointment.", 1200)
+        .vad_stop(1400)  # present but must be ignored for server-side
+        .user_stop(1500)
+        .user_turn_stopped("ExternalUserTurnStopStrategy", 1600)
+        .rows(tuner_config)
+    )
+    user = next(r for r in rows if r.role == "user")
+    assert user.metadata["eou_reason"] == "stt_endpoint"
+    assert "eou_delay" not in user.metadata  # build_segment_metadata drops None
+
+
+def test_eou_model_verdict_survives_to_user_row(replay, tuner_config):
+    """A smart-turn model verdict (mid-turn) wins over the later turn-stop event, and the
+    verdict's ms + confidence reach the row."""
+    from types import SimpleNamespace
+
+    r = replay()
+    r.turn_start(1, 1000).user_start(1000).transcription("book an appointment", 1200)
+    # model verdict arrives mid-turn via TurnMetricsData
+    metric = type(
+        "TurnMetricsData",
+        (),
+        {"is_complete": True, "e2e_processing_time_ms": 42, "probability": 0.88},
+    )()
+    r.acc.on_metrics_frame(SimpleNamespace(data=[metric]))
+    rows = (
+        r.vad_stop(1400)
+        .user_stop(1500)
+        .user_turn_stopped("SpeechTimeoutUserTurnStopStrategy", 1500)
+        .rows(tuner_config)
+    )
+    user = next(r for r in rows if r.role == "user")
+    assert user.metadata["eou_reason"] == "model_verdict"  # not silence_timeout
+    assert user.metadata["eou_delay"] == 42
+    assert user.metadata["eou_confidence"] == 0.88
+
+
+def test_eou_absent_when_no_turn_stop_event(replay, tuner_config):
+    """A user turn with no on_user_turn_stopped event (e.g. realtime mode, or the event never
+    fired) carries no eou at all — honest absence, not a fabricated silence number."""
+    rows = (
+        replay()
+        .turn_start(1, 1000)
+        .user_start(1000)
+        .transcription("hello", 1200)
+        .vad_stop(1400)
+        .user_stop(1500)
+        # no .user_turn_stopped(...) — the event never arrived
+        .rows(tuner_config)
+    )
+    user = next(r for r in rows if r.role == "user")
+    assert "eou_reason" not in user.metadata
+    assert "eou_delay" not in user.metadata
+
+def test_eou_targets_correct_turn_across_multiple_user_turns(replay, tuner_config):
+    """Two user turns in one call: each turn's eou must land on its own row, not bleed
+    onto a neighbor (guards the 'most recent user turn' targeting in set_turn_eou)."""
+    rows = (
+        replay()
+        .turn_start(1, 1000)
+        .user_start(1000).transcription("first turn", 1100)
+        .vad_stop(1200).user_stop(1300)
+        .user_turn_stopped("SpeechTimeoutUserTurnStopStrategy", 1300)  # eou = 100
+        .bot_says("reply one", 1600, 1900)
+        .turn_start(2, 3000)
+        .user_start(3000).transcription("second turn", 3100)
+        .vad_stop(3400).user_stop(3500)
+        .user_turn_stopped("SpeechTimeoutUserTurnStopStrategy", 3500)  # eou = 100
+        .rows(tuner_config)
+    )
+    users = [r for r in rows if r.role == "user"]
+    assert len(users) == 2
+    assert users[0].metadata["eou_delay"] == 100  # 1300 − 1200, not bled from turn 2
+    assert users[1].metadata["eou_delay"] == 100  # 3500 − 3400
+    assert users[0].text == "first turn" and users[1].text == "second turn"
