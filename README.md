@@ -138,6 +138,22 @@ If the request fails (network error, timeout, bad API key, Tuner API down), the 
 | `sip_headers` | `dict[str, str] \| None` | `None` | SIP INVITE headers as a flat dict |
 | `debug` | `bool` | `False` | Log full transcript at flush |
 | `agent_version` | `int \| None` | `None` | Deployment version number — overrides `APP_VERSION` env var |
+| `extra_metadata` | `dict \| None` | `None` | Arbitrary key-value data merged into every call's metadata (see [Extra Metadata](#extra-metadata)) |
+
+## Extra Metadata
+
+Attach arbitrary key-value data to every call record:
+
+```python
+Observer(
+    api_key=..., workspace_id=..., agent_id=..., call_id=...,
+    extra_metadata={
+        "env": "production",
+        "region": "us-east-1",
+        "deployment": "v2.3.1",
+    },
+)
+```
 
 ## Agent Version Tracking
 

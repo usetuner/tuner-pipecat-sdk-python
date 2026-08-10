@@ -72,6 +72,7 @@ def build_payload(
                 llm_token=acc.get_total_llm_tokens() or None,
                 tts_character_count=acc.get_total_tts_characters() or None,
             ),
+            **(config.extra_metadata or {}),
         ),
         sip_call_id=config.sip_call_id,
         sip_headers=config.sip_headers,

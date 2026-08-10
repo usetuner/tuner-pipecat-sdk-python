@@ -6,6 +6,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.2.7] 2026-08-10
+
+### Added
+- **Call-level `extra_metadata`** — pass `Observer(..., extra_metadata={"env": "prod"})` to attach arbitrary key-value data to every call record, merged into `general_meta_data_raw`.
+
+---
+
 ## [0.2.6] 2026-07-20
 
 ### Added
