@@ -197,6 +197,8 @@ class CallUsage(BaseModel):
 
 
 class GeneralMetaData(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     ai_models: AiModels
     usage_token: UsageToken
 

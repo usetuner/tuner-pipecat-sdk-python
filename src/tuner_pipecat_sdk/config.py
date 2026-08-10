@@ -23,6 +23,8 @@ class TunerConfig(BaseModel):
 
     Not collected automatically — the caller is responsible for supplying this value when known.
     """
+    extra_metadata: dict | None = None
+    """Arbitrary call-level key/value metadata, merged into ``general_meta_data_raw``."""
 
     @field_validator("api_key", "call_id", "agent_id")
     @classmethod

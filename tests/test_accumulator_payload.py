@@ -32,6 +32,28 @@ def test_build_payload_basic(tuner_config):
     assert payload.general_meta_data_raw.ai_models.asr_model == tuner_config.asr_model
 
 
+def test_extra_metadata_merged_into_general_meta_data_raw(tuner_config):
+    config = tuner_config.model_copy(update={"extra_metadata": {"env": "prod"}})
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = 0
+    acc.call_end_abs_ns = 1_000_000_000
+    acc.done = True
+    payload = acc.build_payload(config)
+    dumped = payload.general_meta_data_raw.model_dump()
+    assert dumped["env"] == "prod"
+    assert dumped["ai_models"]["asr_model"] == config.asr_model
+
+
+def test_extra_metadata_omitted_when_not_set(tuner_config):
+    assert tuner_config.extra_metadata is None
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = 0
+    acc.call_end_abs_ns = 1_000_000_000
+    acc.done = True
+    payload = acc.build_payload(tuner_config)
+    assert "env" not in payload.general_meta_data_raw.model_dump()
+
+
 def test_llm_token_uses_pipecat_value(tuner_config):
     acc = CallAccumulator()
     acc.call_start_abs_ns = 0

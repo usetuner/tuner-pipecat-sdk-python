@@ -103,6 +103,7 @@ class _BaseObserver(BaseObserver):
         agent_version: int | None = None,
         recipient: str | None = None,
         cost_calculator: Callable[[CallUsage], float] | None = None,
+        extra_metadata: dict | None = None,
         **kwargs: Any,
     ) -> None:
         """
@@ -131,6 +132,8 @@ class _BaseObserver(BaseObserver):
                 identity is known to your application.
             cost_calculator: Called at flush time with a ``CallUsage``; return the
                 call's cost in USD cents.
+            extra_metadata: Arbitrary call-level key/value metadata, merged into
+                ``general_meta_data_raw`` (e.g. ``{"env": "prod"}``).
         """
         super().__init__(**kwargs)
         self._config = TunerConfig(
@@ -149,6 +152,7 @@ class _BaseObserver(BaseObserver):
             sip_headers=sip_headers,
             agent_version=resolve_agent_version(agent_version),
             recipient=recipient,
+            extra_metadata=extra_metadata,
         )
         self._acc = CallAccumulator()
         self._acc.call_start_abs_ns = time.time_ns()
