@@ -400,6 +400,7 @@ async def run_bot(
         tts_model="openai/tts-1",
         cost_calculator=calculate_cost,
         debug=True,
+        traces_enabled=True,
     )
     observer.attach_turn_tracking_observer(turn_tracker)
     observer.attach_user_aggregator(user_aggregator)
@@ -436,6 +437,8 @@ async def run_bot(
             enable_metrics=True,
             enable_usage_metrics=True,
         ),
+        enable_tracing=True,
+        enable_turn_tracking=True,
         observers=[observer, observer.latency_observer, turn_tracker],
     )
 
