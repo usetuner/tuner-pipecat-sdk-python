@@ -123,11 +123,11 @@ def test_a_failure_is_swallowed_rather_than_breaking_the_call(tuner_config: Tune
 
 
 def test_config_defaults_traces_on(tuner_config: TunerConfig):
-    assert tuner_config.traces_enabled is True
+    assert tuner_config.forward_traces is True
 
 
 def test_traces_can_be_turned_off(tuner_config: TunerConfig):
-    assert tuner_config.model_copy(update={"traces_enabled": False}).traces_enabled is False
+    assert tuner_config.model_copy(update={"forward_traces": False}).forward_traces is False
 
 
 # --- observer wiring -----------------------------------------------------------------
@@ -162,6 +162,6 @@ def test_the_observer_skips_tracing_when_it_is_turned_off():
     from tuner_pipecat_sdk.observer import Observer
 
     with patch("tuner_pipecat_sdk._base.setup_call_tracing") as setup:
-        Observer(**_observer_kwargs(traces_enabled=False))
+        Observer(**_observer_kwargs(forward_traces=False))
 
     setup.assert_not_called()

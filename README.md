@@ -83,6 +83,72 @@ task = PipelineTask(
 Without these flags the observer will log warnings and LLM/TTS metric fields will be absent from the payload.
 For more example check https://github.com/usetuner/tuner-pipecat-sdk-python/tree/main/examples
 
+## Trace view (OpenTelemetry)
+
+Pipecat already emits OpenTelemetry spans for a conversation — STT, LLM, TTS, tool calls,
+turn boundaries. The SDK forwards them to Tuner, which shows them as a trace tree on the call
+details page: what ran, in what order, and how long each step took.
+
+### Setup
+
+Two installs and one flag.
+
+```bash
+pip install 'pipecat-ai[tracing]'          # lets Pipecat emit spans at all
+pip install 'tuner-pipecat-sdk[traces]'    # lets this SDK forward them to Tuner
+```
+
+```python
+task = PipelineTask(
+    pipeline,
+    params=PipelineParams(enable_metrics=True, enable_usage_metrics=True),
+    observers=[observer, observer.latency_observer, turn_tracker],
+    enable_tracing=True,        # <-- the one thing you must set yourself
+    enable_turn_tracking=True,  # recommended: gives the trace its turn structure
+)
+```
+
+`enable_tracing=True` is Pipecat's own switch for emitting spans. You have to set it because
+you build the `PipelineTask` — the `Observer` is constructed before the task exists and is
+handed *to* it, so the SDK has no way to reach that argument.
+
+Everything else is automatic. You do **not** need `setup_tracing(...)`, a `TracerProvider`,
+an exporter, or any `OTEL_*` environment variable — the SDK builds all of that from the API
+key and base URL you already pass to `Observer`, and tags every span with the call id so the
+trace lands on the right call.
+
+### Turning it off
+
+```python
+Observer(..., forward_traces=False)
+```
+
+Leaves the rest of the SDK untouched — calls are still reported to Tuner, only the spans stop
+being forwarded. Note this is *our* switch; Pipecat's `enable_tracing` above is a separate
+one that controls whether Pipecat produces spans at all.
+
+### Notes
+
+- **Already exporting traces elsewhere?** Your setup is preserved. If you call Pipecat's
+  `setup_tracing(...)`, the SDK adds Tuner as an extra destination instead of replacing it.
+- **No `traces` extra installed?** Trace forwarding becomes a no-op with a debug log. It can
+  never fail a call.
+- **Use the HTTP exporter if you configure one yourself.** Tuner accepts OTLP over HTTP with
+  protobuf; gRPC is not supported. Pipecat's own tracing example uses the gRPC exporter, so
+  this is the one line to change if you started from it.
+
+### What is stored
+
+The span tree — names, timings, parent relationships, status — plus metrics and
+configuration: model names, time-to-first-byte, token counts, turn latency, endpointing
+settings, and tool names and outcomes.
+
+No conversation content. Transcripts, LLM inputs and outputs, TTS text, system prompts, and
+tool call arguments and results are all dropped on arrival and never stored. The filter is an
+allowlist, so anything not explicitly approved is discarded by default.
+
+Roughly 30 KB per call, for a five-minute call with twenty turns.
+
 ## End-of-Utterance (EOU) Delay
 
 Wire the user context aggregator to capture **how long the pipeline took to decide the user
@@ -139,6 +205,7 @@ If the request fails (network error, timeout, bad API key, Tuner API down), the 
 | `debug` | `bool` | `False` | Log full transcript at flush |
 | `agent_version` | `int \| None` | `None` | Deployment version number — overrides `APP_VERSION` env var |
 | `extra_metadata` | `dict \| None` | `None` | Arbitrary key-value data merged into every call's metadata (see [Extra Metadata](#extra-metadata)) |
+| `forward_traces` | `bool` | `True` | Forward Pipecat's OpenTelemetry spans to Tuner (see [Trace view](#trace-view-opentelemetry)) |
 
 ## Extra Metadata
 

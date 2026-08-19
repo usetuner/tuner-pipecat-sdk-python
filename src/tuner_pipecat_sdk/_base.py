@@ -94,7 +94,7 @@ class _BaseObserver(BaseObserver):
         call_type: str = "web_call",
         base_url: str = "https://api.usetuner.ai",
         recording_url: str = "pipecat://no-recording",
-        traces_enabled: bool = True,
+        forward_traces: bool = True,
         debug: bool = False,
         asr_model: str = "",
         llm_model: str = "",
@@ -146,7 +146,7 @@ class _BaseObserver(BaseObserver):
             call_type=call_type,
             base_url=base_url,
             recording_url=recording_url,
-            traces_enabled=traces_enabled,
+            forward_traces=forward_traces,
             debug=debug,
             asr_model=asr_model,
             llm_model=llm_model,
@@ -189,7 +189,7 @@ class _BaseObserver(BaseObserver):
         the call id is already on the config. Setting it up later would miss the spans from
         the start of the call.
         """
-        if not self._config.traces_enabled:
+        if not self._config.forward_traces:
             return
 
         setup_call_tracing(config=self._config)

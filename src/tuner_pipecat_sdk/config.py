@@ -14,7 +14,7 @@ class TunerConfig(BaseModel):
     # Forward the call's OTel spans to Tuner so its Trace tab is populated. No-ops
     # unless the optional OTel packages are installed:
     #   pip install 'tuner-pipecat-sdk[traces]'
-    traces_enabled: bool = True
+    forward_traces: bool = True
     debug: bool = False
     asr_model: str = ""
     llm_model: str = ""
