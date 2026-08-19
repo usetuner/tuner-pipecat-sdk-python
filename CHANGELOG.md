@@ -6,6 +6,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.2.8] 2026-08-19
+
+### Added
+- **OpenTelemetry trace forwarding to Tuner** — Pipecat's own spans are exported to Tuner and shown as a trace tree on the call details page. Every span is tagged with the call id, so the trace correlates to the call with no extra wiring — including the spans Pipecat exports before the root `conversation` span closes.
+- `traces` optional extra (`pip install tuner-pipecat-sdk[traces]`) for the OpenTelemetry SDK and OTLP HTTP exporter. Not a hard dependency: without it, trace forwarding is a no-op and nothing else changes.
+
+---
+
 ## [0.2.7] 2026-08-10
 
 ### Added
