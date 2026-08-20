@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tuner-pipecat-sdk"
-version = "0.2.7"
+version = "0.2.8"
 description = "Pipecat observer SDK for capturing latency, transcript, and usage data from pipecat pipelines."
 readme = "README.md"
 authors = [
@@ -48,10 +48,19 @@ Issues = "https://github.com/usetuner/tuner-pipecat-sdk-python/issues"
 langchain = [
     "tuner-langchain>=0.1.1,<0.2.0",
 ]
+# Forwarding OTel spans to Tuner (ENG-1233): pip install tuner-pipecat-sdk[traces].
+# An extra rather than a hard dependency — customers who do not want the Trace tab should
+# not have the OTel SDK forced on them. The code degrades to a no-op when it is absent.
+traces = [
+    "opentelemetry-sdk>=1.30.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.30.0",
+]
 test = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
     "pytest-cov>=5.0",
+    "opentelemetry-sdk>=1.30.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.30.0",
     "tuner-langchain>=0.1.1,<0.2.0",
 ]
 lint = [

@@ -39,6 +39,7 @@ from .client import post_call
 from .config import TunerConfig
 from .langchain_bridge import LangchainIntegration
 from .models import CallUsage
+from .tracing import setup_call_tracing
 
 _CI_VERSION_VARS = ("GITHUB_RUN_NUMBER", "CIRCLE_BUILD_NUM", "BUILD_NUMBER")
 
@@ -93,6 +94,7 @@ class _BaseObserver(BaseObserver):
         call_type: str = "web_call",
         base_url: str = "https://api.usetuner.ai",
         recording_url: str = "pipecat://no-recording",
+        forward_traces: bool = True,
         debug: bool = False,
         asr_model: str = "",
         llm_model: str = "",
@@ -144,6 +146,7 @@ class _BaseObserver(BaseObserver):
             call_type=call_type,
             base_url=base_url,
             recording_url=recording_url,
+            forward_traces=forward_traces,
             debug=debug,
             asr_model=asr_model,
             llm_model=llm_model,
@@ -176,6 +179,20 @@ class _BaseObserver(BaseObserver):
         @self._latency_observer.event_handler("on_latency_breakdown")
         async def _on_latency_breakdown(_observer: Any, breakdown: Any) -> None:
             self._acc.on_latency_breakdown(breakdown)
+
+        self._setup_trace_forwarding()
+
+    def _setup_trace_forwarding(self) -> None:
+        """Send this call's OTel spans to Tuner, tagged with the call id (ENG-1233).
+
+        Done in the constructor because it has to happen before any span is emitted, and
+        the call id is already on the config. Setting it up later would miss the spans from
+        the start of the call.
+        """
+        if not self._config.forward_traces:
+            return
+
+        setup_call_tracing(config=self._config)
 
     # ------------------------------------------------------------------
     # Public helpers

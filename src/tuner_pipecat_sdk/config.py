@@ -11,6 +11,10 @@ class TunerConfig(BaseModel):
     call_type: str = "web_call"
     base_url: str = "https://api.usetuner.ai"
     recording_url: str = "pipecat://no-recording"
+    # Forward the call's OTel spans to Tuner so its Trace tab is populated. No-ops
+    # unless the optional OTel packages are installed:
+    #   pip install 'tuner-pipecat-sdk[traces]'
+    forward_traces: bool = True
     debug: bool = False
     asr_model: str = ""
     llm_model: str = ""
