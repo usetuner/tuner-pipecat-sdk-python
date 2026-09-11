@@ -43,6 +43,16 @@ The mode sets both together, and logs which one it picked at startup:
 [STT] Speechmatics mode=agent model=linden-1 url=wss://preview.rt.speechmatics.com/v2/agent
 ```
 
+### Agent STT message shape
+
+Pipecat's Speechmatics service parses the standard RT `AddSegment` shape — a
+list of segments carrying `text`. The `/v2/agent` preview sends a single
+`segment` carrying `transcript`, which pipecat reads as zero segments: VAD
+fires, no transcript reaches the pipeline, and the bot never hears you. The
+`AgentSTTService` subclass in this example rewrites the preview shape into the
+one pipecat parses, and passes RT-shaped messages through untouched. Drop it
+once pipecat supports Agent STT natively.
+
 `SPEECHMATICS_RT_URL` and `SPEECHMATICS_STT_MODEL` override the mode's
 defaults (a different region, or a newer model build) — leave them blank to
 take the defaults above.
@@ -77,6 +87,21 @@ take the defaults above.
    default. In `rt` mode, set `SPEECHMATICS_RT_URL` if your account is not on
    the EU2 region. Voice names go straight into the TTS URL path, so see the
    Speechmatics TTS docs for the current list.
+
+## Tracing
+
+OpenTelemetry traces are on. Two pieces have to agree, and both are wired here:
+
+- `PipelineTask(..., enable_tracing=True, enable_turn_tracking=True)` — Pipecat's
+  own switch for emitting spans (STT, LLM, TTS, tool calls, turn boundaries).
+- `Observer(..., forward_traces=True)` — forwards those spans to Tuner's Trace
+  tab, tagged with the call id.
+
+The extras that make both work are in `pyproject.toml`
+(`pipecat-ai[...,tracing]`, `tuner-pipecat-sdk[traces]`), so `uv sync` covers
+them. No `OTEL_*` env vars, exporter, or `TracerProvider` setup needed — the
+SDK builds those from the `TUNER_API_KEY` / `TUNER_BASE_URL` you already set.
+Traces land at `<TUNER_BASE_URL>/api/v1/traces`.
 
 ## Run
 

@@ -54,6 +54,7 @@ from pipecat.services.speechmatics.stt import SpeechmaticsSTTService
 from pipecat.services.speechmatics.tts import SpeechmaticsTTSService
 from pipecat.transcriptions.language import Language
 from pipecat.transports.base_transport import BaseTransport, TransportParams
+from pipecat.utils.time import time_now_iso8601
 
 from tuner_pipecat_sdk import CallUsage, Observer
 
@@ -82,6 +83,67 @@ transport_params = {
         audio_out_enabled=True,
     ),
 }
+
+
+# ---------------------------------------------------------------------------
+# Agent STT message shim
+# ---------------------------------------------------------------------------
+
+
+class AgentSTTService(SpeechmaticsSTTService):
+    """Speechmatics STT with the Agent STT preview's message shape normalised.
+
+    Pipecat expects the standard RT shape, a list of segments carrying `text`::
+
+        {"message": "AddSegment", "segments": [{"text": "...", "speaker_id": "UU",
+                                                "language": "en", "is_eou": true}]}
+
+    The `/v2/agent` preview instead sends a single `segment` with `transcript`::
+
+        {"message": "AddSegment", "segment": {"transcript": "...", "speaker": "S1"},
+         "metadata": {"start_time": 0.04, "end_time": 1.88}}
+
+    Pipecat reads `message["segments"]`, finds nothing, and pushes no frames — the
+    bot hears silence while VAD still fires. Rewrite the preview shape into the
+    shape pipecat parses; messages already in RT shape pass through untouched, so
+    this is a no-op in `rt` mode.
+
+    Remove this class once pipecat's Speechmatics service handles Agent STT
+    natively.
+    """
+
+    def _as_rt_shape(self, message: dict, *, is_eou: bool) -> dict:
+        if message.get("segments") is not None:
+            return message  # already the RT shape
+
+        segment = message.get("segment") or {}
+        text = segment.get("transcript", "")
+        if not text:
+            return message
+
+        return {
+            **message,
+            "segments": [
+                {
+                    "text": text,
+                    "speaker_id": segment.get("speaker") or "UU",
+                    "is_active": True,
+                    "language": self._config.language,
+                    "timestamp": time_now_iso8601(),
+                    "results": [],
+                    # Confirms the finalize that pipecat requests when its own
+                    # VAD ends the turn (TurnDetectionMode.EXTERNAL).
+                    "is_eou": is_eou,
+                    "metadata": message.get("metadata") or {},
+                }
+            ],
+        }
+
+    async def _handle_partial_segment(self, message: dict) -> None:
+        await super()._handle_partial_segment(self._as_rt_shape(message, is_eou=False))
+
+    async def _handle_segment(self, message: dict) -> None:
+        await super()._handle_segment(self._as_rt_shape(message, is_eou=True))
 
 
 # ---------------------------------------------------------------------------
@@ -301,7 +363,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
 
     # TurnDetectionMode.EXTERNAL leaves endpointing to Pipecat's Silero VAD,
     # which is what the rest of this pipeline expects.
-    stt = SpeechmaticsSTTService(
+    stt = AgentSTTService(
         api_key=os.getenv("SPEECHMATICS_API_KEY"),
         base_url=stt_url,
         settings=SpeechmaticsSTTService.Settings(
@@ -377,6 +439,9 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         # APP_VERSION / CI build-number lookup when left unset.
         agent_version=env_int("TUNER_AGENT_VERSION"),
         cost_calculator=calculate_cost,
+        # Forward Pipecat's OTel spans to Tuner's Trace tab. True is the SDK
+        # default; set here so the pairing with enable_tracing below is visible.
+        forward_traces=True,
         debug=True,
     )
     observer.attach_turn_tracking_observer(turn_tracker)
@@ -401,6 +466,11 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             enable_usage_metrics=True,
         ),
         observers=[observer, observer.latency_observer, turn_tracker],
+        # Pipecat's own switch for emitting OTel spans — it has to be set here
+        # because the Observer is built before the task exists. The Observer
+        # handles the exporter, endpoint, auth, and call-id tagging.
+        enable_tracing=True,
+        enable_turn_tracking=True,
     )
 
     @transport.event_handler("on_client_connected")

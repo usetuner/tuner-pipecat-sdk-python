@@ -3,8 +3,8 @@ name = "pizza-order-bot-speechmatics"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
-    "pipecat-ai[webrtc,silero,speechmatics,openai,runner]>=1.0.0",
-    "tuner-pipecat-sdk",
+    "pipecat-ai[webrtc,silero,speechmatics,openai,runner,tracing]>=1.0.0",
+    "tuner-pipecat-sdk[traces]",
     "python-dotenv>=1.0.1",
 ]
 
