@@ -6,6 +6,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.3.0] 2026-09-20
+
+### Added
+- **Call recordings** — pass `Observer(..., recording_file_extension="wav")` to opt a call into a presigned upload target. `Observer.audio_buffer()` returns a correctly configured pipecat `AudioBufferProcessor` (or `None` when recording is off), and the target arrives on the `on_recording_upload` event when the call is submitted.
+- `to_wav(audio, sample_rate, num_channels)` — wraps the raw PCM pipecat's `on_audio_data` hands you in a WAV container. Those bytes have no RIFF header, so uploading them as-is produces a file that is accepted and will not play.
+- `recording_s3_multi_channel` / `recording_s3_caller_channel` are derived from the buffer rather than asked for: `num_channels=2` means caller and agent are on separate channels, and pipecat always puts the caller on the left.
+
+### Changed
+- `post_call()` now returns the decoded response body (`dict | None`) instead of `None`. Every failure path still returns `None` and nothing raises, so callers that ignore the value are unaffected.
+
+### Notes
+- **The SDK never uploads a recording.** It issues the target and hands it over; when, whether and how to upload is the agent owner's decision. Uploading here would put a multi-megabyte POST on the call's teardown path inside a task nobody awaits, where a process exiting would truncate it.
+- The presigned target expires. Anything that queues it for later must upload inside that window — the expiry is embedded in the base64 `fields["policy"]` and is not surfaced as its own field.
+
+---
+
 ## [0.2.8] 2026-08-19
 
 ### Added

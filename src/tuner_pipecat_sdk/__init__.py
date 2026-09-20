@@ -6,8 +6,9 @@ from typing import TYPE_CHECKING, Any
 
 from .config import TunerConfig
 from .models import CallUsage
+from .recording import to_wav
 
-__all__ = ["Observer", "TunerConfig", "CallUsage"]
+__all__ = ["Observer", "TunerConfig", "CallUsage", "to_wav"]
 
 if TYPE_CHECKING:
     from .observer import Observer

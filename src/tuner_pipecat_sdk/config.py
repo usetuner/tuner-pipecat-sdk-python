@@ -11,6 +11,20 @@ class TunerConfig(BaseModel):
     call_type: str = "web_call"
     base_url: str = "https://api.usetuner.ai"
     recording_url: str = "pipecat://no-recording"
+
+    recording_file_extension: str | None = None
+    """Extension without a dot (e.g. ``"wav"``). Setting it opts the call into a
+    presigned upload target, returned as ``recording_upload`` in the submit
+    response and handed to the ``on_recording_upload`` event handler.
+
+    The SDK never uploads anything — see ``Observer.audio_buffer()``."""
+
+    recording_s3_multi_channel: bool | None = None
+    """True when the recording keeps caller and agent on separate channels."""
+
+    recording_s3_caller_channel: int | None = None
+    """Which channel index the caller is on. Derived automatically when the
+    recorder comes from ``Observer.audio_buffer()``."""
     # Forward the call's OTel spans to Tuner so its Trace tab is populated. No-ops
     # unless the optional OTel packages are installed:
     #   pip install 'tuner-pipecat-sdk[traces]'

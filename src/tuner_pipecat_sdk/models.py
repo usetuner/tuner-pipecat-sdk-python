@@ -231,6 +231,9 @@ class CallPayload(BaseModel):
     start_timestamp: int
     end_timestamp: int
     recording_url: str
+    recording_file_extension: str | None = None
+    recording_s3_multi_channel: bool | None = None
+    recording_s3_caller_channel: int | None = None
     transcript_with_tool_calls: list[TranscriptSegment]
     call_status: str
     duration_ms: int
