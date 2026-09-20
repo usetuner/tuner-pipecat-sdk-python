@@ -206,6 +206,74 @@ If the request fails (network error, timeout, bad API key, Tuner API down), the 
 | `agent_version` | `int \| None` | `None` | Deployment version number — overrides `APP_VERSION` env var |
 | `extra_metadata` | `dict \| None` | `None` | Arbitrary key-value data merged into every call's metadata (see [Extra Metadata](#extra-metadata)) |
 | `forward_traces` | `bool` | `True` | Forward Pipecat's OpenTelemetry spans to Tuner (see [Trace view](#trace-view-opentelemetry)) |
+| `recording_file_extension` | `str \| None` | `None` | Extension without a dot (e.g. `"wav"`). Opts the call into a presigned upload target (see [Call Recordings](#call-recordings)) |
+
+## Call Recordings
+
+Recording is opt-in, and **the SDK never uploads anything**. It tells Tuner a
+recording is coming, hands you the presigned upload target, and stops there —
+when, whether and how to upload is yours to decide.
+
+```python
+observer = Observer(..., recording_file_extension="wav")
+
+audio_buffer = observer.audio_buffer()   # None unless recording is enabled
+
+pipeline = Pipeline([
+    transport.input(),
+    stt, context_aggregator.user(), llm, tts,
+    transport.output(),
+    *([audio_buffer] if audio_buffer else []),
+    context_aggregator.assistant(),
+])
+```
+
+Place the buffer **after** `transport.output()`: frames travel downstream past
+it in both directions, so one processor captures the caller's audio and the
+agent's.
+
+`audio_buffer()` owns the configuration (`num_channels=2`, `buffer_size=0`,
+`auto_start_recording=True`), which is what lets the SDK describe the layout in
+the call payload — `num_channels=2` means caller and agent are on separate
+channels, and pipecat always puts the caller on the left. You can override any
+of it with keyword arguments.
+
+Collect the audio yourself, and the upload target arrives when the call is
+submitted:
+
+```python
+from tuner_pipecat_sdk import to_wav
+
+recording: bytes | None = None
+
+@audio_buffer.event_handler("on_audio_data")
+async def on_audio_data(buffer, audio, sample_rate, num_channels):
+    global recording
+    recording = to_wav(audio, sample_rate, num_channels)
+
+@observer.event_handler("on_recording_upload")
+async def on_recording_upload(observer, target):
+    # target = {"url", "fields", "key", "content_type", "max_bytes"}
+    await my_upload_queue.put((target, recording))
+```
+
+`buffer_size=0` holds everything until `stop_recording()`, so you get one
+recording per call rather than a stream of fragments — call it when the call
+ends. Note that pipecat dispatches `on_audio_data` as its own task, so it has
+not necessarily run by the time `stop_recording()` returns; don't read the
+audio on the very next line.
+
+**Use `to_wav()`.** Pipecat's `on_audio_data` hands you *raw PCM*, with no RIFF
+header. Posting those bytes to a target opened with
+`recording_file_extension="wav"` uploads successfully and produces a file that
+will not play.
+
+**The target expires.** It is a presigned S3 POST, and the expiry is embedded in
+the base64 `fields["policy"]` rather than exposed as its own field. If you queue
+the target for later, upload inside that window.
+
+The handler is awaited inline during flush, so anything slow (a network upload,
+a disk write) should be handed to your own task or queue rather than done there.
 
 ## Extra Metadata
 
@@ -611,8 +679,11 @@ everything else about the SDK behaves identically to a plain pipecat pipeline.
 - `tuner_pipecat_sdk.Observer` — for pipecat pipelines
   - `Observer.wrap_graph(graph, capture=None)` / `Observer.wrap_chain(chain, capture=None)` —
     optional, requires the `langchain` extra (see above)
+  - `Observer.audio_buffer(**kwargs)` — pipecat `AudioBufferProcessor` for this call,
+    or `None` when recording is off (see [Call Recordings](#call-recordings))
 - `tuner_pipecat_sdk.TunerConfig`
 - `tuner_pipecat_sdk.CallUsage` — usage data type for `cost_calculator`
+- `tuner_pipecat_sdk.to_wav(audio, sample_rate, num_channels)` — raw PCM → WAV bytes
 
 Payload and transcript schemas are available under `tuner_pipecat_sdk.models`, including
 `NodeInfo` (LangGraph node transitions) and `ToolInfo` (tool calls/results, shared

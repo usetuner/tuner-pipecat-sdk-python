@@ -106,6 +106,7 @@ class _BaseObserver(BaseObserver):
         recipient: str | None = None,
         cost_calculator: Callable[[CallUsage], float] | None = None,
         extra_metadata: dict | None = None,
+        recording_file_extension: str | None = None,
         **kwargs: Any,
     ) -> None:
         """
@@ -136,6 +137,10 @@ class _BaseObserver(BaseObserver):
                 call's cost in USD cents.
             extra_metadata: Arbitrary call-level key/value metadata, merged into
                 ``general_meta_data_raw`` (e.g. ``{"env": "prod"}``).
+            recording_file_extension: Extension without a dot (e.g. ``"wav"``).
+                Setting it opts the call into a presigned upload target, which
+                arrives on the ``on_recording_upload`` event. The SDK never
+                uploads anything itself — see ``audio_buffer()``.
         """
         super().__init__(**kwargs)
         self._config = TunerConfig(
@@ -156,6 +161,7 @@ class _BaseObserver(BaseObserver):
             agent_version=resolve_agent_version(agent_version),
             recipient=recipient,
             extra_metadata=extra_metadata,
+            recording_file_extension=recording_file_extension,
         )
         self._acc = CallAccumulator()
         self._acc.call_start_abs_ns = time.time_ns()
@@ -169,6 +175,18 @@ class _BaseObserver(BaseObserver):
         self._frame_history: deque[int] = deque(maxlen=256)
         self._disconnection_reason_resolver = disconnection_reason_resolver
         self._cost_calculator = cost_calculator
+
+        # Fired at flush with the presigned POST target, when one was issued.
+        #
+        # sync=True so the handler is awaited inline rather than dispatched as
+        # its own task. _flush() is already running in a task nobody awaits, and
+        # a handler spawned from inside it could be cut short when the process
+        # exits — the exact failure this design avoids for uploads.
+        #
+        # Exceptions need no handling here: pipecat's _run_handler already wraps
+        # every handler in try/except and logs what it catches, so a customer
+        # handler that raises cannot break the flush either way.
+        self._register_event_handler("on_recording_upload", sync=True)
 
         self._latency_observer = UserBotLatencyObserver()
 
@@ -197,6 +215,59 @@ class _BaseObserver(BaseObserver):
     # ------------------------------------------------------------------
     # Public helpers
     # ------------------------------------------------------------------
+
+    def audio_buffer(self, **kwargs: Any) -> Any:
+        """Build the pipecat recorder for this call, or ``None`` if not recording.
+
+        Returns a configured ``AudioBufferProcessor`` when
+        ``recording_file_extension`` was set, and ``None`` otherwise, so the
+        pipeline can splat it in unconditionally::
+
+            audio_buffer = observer.audio_buffer()
+            pipeline = Pipeline([
+                ...,
+                transport.output(),
+                *([audio_buffer] if audio_buffer else []),
+                context_aggregator.assistant(),
+            ])
+
+        Place it **after** ``transport.output()``: frames travel downstream past
+        it in both directions, so one processor sees the caller's input audio
+        and the agent's output audio.
+
+        Owning the construction is what lets the SDK describe the layout in the
+        call payload — ``num_channels=2`` means caller and agent are on separate
+        channels, and pipecat always puts the user on the left. Asking callers to
+        assert that themselves is an invitation to assert it wrongly.
+
+        ``buffer_size=0`` keeps everything until ``stop_recording()``, so the
+        call produces one recording rather than a stream of fragments.
+
+        The SDK does not read, convert or upload the audio. Register an
+        ``on_audio_data`` handler for the bytes (``to_wav()`` turns them into a
+        playable file) and ``on_recording_upload`` for the presigned target.
+
+        Args:
+            **kwargs: Passed through to ``AudioBufferProcessor``, overriding the
+                defaults above. Changing ``num_channels`` also changes what the
+                payload reports.
+        """
+        if not self._config.recording_file_extension:
+            return None
+
+        from pipecat.processors.audio.audio_buffer_processor import AudioBufferProcessor
+
+        params: dict[str, Any] = {
+            "num_channels": 2,
+            "buffer_size": 0,
+            "auto_start_recording": True,
+        }
+        params.update(kwargs)
+
+        buffer = AudioBufferProcessor(**params)
+        self._config.recording_s3_multi_channel = buffer.num_channels > 1
+        self._config.recording_s3_caller_channel = 0 if buffer.num_channels > 1 else None
+        return buffer
 
     def attach_turn_tracking_observer(self, turn_tracker: Any) -> None:
         """Wire a TurnTrackingObserver's lifecycle events into the accumulator."""
@@ -540,4 +611,36 @@ class _BaseObserver(BaseObserver):
         )
         payload = self._acc.build_payload(self._config, self._cost_calculator)
         logger.info("[tuner] payload: {}", payload)
-        await post_call(self._config, payload)
+        response = await post_call(self._config, payload)
+        await self._emit_recording_upload(response)
+
+    async def _emit_recording_upload(self, response: dict[str, Any] | None) -> None:
+        """Hand the presigned POST target to the application, if one was issued.
+
+        Deliberately the end of the SDK's involvement: uploading here would put
+        a multi-megabyte POST on the call's teardown path, inside a task nobody
+        awaits, where a process exiting would truncate it. Whoever owns the
+        agent decides when to upload, whether to retry, and whether to upload at
+        all.
+
+        The target is a presigned S3 POST — ``{"url", "fields", "key",
+        "content_type", "max_bytes"}`` — and it expires. Anything that queues it
+        for later needs to upload inside that window.
+        """
+        # post_call already narrows to dict | None, but this is the boundary
+        # between the HTTP layer and application code — a non-dict here should
+        # be ignored rather than raise inside an unawaited flush task.
+        if not isinstance(response, dict):
+            return
+        target = response.get("recording_upload")
+        if not isinstance(target, dict) or not target:
+            # No target: the call did not set recording_file_extension, or the
+            # API declined to issue one. Not an error.
+            return
+
+        logger.info(
+            "[tuner] recording upload target issued for {} (key={})",
+            self._config.call_id,
+            target.get("key", "?"),
+        )
+        await self._call_event_handler("on_recording_upload", target)
