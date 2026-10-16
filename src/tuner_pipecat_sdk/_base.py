@@ -71,6 +71,20 @@ def _get(obj: Any, key: str) -> Any:
     return getattr(obj, key, None)
 
 
+
+def _merge_headers(
+    existing: dict[str, str] | None, incoming: dict[str, str]
+) -> dict[str, str]:
+    """Merge ``incoming`` into ``existing``; first non-empty value per name wins."""
+    merged = dict(existing or {})
+    known = {k.lower(): k for k, v in merged.items() if v}
+    for name, value in incoming.items():
+        if not value or name.lower() in known:
+            continue
+        merged[name] = value
+        known[name.lower()] = name
+    return merged
+
 class _BaseObserver(BaseObserver):
     """
     Shared frame-processing logic for all Tuner observers.
@@ -255,11 +269,15 @@ class _BaseObserver(BaseObserver):
         ``runner_args.body``; for Twilio/Telnyx/Plivo/Exotel it arrives in the
         first WebSocket "start" message — call after
         ``parse_telephony_websocket`` returns.
+
+        Safe to call more than once: ``sip_headers`` are merged into what is
+        already attached. The first non-empty value for a header name wins;
+        names are compared case-insensitively.
         """
         if sip_call_id is not None:
             self._config.sip_call_id = sip_call_id
         if sip_headers is not None:
-            self._config.sip_headers = dict(sip_headers)
+            self._config.sip_headers = _merge_headers(self._config.sip_headers, sip_headers)
 
     def attach_sip_from_context(self, ctx: Any) -> None:
         """Attach SIP metadata from a typed provider context.
@@ -310,8 +328,8 @@ class _BaseObserver(BaseObserver):
           (``POST /``) — cache it on the server side and forward it to the
           bot when the WebSocket opens.
 
-        When ``sip_headers`` is passed explicitly it overrides whatever the
-        extractor derived from ``payload``.
+        When ``sip_headers`` is passed explicitly it is used instead of the
+        headers the extractor derived from ``payload``.
 
         For SIP-layer fields to actually appear in the final Tuner record,
         your trunk/webhook must forward them. See README
