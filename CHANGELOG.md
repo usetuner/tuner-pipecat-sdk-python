@@ -6,6 +6,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.2.10] 2026-10-16
+
+### Fixed
+- Twilio `SipHeader_*` parameters are also stored under the bare header name (e.g. `X-Correlation-Id`), so Tuner can link simulations.
+- `attach_sip_info` merges `sip_headers` instead of replacing them: first non-empty value wins, names compared case-insensitively. A sparse later event no longer wipes earlier headers.
+- Twilio `CallSid` and Telnyx `call_control_id` only fill `sip_call_id` when it is empty; a real SIP Call-ID replaces them but never another real one.
+- Full call reports (phone numbers, SIP headers) are no longer logged at INFO.
+
+---
+
 ## [0.2.8] 2026-08-19
 
 ### Added
