@@ -63,6 +63,8 @@ _DEFAULT_FORWARDED_FIELDS: tuple[str, ...] = (
     "Direction",
 )
 
+_SIP_HEADER_PREFIX = "SipHeader_"
+
 # Case-insensitive aliases the SIP-layer Call-ID is commonly forwarded under
 # inside the WS ``customParameters`` (Twilio's ``body``).
 _SIP_CALL_ID_ALIASES: tuple[str, ...] = (
@@ -120,6 +122,11 @@ class TwilioCallContext:
             if v is None:
                 continue
             headers[str(k)] = str(v)
+        # Twilio prefixes INVITE headers with ``SipHeader_``; also keep the
+        # bare name so Tuner can match e.g. ``X-Correlation-Id``.
+        for k, v in list(headers.items()):
+            if k.startswith(_SIP_HEADER_PREFIX) and len(k) > len(_SIP_HEADER_PREFIX):
+                headers.setdefault(k[len(_SIP_HEADER_PREFIX) :], v)
 
         lowered = {k.lower(): v for k, v in headers.items()}
         sip_call_id: str | None = None
@@ -197,7 +204,7 @@ def build_sip_forwarding_twiml(
             forwarded[field_name] = str(v)
     for key, value in form.items():
         key_str = str(key)
-        if key_str.startswith("SipHeader_") and value:
+        if key_str.startswith(_SIP_HEADER_PREFIX) and value:
             forwarded[key_str] = str(value)
     if extra_params:
         for k, v in extra_params.items():
