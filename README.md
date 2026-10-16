@@ -206,6 +206,34 @@ If the request fails (network error, timeout, bad API key, Tuner API down), the 
 | `agent_version` | `int \| None` | `None` | Deployment version number — overrides `APP_VERSION` env var |
 | `extra_metadata` | `dict \| None` | `None` | Arbitrary key-value data merged into every call's metadata (see [Extra Metadata](#extra-metadata)) |
 | `forward_traces` | `bool` | `True` | Forward Pipecat's OpenTelemetry spans to Tuner (see [Trace view](#trace-view-opentelemetry)) |
+| `recording_file_extension` | `str \| None` | `None` | Extension without a dot (e.g. `"wav"`). Asks Tuner for a recording upload target (see [Recording Upload](#recording-upload)) |
+| `recording_s3_multi_channel` | `bool \| None` | `None` | `True` when the uploaded audio has caller and agent on separate channels |
+| `recording_s3_caller_channel` | `int \| None` | `None` | 0-based channel index of the caller |
+
+## Recording Upload
+
+The SDK does not capture audio. If you record the call yourself (for example with
+Pipecat's `AudioBufferProcessor`), you can upload it to Tuner's storage:
+
+```python
+from tuner_pipecat_sdk import Observer, upload_recording
+
+observer = Observer(
+    api_key=..., workspace_id=..., agent_id=..., call_id=...,
+    recording_file_extension="wav",
+    recording_s3_multi_channel=True,  # optional: stereo, caller on channel 0
+    recording_s3_caller_channel=0,
+)
+
+# ... after the pipeline ends:
+response = await observer.wait_for_submit()
+await upload_recording(response, "call.wav", observer.config)
+```
+
+`audio` can be a path, `bytes`, or an open binary stream. The upload is an S3
+presigned POST (max size and expiry are set by Tuner). `upload_recording` never
+raises: it returns `True` on success and `False` when there is no target, the file is
+over `max_bytes`, or the upload fails.
 
 ## Extra Metadata
 
@@ -613,6 +641,8 @@ everything else about the SDK behaves identically to a plain pipecat pipeline.
     optional, requires the `langchain` extra (see above)
 - `tuner_pipecat_sdk.TunerConfig`
 - `tuner_pipecat_sdk.CallUsage` — usage data type for `cost_calculator`
+- `tuner_pipecat_sdk.upload_recording(response, audio, config, filename=None)` — upload call
+  audio to the target in the submit response (see [Recording Upload](#recording-upload))
 
 Payload and transcript schemas are available under `tuner_pipecat_sdk.models`, including
 `NodeInfo` (LangGraph node transitions) and `ToolInfo` (tool calls/results, shared

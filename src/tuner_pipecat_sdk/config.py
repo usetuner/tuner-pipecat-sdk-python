@@ -29,6 +29,12 @@ class TunerConfig(BaseModel):
     """
     extra_metadata: dict | None = None
     """Arbitrary call-level key/value metadata, merged into ``general_meta_data_raw``."""
+    recording_file_extension: str | None = None
+    """Extension without a dot (e.g. ``"wav"``). Opts into a presigned recording upload target."""
+    recording_s3_multi_channel: bool | None = None
+    """True when the uploaded audio keeps caller and agent on separate channels."""
+    recording_s3_caller_channel: int | None = None
+    """0-based channel index of the caller in the uploaded audio."""
 
     @field_validator("api_key", "call_id", "agent_id")
     @classmethod

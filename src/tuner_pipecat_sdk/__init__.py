@@ -6,8 +6,9 @@ from typing import TYPE_CHECKING, Any
 
 from .config import TunerConfig
 from .models import CallUsage
+from .recording import upload_recording
 
-__all__ = ["Observer", "TunerConfig", "CallUsage"]
+__all__ = ["Observer", "TunerConfig", "CallUsage", "upload_recording"]
 
 if TYPE_CHECKING:
     from .observer import Observer

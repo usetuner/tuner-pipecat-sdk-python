@@ -106,6 +106,9 @@ class _BaseObserver(BaseObserver):
         recipient: str | None = None,
         cost_calculator: Callable[[CallUsage], float] | None = None,
         extra_metadata: dict | None = None,
+        recording_file_extension: str | None = None,
+        recording_s3_multi_channel: bool | None = None,
+        recording_s3_caller_channel: int | None = None,
         **kwargs: Any,
     ) -> None:
         """
@@ -136,6 +139,11 @@ class _BaseObserver(BaseObserver):
                 call's cost in USD cents.
             extra_metadata: Arbitrary call-level key/value metadata, merged into
                 ``general_meta_data_raw`` (e.g. ``{"env": "prod"}``).
+            recording_file_extension: Extension without a dot (e.g. ``"wav"``). When set,
+                the submit response carries ``recording_upload`` for ``upload_recording``.
+            recording_s3_multi_channel: True when the uploaded audio has caller and agent
+                on separate channels.
+            recording_s3_caller_channel: 0-based channel index of the caller.
         """
         super().__init__(**kwargs)
         self._config = TunerConfig(
@@ -156,10 +164,14 @@ class _BaseObserver(BaseObserver):
             agent_version=resolve_agent_version(agent_version),
             recipient=recipient,
             extra_metadata=extra_metadata,
+            recording_file_extension=recording_file_extension,
+            recording_s3_multi_channel=recording_s3_multi_channel,
+            recording_s3_caller_channel=recording_s3_caller_channel,
         )
         self._acc = CallAccumulator()
         self._acc.call_start_abs_ns = time.time_ns()
         self._flushed = False
+        self._flush_task: asyncio.Task[dict[str, Any] | None] | None = None
         self._langchain: LangchainIntegration = LangchainIntegration(self._acc)
         # As a pipeline-level observer, on_push_frame fires once PER processor hop, so the
         # same frame is seen many times. Dedup by frame id (bounded deque + set, mirroring
@@ -506,13 +518,27 @@ class _BaseObserver(BaseObserver):
             self._acc.on_call_end(timestamp_ns)
             if not self._flushed:
                 self._flushed = True
-                asyncio.create_task(self._flush())
+                self._flush_task = asyncio.create_task(self._flush())
 
     # ------------------------------------------------------------------
     # Flush
     # ------------------------------------------------------------------
 
-    async def _flush(self) -> None:
+    @property
+    def config(self) -> TunerConfig:
+        return self._config
+
+    async def wait_for_submit(self) -> dict[str, Any] | None:
+        """Wait for the end-of-call submit and return the Tuner API response.
+
+        Returns None if the call has not ended yet or the submit failed. With
+        ``recording_file_extension`` set, pass the result to ``upload_recording``.
+        """
+        if self._flush_task is None:
+            return None
+        return await self._flush_task
+
+    async def _flush(self) -> dict[str, Any] | None:
         # The transcript is built live from the frame stream (acc.live_turns); it no longer
         # depends on the LLM context. Capture diagnostics: what the accumulator recorded from
         # the pipeline. If a turn that clearly fired frames is missing here, the bug is frame
@@ -540,4 +566,4 @@ class _BaseObserver(BaseObserver):
         )
         payload = self._acc.build_payload(self._config, self._cost_calculator)
         logger.info("[tuner] payload: {}", payload)
-        await post_call(self._config, payload)
+        return await post_call(self._config, payload)

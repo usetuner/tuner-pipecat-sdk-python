@@ -188,3 +188,32 @@ def test_cost_calculator_receives_correct_usage_fields(tuner_config):
     assert captured["total"] == 100
     assert captured["tts"] == 500
     assert captured["stt_secs"] == 30
+
+
+def test_recording_fields_sent_when_set(tuner_config):
+    config = tuner_config.model_copy(
+        update={
+            "recording_file_extension": "wav",
+            "recording_s3_multi_channel": True,
+            "recording_s3_caller_channel": 0,
+        }
+    )
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = 0
+    acc.call_end_abs_ns = 1_000_000_000
+    acc.done = True
+    body = acc.build_payload(config).to_dict()
+    assert body["recording_file_extension"] == "wav"
+    assert body["recording_s3_multi_channel"] is True
+    assert body["recording_s3_caller_channel"] == 0
+
+
+def test_recording_fields_omitted_when_unset(tuner_config):
+    acc = CallAccumulator()
+    acc.call_start_abs_ns = 0
+    acc.call_end_abs_ns = 1_000_000_000
+    acc.done = True
+    body = acc.build_payload(tuner_config).to_dict()
+    assert "recording_file_extension" not in body
+    assert "recording_s3_multi_channel" not in body
+    assert "recording_s3_caller_channel" not in body

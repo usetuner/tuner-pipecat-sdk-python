@@ -160,3 +160,18 @@ async def test_handle_end_frame_triggers_flush(observer):
         post_mock.assert_called_once()
         payload = post_mock.call_args[0][1]
         assert payload.call_id == "call-1"
+
+
+@pytest.mark.asyncio
+async def test_wait_for_submit_returns_response(observer):
+    assert await observer.wait_for_submit() is None
+
+    observer._acc.call_start_abs_ns = 0
+    observer._acc.call_end_abs_ns = 1_000_000_000
+    observer._acc.done = True
+    response = {"recording_upload": {"url": "https://s3.example.com"}}
+
+    with patch("tuner_pipecat_sdk._base.post_call", new_callable=AsyncMock) as post_mock:
+        post_mock.return_value = response
+        observer._handle(EndFrame(), 1_000_000_000)
+        assert await observer.wait_for_submit() == response

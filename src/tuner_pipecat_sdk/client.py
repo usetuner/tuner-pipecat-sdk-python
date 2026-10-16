@@ -5,6 +5,7 @@ Never blocks or raises — all failures are logged and swallowed.
 """
 
 import json
+from typing import Any
 
 import httpx
 from loguru import logger
@@ -13,8 +14,8 @@ from .config import TunerConfig
 from .models import CallPayload
 
 
-async def post_call(config: TunerConfig, payload: CallPayload) -> None:
-    """POST `payload` to Tuner. Fire-and-forget — see module docstring for failure behavior."""
+async def post_call(config: TunerConfig, payload: CallPayload) -> dict[str, Any] | None:
+    """POST `payload` to Tuner and return the parsed response, or None on failure."""
     url = (
         f"{config.base_url}/api/v1/public/call"
         f"?workspace_id={config.workspace_id}"
@@ -49,7 +50,7 @@ async def post_call(config: TunerConfig, payload: CallPayload) -> None:
                 "[tuner] call {} already exists (409) — skipping",
                 config.call_id,
             )
-            return
+            return None
 
         if response.status_code >= 400:
             logger.error(
@@ -66,6 +67,12 @@ async def post_call(config: TunerConfig, payload: CallPayload) -> None:
             response.status_code,
             config.call_id,
         )
+        # Carries `recording_upload` when recording_file_extension is set.
+        try:
+            parsed: Any = response.json()
+        except ValueError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
 
     except (httpx.HTTPStatusError, httpx.RequestError) as exc:
         logger.error(
@@ -73,3 +80,4 @@ async def post_call(config: TunerConfig, payload: CallPayload) -> None:
             config.call_id,
             exc,
         )
+        return None

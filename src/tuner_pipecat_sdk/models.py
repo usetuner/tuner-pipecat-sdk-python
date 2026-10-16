@@ -245,6 +245,9 @@ class CallPayload(BaseModel):
 
     Not populated automatically — pass this field explicitly when the callee identity is known.
     """
+    recording_file_extension: str | None = None
+    recording_s3_multi_channel: bool | None = None
+    recording_s3_caller_channel: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize payload to a JSON-ready dict."""

@@ -79,4 +79,7 @@ def build_payload(
         agent_version=config.agent_version,
         recipient=config.recipient,
         cost=cost,
+        recording_file_extension=config.recording_file_extension,
+        recording_s3_multi_channel=config.recording_s3_multi_channel,
+        recording_s3_caller_channel=config.recording_s3_caller_channel,
     )

@@ -54,8 +54,9 @@ async def test_post_call_success(tuner_config, sample_payload):
         mock_client, inner = _make_client_mock(mock_response)
         mock_client_cls.return_value = mock_client
 
-        await post_call(tuner_config, sample_payload)
+        result = await post_call(tuner_config, sample_payload)
 
+        assert result == {"id": "tuner-1", "call_id": "call-123"}
         inner.post.assert_called_once()
         call_args, call_kw = inner.post.call_args
         url = call_args[0] if call_args else call_kw.get("url", "")
@@ -76,10 +77,9 @@ async def test_post_call_409_skipped(tuner_config, sample_payload):
         mock_client, inner = _make_client_mock(mock_response)
         mock_client_cls.return_value = mock_client
 
-        await post_call(tuner_config, sample_payload)
+        assert await post_call(tuner_config, sample_payload) is None
 
         inner.post.assert_called_once()
-        # no raise
 
 
 @pytest.mark.asyncio
@@ -93,8 +93,7 @@ async def test_post_call_http_error_logged_not_raised(tuner_config, sample_paylo
         mock_client, _ = _make_client_mock(mock_response)
         mock_client_cls.return_value = mock_client
 
-        await post_call(tuner_config, sample_payload)
-        # should not raise
+        assert await post_call(tuner_config, sample_payload) is None
 
 
 @pytest.mark.asyncio
@@ -105,5 +104,16 @@ async def test_post_call_request_error_logged_not_raised(tuner_config, sample_pa
         inner.post.side_effect = httpx.RequestError("network error")
         mock_client_cls.return_value = mock_client
 
-        await post_call(tuner_config, sample_payload)
-        # should not raise
+        assert await post_call(tuner_config, sample_payload) is None
+
+
+@pytest.mark.asyncio
+async def test_post_call_non_json_response_returns_none(tuner_config, sample_payload):
+    with patch("tuner_pipecat_sdk.client.httpx.AsyncClient") as mock_client_cls:
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.side_effect = ValueError("not json")
+        mock_client, _ = _make_client_mock(mock_response)
+        mock_client_cls.return_value = mock_client
+
+        assert await post_call(tuner_config, sample_payload) is None

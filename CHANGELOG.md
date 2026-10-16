@@ -6,6 +6,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.2.9] 2026-10-16
+
+### Added
+- **Recording upload** — set `recording_file_extension` (plus optional `recording_s3_multi_channel` / `recording_s3_caller_channel`) to get a presigned upload target, then call `upload_recording(response, audio, config)` with your own audio (path, bytes or stream). Mirrors `tuner-core` 0.1.2.
+- `Observer.wait_for_submit()` returns the Tuner API response; `Observer.config` exposes the config.
+
+### Changed
+- `post_call` now returns the parsed response dict (or `None` on failure).
+
+---
+
 ## [0.2.8] 2026-08-19
 
 ### Added
