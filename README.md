@@ -281,6 +281,13 @@ strings: `"twilio"`, `"telnyx"`, `"plivo"`, `"exotel"`, `"jambonz"`. An
 unknown string raises `ValueError` — pass a callable instead for any
 provider not in the list.
 
+Calling these more than once per call is safe. `sip_headers` are merged,
+not replaced: the first non-empty value for a header name wins (names
+compared case-insensitively). For `"twilio"` and `"telnyx"`, a carrier ID
+(`CallSid`, `call_control_id`) only fills `sip_call_id` when it is empty;
+a real SIP Call-ID replaces that fallback but never another real one.
+Twilio `SipHeader_X-Foo` parameters are also reported as `X-Foo`.
+
 ### What the SDK does automatically
 
 The built-in extractors look for a SIP-layer Call-ID in the

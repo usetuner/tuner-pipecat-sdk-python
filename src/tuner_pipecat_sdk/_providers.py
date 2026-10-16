@@ -229,6 +229,28 @@ def _extract_jambonz(
 # ---------------------------------------------------------------------------
 
 
+def _twilio_carrier_call_id(payload: dict[str, Any]) -> str | None:
+    body = payload.get("body")
+    sid = payload.get("call_id") or (body.get("CallSid") if isinstance(body, dict) else None)
+    return str(sid) if sid else None
+
+
+def _telnyx_carrier_call_id(payload: dict[str, Any]) -> str | None:
+    data = payload.get("data")
+    inner = data.get("payload") if isinstance(data, dict) else None
+    source = inner if isinstance(inner, dict) else payload
+    cid = source.get("call_control_id") or payload.get("call_id")
+    return str(cid) if cid else None
+
+
+# Carrier-native call IDs (not SIP Call-IDs). When an extractor falls back to
+# one of these, it only fills ``sip_call_id`` if nothing better is known.
+CARRIER_CALL_ID_READERS: dict[str, Callable[[dict[str, Any]], str | None]] = {
+    "twilio": _twilio_carrier_call_id,
+    "telnyx": _telnyx_carrier_call_id,
+}
+
+
 PROVIDER_EXTRACTORS: dict[str, ProviderExtractor] = {
     "twilio": _extract_twilio,
     "telnyx": _extract_telnyx,

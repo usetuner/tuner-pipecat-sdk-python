@@ -33,7 +33,7 @@ from pipecat.observers.base_observer import BaseObserver, FramePushed
 from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
 from pipecat.processors.frame_processor import FrameDirection
 
-from ._providers import PROVIDER_EXTRACTORS, ProviderExtractor
+from ._providers import CARRIER_CALL_ID_READERS, PROVIDER_EXTRACTORS, ProviderExtractor
 from .accumulator import CallAccumulator
 from .client import post_call
 from .config import TunerConfig
@@ -70,6 +70,20 @@ def _get(obj: Any, key: str) -> Any:
         return obj.get(key)
     return getattr(obj, key, None)
 
+
+
+def _merge_headers(
+    existing: dict[str, str] | None, incoming: dict[str, str]
+) -> dict[str, str]:
+    """Merge ``incoming`` into ``existing``; first non-empty value per name wins."""
+    merged = dict(existing or {})
+    known = {k.lower(): k for k, v in merged.items() if v}
+    for name, value in incoming.items():
+        if not value or name.lower() in known:
+            continue
+        merged[name] = value
+        known[name.lower()] = name
+    return merged
 
 class _BaseObserver(BaseObserver):
     """
@@ -160,6 +174,7 @@ class _BaseObserver(BaseObserver):
         self._acc = CallAccumulator()
         self._acc.call_start_abs_ns = time.time_ns()
         self._flushed = False
+        self._sip_call_id_is_fallback = False
         self._langchain: LangchainIntegration = LangchainIntegration(self._acc)
         # As a pipeline-level observer, on_push_frame fires once PER processor hop, so the
         # same frame is seen many times. Dedup by frame id (bounded deque + set, mirroring
@@ -255,11 +270,16 @@ class _BaseObserver(BaseObserver):
         ``runner_args.body``; for Twilio/Telnyx/Plivo/Exotel it arrives in the
         first WebSocket "start" message — call after
         ``parse_telephony_websocket`` returns.
+
+        Safe to call more than once: ``sip_headers`` are merged into what is
+        already attached. The first non-empty value for a header name wins;
+        names are compared case-insensitively.
         """
         if sip_call_id is not None:
             self._config.sip_call_id = sip_call_id
+            self._sip_call_id_is_fallback = False
         if sip_headers is not None:
-            self._config.sip_headers = dict(sip_headers)
+            self._config.sip_headers = _merge_headers(self._config.sip_headers, sip_headers)
 
     def attach_sip_from_context(self, ctx: Any) -> None:
         """Attach SIP metadata from a typed provider context.
@@ -271,11 +291,41 @@ class _BaseObserver(BaseObserver):
         but any equivalent dataclass (your own custom provider context)
         works the same way.
         """
+        from .providers.twilio import TwilioCallContext
+
         headers = getattr(ctx, "raw_headers", None) or None
+        sip_call_id = getattr(ctx, "sip_call_id", None)
+        if isinstance(ctx, TwilioCallContext):
+            self._attach_resolved_sip(
+                sip_call_id,
+                dict(headers) if headers else None,
+                is_fallback=bool(sip_call_id) and sip_call_id == ctx.call_sid,
+            )
+            return
         self.attach_sip_info(
-            sip_call_id=getattr(ctx, "sip_call_id", None),
+            sip_call_id=sip_call_id,
             sip_headers=dict(headers) if headers else None,
         )
+
+    def _attach_resolved_sip(
+        self,
+        sip_call_id: str | None,
+        sip_headers: dict[str, str] | None,
+        *,
+        is_fallback: bool,
+    ) -> None:
+        # A carrier ID (CallSid, call_control_id) only fills an empty slot; a
+        # real SIP Call-ID replaces a carrier fallback but never another real one.
+        if (
+            sip_call_id
+            and self._config.sip_call_id
+            and (is_fallback or not self._sip_call_id_is_fallback)
+        ):
+            sip_call_id = None
+        was_set = bool(sip_call_id)
+        self.attach_sip_info(sip_call_id=sip_call_id, sip_headers=sip_headers)
+        if was_set:
+            self._sip_call_id_is_fallback = is_fallback
 
     def attach_sip_from_dialin(self, dialin_settings: Any) -> None:
         """Populate SIP metadata from Pipecat's ``DialinSettings`` (Daily PSTN).
@@ -310,8 +360,8 @@ class _BaseObserver(BaseObserver):
           (``POST /``) — cache it on the server side and forward it to the
           bot when the WebSocket opens.
 
-        When ``sip_headers`` is passed explicitly it overrides whatever the
-        extractor derived from ``payload``.
+        When ``sip_headers`` is passed explicitly it is used instead of the
+        headers the extractor derived from ``payload``.
 
         For SIP-layer fields to actually appear in the final Tuner record,
         your trunk/webhook must forward them. See README
@@ -330,10 +380,13 @@ class _BaseObserver(BaseObserver):
                 )
 
         resolved, derived_headers = extractor(payload)
-        self.attach_sip_info(
-            sip_call_id=resolved,
-            sip_headers=sip_headers if sip_headers is not None else derived_headers,
-        )
+        headers = sip_headers if sip_headers is not None else derived_headers
+        reader = None if callable(provider) else CARRIER_CALL_ID_READERS.get(provider.lower())
+        if reader is None:
+            self.attach_sip_info(sip_call_id=resolved, sip_headers=headers)
+            return
+        is_fallback = bool(resolved) and isinstance(payload, dict) and resolved == reader(payload)
+        self._attach_resolved_sip(resolved, headers, is_fallback=is_fallback)
 
     @property
     def latency_observer(self) -> UserBotLatencyObserver:
@@ -539,5 +592,4 @@ class _BaseObserver(BaseObserver):
             ],
         )
         payload = self._acc.build_payload(self._config, self._cost_calculator)
-        logger.info("[tuner] payload: {}", payload)
         await post_call(self._config, payload)

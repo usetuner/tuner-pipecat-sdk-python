@@ -33,7 +33,6 @@ async def post_call(config: TunerConfig, payload: CallPayload) -> None:
         url,
         len(payload_json),
     )
-    logger.info("[tuner] request body: {}", payload_json)
 
     if config.debug:
         print("[tuner] --- request payload ---")
