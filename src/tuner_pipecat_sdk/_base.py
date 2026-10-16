@@ -106,6 +106,9 @@ class _BaseObserver(BaseObserver):
         recipient: str | None = None,
         cost_calculator: Callable[[CallUsage], float] | None = None,
         extra_metadata: dict | None = None,
+        recording_file_extension: str | None = None,
+        recording_s3_multi_channel: bool | None = None,
+        recording_s3_caller_channel: int | None = None,
         **kwargs: Any,
     ) -> None:
         """
@@ -136,6 +139,11 @@ class _BaseObserver(BaseObserver):
                 call's cost in USD cents.
             extra_metadata: Arbitrary call-level key/value metadata, merged into
                 ``general_meta_data_raw`` (e.g. ``{"env": "prod"}``).
+            recording_file_extension: Extension without a dot (e.g. ``"wav"``). When set,
+                the submit response carries ``recording_upload`` for ``upload_recording``.
+            recording_s3_multi_channel: True when the uploaded audio has caller and agent
+                on separate channels.
+            recording_s3_caller_channel: 0-based channel index of the caller.
         """
         super().__init__(**kwargs)
         self._config = TunerConfig(
@@ -156,6 +164,9 @@ class _BaseObserver(BaseObserver):
             agent_version=resolve_agent_version(agent_version),
             recipient=recipient,
             extra_metadata=extra_metadata,
+            recording_file_extension=recording_file_extension,
+            recording_s3_multi_channel=recording_s3_multi_channel,
+            recording_s3_caller_channel=recording_s3_caller_channel,
         )
         self._acc = CallAccumulator()
         self._acc.call_start_abs_ns = time.time_ns()
