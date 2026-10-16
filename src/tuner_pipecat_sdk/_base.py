@@ -592,5 +592,4 @@ class _BaseObserver(BaseObserver):
             ],
         )
         payload = self._acc.build_payload(self._config, self._cost_calculator)
-        logger.info("[tuner] payload: {}", payload)
         await post_call(self._config, payload)

@@ -193,3 +193,36 @@ async def test_header_only_report_serializes_without_sip_call_id():
     d = post_mock.call_args[0][1].to_dict()
     assert d["sip_headers"] == {"X-Correlation-Id": "tok"}
     assert "sip_call_id" not in d
+
+
+@pytest.mark.asyncio
+async def test_flush_does_not_log_phone_numbers_or_sip_headers():
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from loguru import logger
+
+    import tuner_pipecat_sdk.client as client_mod
+
+    lines: list[str] = []
+    sink = logger.add(lines.append, level="INFO")
+    try:
+        obs = _observer()
+        obs.attach_context(MagicMock(messages=[]))
+        obs.attach_sip_info(
+            sip_call_id="sipid-secret", sip_headers={"X-Correlation-Id": "tok-secret"}
+        )
+        obs._config.recipient = "+15550001111"
+        obs._acc.on_start(0)
+        obs._acc.on_call_end(1_000_000_000)
+        response = MagicMock(status_code=200)
+        http = MagicMock()
+        http.__aenter__ = AsyncMock(return_value=MagicMock(post=AsyncMock(return_value=response)))
+        http.__aexit__ = AsyncMock(return_value=None)
+        with patch.object(client_mod.httpx, "AsyncClient", return_value=http):
+            await obs._flush()
+    finally:
+        logger.remove(sink)
+    text = "".join(lines)
+    assert "[tuner]" in text
+    for secret in ("tok-secret", "sipid-secret", "+15550001111"):
+        assert secret not in text
