@@ -102,3 +102,94 @@ def test_subclass_attach_sip_info_hook_still_called():
         {"call_id": "CA-1", "body": {"SipCallId": "x"}}, provider="twilio"
     )
     assert len(calls) == 2
+
+
+# ---------------------------------------------------------------------------
+# Carrier-ID fallback (CallSid / call_control_id are not SIP Call-IDs)
+# ---------------------------------------------------------------------------
+
+
+def test_twilio_real_sip_call_id_replaces_callsid_fallback():
+    obs = _observer()
+    obs.attach_sip_from_telephony({"call_id": "CA-1", "body": {}}, provider="twilio")
+    assert obs._config.sip_call_id == "CA-1"
+    obs.attach_sip_from_telephony(
+        {"call_id": "CA-1", "body": {"SipCallId": "real@host"}}, provider="twilio"
+    )
+    assert obs._config.sip_call_id == "real@host"
+
+
+def test_twilio_callsid_does_not_overwrite_real_sip_call_id():
+    obs = _observer()
+    obs.attach_sip_from_telephony(
+        {"call_id": "CA-1", "body": {"SipCallId": "real@host"}}, provider="twilio"
+    )
+    obs.attach_sip_from_telephony({"call_id": "CA-1", "body": {}}, provider="twilio")
+    assert obs._config.sip_call_id == "real@host"
+
+
+def test_telnyx_sparse_media_start_keeps_real_sip_call_id():
+    obs = _observer()
+    obs.attach_sip_from_telephony(
+        _telnyx_webhook(call_control_id="v3:ctrl", sip_call_id="real@host"), provider="telnyx"
+    )
+    obs.attach_sip_from_telephony(
+        {"stream_id": "s", "call_control_id": "v3:ctrl"}, provider="telnyx"
+    )
+    assert obs._config.sip_call_id == "real@host"
+
+
+def test_telnyx_real_id_replaces_control_id_but_not_another_real_id():
+    obs = _observer()
+    obs.attach_sip_from_telephony({"call_control_id": "v3:ctrl"}, provider="telnyx")
+    assert obs._config.sip_call_id == "v3:ctrl"
+    obs.attach_sip_from_telephony(
+        _telnyx_webhook(call_control_id="v3:ctrl", sip_call_id="real-1"), provider="telnyx"
+    )
+    assert obs._config.sip_call_id == "real-1"
+    obs.attach_sip_from_telephony(
+        _telnyx_webhook(call_control_id="v3:ctrl", sip_call_id="real-2"), provider="telnyx"
+    )
+    assert obs._config.sip_call_id == "real-1"
+
+
+def test_twilio_context_callsid_fallback_then_real():
+    from tuner_pipecat_sdk.providers.twilio import TwilioCallContext
+
+    obs = _observer()
+    obs.attach_sip_from_context(TwilioCallContext.fallback("CA-1"))
+    obs.attach_sip_from_context(
+        TwilioCallContext.from_call_data({"call_id": "CA-1", "body": {"SipCallId": "real"}})
+    )
+    obs.attach_sip_from_context(TwilioCallContext.fallback("CA-1"))
+    assert obs._config.sip_call_id == "real"
+
+
+def test_custom_extractor_keeps_replace_behavior():
+    obs = _observer()
+    obs.attach_sip_from_telephony({}, provider=lambda p: ("one", None))
+    obs.attach_sip_from_telephony({}, provider=lambda p: ("two", None))
+    assert obs._config.sip_call_id == "two"
+
+
+def test_explicit_attach_sip_info_still_replaces():
+    obs = _observer()
+    obs.attach_sip_info(sip_call_id="a")
+    obs.attach_sip_info(sip_call_id="b")
+    assert obs._config.sip_call_id == "b"
+
+
+@pytest.mark.asyncio
+async def test_header_only_report_serializes_without_sip_call_id():
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    obs = _observer()
+    obs.attach_context(MagicMock(messages=[]))
+    obs.attach_sip_info(sip_headers={"X-Correlation-Id": "tok"})
+    obs._acc.on_start(0)
+    obs._acc.on_call_end(1_000_000_000)
+    with patch("tuner_pipecat_sdk._base.post_call", new_callable=AsyncMock) as post_mock:
+        await obs._flush()
+    d = post_mock.call_args[0][1].to_dict()
+    assert d["sip_headers"] == {"X-Correlation-Id": "tok"}
+    assert "sip_call_id" not in d
