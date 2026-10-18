@@ -287,6 +287,8 @@ compared case-insensitively). For `"twilio"` and `"telnyx"`, a carrier ID
 (`CallSid`, `call_control_id`) only fills `sip_call_id` when it is empty;
 a real SIP Call-ID replaces that fallback but never another real one.
 Twilio `SipHeader_X-Foo` parameters are also reported as `X-Foo`.
+A correlation header that is not a 1-128 character token
+(`[A-Za-z0-9._-]`) is dropped; see `valid_correlation_id`.
 
 ### What the SDK does automatically
 
