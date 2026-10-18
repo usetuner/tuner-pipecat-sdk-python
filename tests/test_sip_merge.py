@@ -226,3 +226,19 @@ async def test_flush_does_not_log_phone_numbers_or_sip_headers():
     assert "[tuner]" in text
     for secret in ("tok-secret", "sipid-secret", "+15550001111"):
         assert secret not in text
+
+
+@pytest.mark.parametrize("bad", ["has space", "a;b", "x" * 129, "tok\r\nX-Evil: 1", "<script>"])
+def test_invalid_correlation_header_is_dropped(bad):
+    obs = _observer()
+    obs.attach_sip_info(
+        sip_headers={"X-Correlation-Id": bad, "SipHeader_X-Correlation-Id": bad, "from": "f"}
+    )
+    assert obs._config.sip_headers == {"from": "f"}
+
+
+def test_invalid_correlation_header_does_not_block_a_later_valid_one():
+    obs = _observer()
+    obs.attach_sip_info(sip_headers={"X-Correlation-Id": "bad value"})
+    obs.attach_sip_info(sip_headers={"x-correlation-id": "aed6-tok_1.2"})
+    assert obs._config.sip_headers == {"x-correlation-id": "aed6-tok_1.2"}

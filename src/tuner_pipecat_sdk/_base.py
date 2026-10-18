@@ -37,6 +37,7 @@ from ._providers import CARRIER_CALL_ID_READERS, PROVIDER_EXTRACTORS, ProviderEx
 from .accumulator import CallAccumulator
 from .client import post_call
 from .config import TunerConfig
+from .correlation import is_correlation_header, valid_correlation_id
 from .langchain_bridge import LangchainIntegration
 from .models import CallUsage
 from .tracing import setup_call_tracing
@@ -75,10 +76,15 @@ def _get(obj: Any, key: str) -> Any:
 def _merge_headers(
     existing: dict[str, str] | None, incoming: dict[str, str]
 ) -> dict[str, str]:
-    """Merge ``incoming`` into ``existing``; first non-empty value per name wins."""
+    """Merge ``incoming`` into ``existing``; first non-empty value per name wins.
+
+    A malformed or oversized correlation header is dropped.
+    """
     merged = dict(existing or {})
     known = {k.lower(): k for k, v in merged.items() if v}
     for name, value in incoming.items():
+        if value and is_correlation_header(name):
+            value = valid_correlation_id(value)
         if not value or name.lower() in known:
             continue
         merged[name] = value

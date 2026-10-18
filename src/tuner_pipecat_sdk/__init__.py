@@ -5,9 +5,16 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from .config import TunerConfig
+from .correlation import CORRELATION_HEADER, valid_correlation_id
 from .models import CallUsage
 
-__all__ = ["Observer", "TunerConfig", "CallUsage"]
+__all__ = [
+    "Observer",
+    "TunerConfig",
+    "CallUsage",
+    "CORRELATION_HEADER",
+    "valid_correlation_id",
+]
 
 if TYPE_CHECKING:
     from .observer import Observer
