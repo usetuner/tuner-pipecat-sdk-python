@@ -66,15 +66,14 @@ class SipInfo:
 class Forward:
     """What to send the carrier so the SIP data reaches the media websocket.
 
-    Twilio: ``twiml``. Telnyx: ``stream`` (the ``streaming_start`` body) and
-    ``answer`` (the same fields for a one-command ``answer``).
+    Twilio: ``twiml``. Telnyx: ``stream``, the ``streaming_start`` body (``answer``
+    rejects ``custom_parameters``, so answer first, then start the stream).
     """
 
     provider: str
     parameters: dict[str, str] = field(default_factory=dict)
     twiml: str | None = None
     stream: dict[str, Any] | None = None
-    answer: dict[str, Any] | None = None
 
 
 @runtime_checkable
@@ -218,7 +217,7 @@ class TelnyxProvider:
         }
         if params:
             stream["custom_parameters"] = [{"name": k, "value": v} for k, v in params.items()]
-        return Forward(provider=self.name, parameters=params, stream=stream, answer=dict(stream))
+        return Forward(provider=self.name, parameters=params, stream=stream)
 
 
 class _ExtractOnly:

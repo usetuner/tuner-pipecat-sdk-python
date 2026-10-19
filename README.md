@@ -308,8 +308,8 @@ observer.attach_sip(extract_sip(start_message, provider="telnyx"))
 ```
 
 `fwd.stream` defaults to inbound-track, bidirectional RTP PCMU; override any
-field with `{**fwd.stream, "stream_track": "both_tracks"}`.
-`fwd.answer` has the same fields for a one-command `answer`.
+field with `{**fwd.stream, "stream_track": "both_tracks"}`. `answer` itself
+rejects `custom_parameters` (422, code 10000), so it takes two commands.
 
 TeXML works too: put `<Parameter name="X-Correlation-Id" value="..."/>` in `<Stream>`.
 

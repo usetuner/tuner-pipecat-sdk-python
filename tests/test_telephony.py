@@ -240,7 +240,6 @@ def test_telnyx_forward_stream():
         {"name": "X-Correlation-Id", "value": TOKEN},
         {"name": "SipCallId", "value": "sip@host"},
     ]
-    assert fwd.answer == fwd.stream
     # The websocket start frame carries them back as an object.
     start = {
         "start": {
