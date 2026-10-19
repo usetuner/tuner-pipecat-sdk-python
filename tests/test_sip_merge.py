@@ -261,3 +261,10 @@ def test_invalid_correlation_header_does_not_block_a_later_valid_one():
     obs.attach_sip_info(sip_headers={"X-Correlation-Id": "bad value"})
     obs.attach_sip_info(sip_headers={"x-correlation-id": "AAAAAAAAAAAAAAAAAAAAAAAAAA"})
     assert obs._config.sip_headers == {"x-correlation-id": "AAAAAAAAAAAAAAAAAAAAAAAAAA"}
+
+
+def test_customer_correlation_id_does_not_block_tuners():
+    obs = _observer()
+    obs.attach_sip_info(sip_headers={"X-Correlation-Id": "order-12345"})
+    obs.attach_sip_info(sip_headers={"X-Correlation-Id": "f" * 32})
+    assert obs._config.sip_headers == {"X-Correlation-Id": "f" * 32}
