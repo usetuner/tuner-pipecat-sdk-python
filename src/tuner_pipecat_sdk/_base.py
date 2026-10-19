@@ -33,6 +33,7 @@ from pipecat.observers.base_observer import BaseObserver, FramePushed
 from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
 from pipecat.processors.frame_processor import FrameDirection
 
+from ._deprecation import warn_deprecated
 from ._providers import CARRIER_CALL_ID_READERS, PROVIDER_EXTRACTORS, ProviderExtractor
 from .accumulator import CallAccumulator
 from .client import post_call
@@ -40,6 +41,7 @@ from .config import TunerConfig
 from .correlation import is_correlation_header, valid_correlation_id
 from .langchain_bridge import LangchainIntegration
 from .models import CallUsage
+from .telephony import SipInfo
 from .tracing import setup_call_tracing
 
 _CI_VERSION_VARS = ("GITHUB_RUN_NUMBER", "CIRCLE_BUILD_NUM", "BUILD_NUMBER")
@@ -181,6 +183,7 @@ class _BaseObserver(BaseObserver):
         self._acc.call_start_abs_ns = time.time_ns()
         self._flushed = False
         self._sip_call_id_is_fallback = False
+        self._sip_internal = False
         self._langchain: LangchainIntegration = LangchainIntegration(self._acc)
         # As a pipeline-level observer, on_push_frame fires once PER processor hop, so the
         # same frame is seen many times. Dedup by frame id (bounded deque + set, mirroring
@@ -255,40 +258,65 @@ class _BaseObserver(BaseObserver):
                 logger.debug("[tuner] user turn stopped via strategy: {}", strategy_name)
             self._acc.set_turn_eou(strategy_name, time.time_ns())
 
+    def attach_sip(
+        self,
+        info: SipInfo | None = None,
+        *,
+        sip_call_id: str | None = None,
+        sip_headers: dict[str, str] | None = None,
+        recipient: str | None = None,
+    ) -> None:
+        """Attach SIP linking data to this call. Safe to call more than once.
+
+        ``info`` comes from :func:`tuner_pipecat_sdk.extract_sip`. Headers merge
+        (first non-empty value per name wins, case-insensitive). A carrier ID only
+        fills an empty ``sip_call_id``; a real SIP Call-ID replaces it but never
+        another real one. An explicit ``sip_call_id`` always wins. ``recipient``
+        (or ``info.recipient``) is what an outbound call dialed.
+        """
+        if info is not None:
+            self._attach_resolved_sip(
+                info.sip_call_id, info.sip_headers or None, is_fallback=info.is_fallback
+            )
+        self._set_sip(sip_call_id=sip_call_id or None, sip_headers=sip_headers)
+        recipient = recipient or (info.recipient if info is not None else None)
+        if recipient:
+            self._config.recipient = recipient
+
     def attach_sip_info(
         self,
         sip_call_id: str | None = None,
         sip_headers: dict[str, str] | None = None,
     ) -> None:
-        """Attach SIP metadata captured from any Pipecat SIP/telephony source.
+        """Deprecated: use :meth:`attach_sip` (``sip_call_id=``, ``sip_headers=``).
 
-        Provider-agnostic — pass whichever identifier your provider exposes:
-
-        * Daily PSTN/SIP: ``DialinSettings.call_id`` + ``sip_headers``
-        * Twilio Media Streams: ``callSid``
-        * Telnyx: ``call_control_id``
-        * Plivo: ``callId``
-        * Exotel: ``call_sid``
-        * Any other provider: the unique call identifier and (optionally) the
-          SIP INVITE headers as a flat string-to-string dict.
-
-        Call this once the SIP info is known. For Daily, info arrives in
-        ``runner_args.body``; for Twilio/Telnyx/Plivo/Exotel it arrives in the
-        first WebSocket "start" message — call after
-        ``parse_telephony_websocket`` returns.
-
-        Safe to call more than once: ``sip_headers`` are merged into what is
-        already attached. The first non-empty value for a header name wins;
-        names are compared case-insensitively.
+        Sets ``sip_call_id`` when given and merges ``sip_headers`` (first
+        non-empty value per name wins, case-insensitive).
         """
+        if not getattr(self, "_sip_internal", False):
+            warn_deprecated("attach_sip_info", "attach_sip(sip_call_id=..., sip_headers=...)")
         if sip_call_id is not None:
             self._config.sip_call_id = sip_call_id
             self._sip_call_id_is_fallback = False
         if sip_headers is not None:
             self._config.sip_headers = _merge_headers(self._config.sip_headers, sip_headers)
 
+    def _set_sip(
+        self,
+        sip_call_id: str | None = None,
+        sip_headers: dict[str, str] | None = None,
+    ) -> None:
+        # Goes through attach_sip_info so subclasses overriding it still see every attach.
+        self._sip_internal = True
+        try:
+            self.attach_sip_info(sip_call_id=sip_call_id, sip_headers=sip_headers)
+        finally:
+            self._sip_internal = False
+
     def attach_sip_from_context(self, ctx: Any) -> None:
-        """Attach SIP metadata from a typed provider context.
+        """Deprecated: use ``attach_sip(extract_sip(payload, provider=...))``.
+
+        Attach SIP metadata from a typed provider context.
 
         Duck-typed: accepts any object exposing the attributes
         ``sip_call_id: str | None`` and ``raw_headers: dict[str, str]``.
@@ -299,6 +327,7 @@ class _BaseObserver(BaseObserver):
         """
         from .providers.twilio import TwilioCallContext
 
+        warn_deprecated("attach_sip_from_context", "attach_sip(extract_sip(...))")
         headers = getattr(ctx, "raw_headers", None) or None
         sip_call_id = getattr(ctx, "sip_call_id", None)
         if isinstance(ctx, TwilioCallContext):
@@ -308,7 +337,7 @@ class _BaseObserver(BaseObserver):
                 is_fallback=bool(sip_call_id) and sip_call_id == ctx.call_sid,
             )
             return
-        self.attach_sip_info(
+        self._set_sip(
             sip_call_id=sip_call_id,
             sip_headers=dict(headers) if headers else None,
         )
@@ -329,19 +358,23 @@ class _BaseObserver(BaseObserver):
         ):
             sip_call_id = None
         was_set = bool(sip_call_id)
-        self.attach_sip_info(sip_call_id=sip_call_id, sip_headers=sip_headers)
+        self._set_sip(sip_call_id=sip_call_id, sip_headers=sip_headers)
         if was_set:
             self._sip_call_id_is_fallback = is_fallback
 
     def attach_sip_from_dialin(self, dialin_settings: Any) -> None:
-        """Populate SIP metadata from Pipecat's ``DialinSettings`` (Daily PSTN).
+        """Deprecated: use ``attach_sip(extract_sip(dialin_settings, provider="daily"))``.
 
+        Populate SIP metadata from Pipecat's ``DialinSettings`` (Daily PSTN).
         Accepts either a ``DialinSettings`` instance or the equivalent dict
         (e.g. ``runner_args.body["dialin_settings"]``).
         """
+        warn_deprecated(
+            "attach_sip_from_dialin", 'attach_sip(extract_sip(..., provider="daily"))'
+        )
         call_id = _get(dialin_settings, "call_id")
         headers = _get(dialin_settings, "sip_headers")
-        self.attach_sip_info(sip_call_id=call_id, sip_headers=headers)
+        self._set_sip(sip_call_id=call_id, sip_headers=headers)
 
     def attach_sip_from_telephony(
         self,
@@ -350,7 +383,11 @@ class _BaseObserver(BaseObserver):
         provider: str | ProviderExtractor,
         sip_headers: dict[str, str] | None = None,
     ) -> None:
-        """Populate SIP metadata from a provider's raw call payload.
+        """Deprecated: use ``attach_sip(extract_sip(payload, provider=...))``.
+
+        A callable ``provider`` is deprecated too: use ``register_provider``.
+
+        Populate SIP metadata from a provider's raw call payload.
 
         ``provider`` is required. Pass one of the built-in names —
         ``"twilio"``, ``"telnyx"``, ``"plivo"``, ``"exotel"``,
@@ -373,7 +410,9 @@ class _BaseObserver(BaseObserver):
         your trunk/webhook must forward them. See README
         "SIP / Telephony Calls" for per-provider configuration.
         """
+        warn_deprecated("attach_sip_from_telephony", "attach_sip(extract_sip(...))")
         if callable(provider):
+            warn_deprecated("attach_sip_from_telephony(provider=<callable>)", "register_provider")
             extractor = provider
         else:
             extractor = PROVIDER_EXTRACTORS.get(provider.lower())
@@ -389,7 +428,7 @@ class _BaseObserver(BaseObserver):
         headers = sip_headers if sip_headers is not None else derived_headers
         reader = None if callable(provider) else CARRIER_CALL_ID_READERS.get(provider.lower())
         if reader is None:
-            self.attach_sip_info(sip_call_id=resolved, sip_headers=headers)
+            self._set_sip(sip_call_id=resolved, sip_headers=headers)
             return
         is_fallback = bool(resolved) and isinstance(payload, dict) and resolved == reader(payload)
         self._attach_resolved_sip(resolved, headers, is_fallback=is_fallback)

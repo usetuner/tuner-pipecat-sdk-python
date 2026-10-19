@@ -174,7 +174,10 @@ def build_sip_forwarding_twiml(
     extra_params: Mapping[str, str] | None = None,
     pause_seconds: int = 40,
 ) -> str:
-    """Build a TwiML response that forwards SIP fields to your WebSocket.
+    """Deprecated: use ``forward_to_websocket(extract_sip(form, provider="twilio"),
+    ws_url=...).twiml``.
+
+    Build a TwiML response that forwards SIP fields to your WebSocket.
 
     Twilio's HTTP voice webhook receives SIP context on the form body, but
     the Media Streams WebSocket drops those fields by default. This
@@ -197,6 +200,9 @@ def build_sip_forwarding_twiml(
     The returned string is well-formed XML; pass it as
     ``Response(content=xml, media_type="application/xml")``.
     """
+    from .._deprecation import warn_deprecated
+
+    warn_deprecated("build_sip_forwarding_twiml", "forward_to_websocket(...).twiml")
     forwarded: dict[str, str] = {}
     for field_name in forwarded_fields:
         v = form.get(field_name)
