@@ -6,7 +6,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
-## [0.2.10] 2026-10-16
+## [0.2.10] 2026-10-19
+
+### Added
+- Unified telephony API: `extract_sip(payload, provider=) -> SipInfo`, `forward_to_websocket(info, ws_url=) -> Forward`, `Observer.attach_sip(info, sip_call_id=, sip_headers=, recipient=)`, `register_provider(provider)`. Built-in providers: twilio, telnyx, plivo, exotel, jambonz, daily.
+- Twilio forward: `Forward.twiml` (`<Stream><Parameter>` per SIP field). Telnyx forward: `Forward.stream`, the `streaming_start` body with `X-Correlation-Id`, `SipCallId` and `Recipient` as `custom_parameters`; `extract_sip` reads them back from `start.custom_parameters`.
+- Outbound `recipient` travels as a stream parameter and is reported by `attach_sip`.
+
+### Deprecated
+- `attach_sip_from_telephony` (and callable extractors), `attach_sip_info`, `attach_sip_from_context`, `attach_sip_from_dialin`, `providers.twilio.build_sip_forwarding_twiml`. They still work and warn once.
 
 ### Fixed
 - Twilio `SipHeader_*` parameters are also stored under the bare header name (e.g. `X-Correlation-Id`), so Tuner can link simulations.
