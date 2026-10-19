@@ -19,4 +19,7 @@ def valid_correlation_id(value: str | None) -> str:
 
 def is_correlation_header(name: str) -> bool:
     """True for ``X-Correlation-Id`` and Twilio's ``SipHeader_``-prefixed copy."""
-    return name.lower().endswith("correlation-id")
+    name = name.lower()
+    if name.startswith("sipheader_"):
+        name = name[len("sipheader_") :]
+    return name in ("x-correlation-id", "correlation-id")
