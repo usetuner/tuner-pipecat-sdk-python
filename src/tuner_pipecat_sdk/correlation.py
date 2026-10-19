@@ -6,8 +6,8 @@ import re
 
 CORRELATION_HEADER = "X-Correlation-Id"
 
-# Tuner mints a hex token; anything else is dropped rather than forwarded.
-_TOKEN_RE = re.compile(r"[A-Za-z0-9._-]{1,128}")
+# The two Tuner id shapes: inbound uuid4().hex, outbound 26-char Base32. Anything else is dropped.
+_TOKEN_RE = re.compile(r"[0-9a-fA-F]{32}|[A-Za-z2-7]{26}")
 
 
 def valid_correlation_id(value: str | None) -> str:

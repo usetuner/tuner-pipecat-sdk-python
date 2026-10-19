@@ -17,7 +17,7 @@ from tuner_pipecat_sdk import (
 )
 from tuner_pipecat_sdk.telephony import get_provider
 
-TOKEN = "a1b2c3d4e5f6"
+TOKEN = "0123456789abcdef0123456789abcdef"
 
 
 @pytest.fixture(autouse=True)

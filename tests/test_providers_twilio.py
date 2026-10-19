@@ -235,22 +235,22 @@ def test_observer_attaches_from_twilio_fallback_context():
 
 def test_sip_header_prefix_round_trip_keeps_bare_name():
     xml = build_sip_forwarding_twiml(
-        {"CallSid": "CA-1", "SipHeader_X-Correlation-Id": "tok"}, ws_url="wss://x"
+        {"CallSid": "CA-1", "SipHeader_X-Correlation-Id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, ws_url="wss://x"
     )
     params = {
         p.attrib["name"]: p.attrib["value"]
         for p in ET.fromstring(xml).iter("Parameter")
     }
     ctx = TwilioCallContext.from_call_data({"call_id": "CA-1", "body": params})
-    assert ctx.raw_headers["SipHeader_X-Correlation-Id"] == "tok"
-    assert ctx.raw_headers["X-Correlation-Id"] == "tok"
+    assert ctx.raw_headers["SipHeader_X-Correlation-Id"] == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    assert ctx.raw_headers["X-Correlation-Id"] == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
     obs = _observer()
     obs.attach_sip_from_context(ctx)
     obs._acc.on_start(0)
     obs._acc.on_call_end(1_000_000_000)
     payload = obs._acc.build_payload(obs._config, obs._cost_calculator)
-    assert payload.to_dict()["sip_headers"]["X-Correlation-Id"] == "tok"
+    assert payload.to_dict()["sip_headers"]["X-Correlation-Id"] == "a" * 32
 
 
 def test_sip_header_prefix_does_not_override_explicit_bare_header():

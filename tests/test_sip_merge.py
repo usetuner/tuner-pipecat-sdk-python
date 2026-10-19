@@ -21,23 +21,36 @@ def _telnyx_webhook(**payload):
 
 def test_later_attach_merges_headers():
     obs = _observer()
-    obs.attach_sip_info(sip_headers={"X-Correlation-Id": "tok", "from": "+1"})
+    obs.attach_sip_info(
+        sip_headers={"X-Correlation-Id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "from": "+1"}
+    )
     obs.attach_sip_info(sip_headers={"X-Other": "o"})
-    assert obs._config.sip_headers == {"X-Correlation-Id": "tok", "from": "+1", "X-Other": "o"}
+    assert obs._config.sip_headers == {
+        "X-Correlation-Id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "from": "+1",
+        "X-Other": "o",
+    }
 
 
 def test_first_non_empty_value_wins_case_insensitively():
     obs = _observer()
-    obs.attach_sip_info(sip_headers={"X-Correlation-Id": "first", "X-Empty": ""})
-    obs.attach_sip_info(sip_headers={"x-correlation-id": "second", "X-Empty": "filled"})
-    assert obs._config.sip_headers == {"X-Correlation-Id": "first", "X-Empty": "filled"}
+    obs.attach_sip_info(
+        sip_headers={"X-Correlation-Id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "X-Empty": ""}
+    )
+    obs.attach_sip_info(
+        sip_headers={"x-correlation-id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "X-Empty": "filled"}
+    )
+    assert obs._config.sip_headers == {
+        "X-Correlation-Id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "X-Empty": "filled",
+    }
 
 
 def test_empty_headers_do_not_wipe_existing():
     obs = _observer()
-    obs.attach_sip_info(sip_headers={"X-Correlation-Id": "tok"})
+    obs.attach_sip_info(sip_headers={"X-Correlation-Id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})
     obs.attach_sip_info(sip_headers={})
-    assert obs._config.sip_headers == {"X-Correlation-Id": "tok"}
+    assert obs._config.sip_headers == {"X-Correlation-Id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
 
 
 def test_sparse_telnyx_media_start_keeps_webhook_header():
@@ -45,7 +58,9 @@ def test_sparse_telnyx_media_start_keeps_webhook_header():
     obs.attach_sip_from_telephony(
         _telnyx_webhook(
             call_control_id="v3:ctrl",
-            custom_headers=[{"name": "X-Correlation-Id", "value": "tok"}],
+            custom_headers=[
+                {"name": "X-Correlation-Id", "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+            ],
         ),
         provider="telnyx",
     )
@@ -53,7 +68,7 @@ def test_sparse_telnyx_media_start_keeps_webhook_header():
         {"stream_id": "s", "call_control_id": "v3:ctrl", "customParameters": {"a": "b"}},
         provider="telnyx",
     )
-    assert obs._config.sip_headers["X-Correlation-Id"] == "tok"
+    assert obs._config.sip_headers["X-Correlation-Id"] == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     assert obs._config.sip_headers["a"] == "b"
 
 
@@ -62,7 +77,7 @@ def test_duplicate_attach_is_idempotent():
     event = _telnyx_webhook(
         call_control_id="v3:ctrl",
         sip_call_id="real@host",
-        custom_headers=[{"name": "X-Correlation-Id", "value": "tok"}],
+        custom_headers=[{"name": "X-Correlation-Id", "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}],
     )
     obs.attach_sip_from_telephony(event, provider="telnyx")
     first = (obs._config.sip_call_id, dict(obs._config.sip_headers))
@@ -72,10 +87,14 @@ def test_duplicate_attach_is_idempotent():
 
 def test_concurrent_calls_do_not_share_state():
     a, b = _observer(), _observer()
-    a.attach_sip_info(sip_call_id="A", sip_headers={"X-Correlation-Id": "ta"})
-    b.attach_sip_info(sip_call_id="B", sip_headers={"X-Correlation-Id": "tb"})
-    assert a._config.sip_headers == {"X-Correlation-Id": "ta"}
-    assert b._config.sip_headers == {"X-Correlation-Id": "tb"}
+    a.attach_sip_info(
+        sip_call_id="A", sip_headers={"X-Correlation-Id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+    )
+    b.attach_sip_info(
+        sip_call_id="B", sip_headers={"X-Correlation-Id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+    )
+    assert a._config.sip_headers == {"X-Correlation-Id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+    assert b._config.sip_headers == {"X-Correlation-Id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
     assert (a._config.sip_call_id, b._config.sip_call_id) == ("A", "B")
 
 
@@ -185,13 +204,13 @@ async def test_header_only_report_serializes_without_sip_call_id():
 
     obs = _observer()
     obs.attach_context(MagicMock(messages=[]))
-    obs.attach_sip_info(sip_headers={"X-Correlation-Id": "tok"})
+    obs.attach_sip_info(sip_headers={"X-Correlation-Id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})
     obs._acc.on_start(0)
     obs._acc.on_call_end(1_000_000_000)
     with patch("tuner_pipecat_sdk._base.post_call", new_callable=AsyncMock) as post_mock:
         await obs._flush()
     d = post_mock.call_args[0][1].to_dict()
-    assert d["sip_headers"] == {"X-Correlation-Id": "tok"}
+    assert d["sip_headers"] == {"X-Correlation-Id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
     assert "sip_call_id" not in d
 
 
@@ -240,5 +259,5 @@ def test_invalid_correlation_header_is_dropped(bad):
 def test_invalid_correlation_header_does_not_block_a_later_valid_one():
     obs = _observer()
     obs.attach_sip_info(sip_headers={"X-Correlation-Id": "bad value"})
-    obs.attach_sip_info(sip_headers={"x-correlation-id": "aed6-tok_1.2"})
-    assert obs._config.sip_headers == {"x-correlation-id": "aed6-tok_1.2"}
+    obs.attach_sip_info(sip_headers={"x-correlation-id": "AAAAAAAAAAAAAAAAAAAAAAAAAA"})
+    assert obs._config.sip_headers == {"x-correlation-id": "AAAAAAAAAAAAAAAAAAAAAAAAAA"}
