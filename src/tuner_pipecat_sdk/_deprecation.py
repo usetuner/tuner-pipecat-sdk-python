@@ -11,4 +11,4 @@ def warn_deprecated(old: str, new: str) -> None:
     if old in _warned:
         return
     _warned.add(old)
-    warnings.warn(f"{old} is deprecated; use {new}", DeprecationWarning, stacklevel=3)
+    warnings.warn(f"{old} is deprecated; use {new}", FutureWarning, stacklevel=3)

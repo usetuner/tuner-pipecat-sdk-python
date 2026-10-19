@@ -362,7 +362,7 @@ header that is not a 1-128 character token (`[A-Za-z0-9._-]`) is dropped; see
 
 ### Deprecated
 
-These still work and emit a `DeprecationWarning` once:
+These still work and emit a `FutureWarning` once:
 
 | Deprecated | Use |
 |---|---|

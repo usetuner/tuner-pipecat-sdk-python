@@ -334,7 +334,7 @@ def test_attach_sip_drops_malformed_correlation_header():
 )
 def test_deprecated_observer_methods_warn_once(name, call):
     obs = _observer()
-    with pytest.warns(DeprecationWarning, match=name):
+    with pytest.warns(FutureWarning, match=name):
         call(obs)
     with warnings.catch_warnings():
         warnings.simplefilter("error")
@@ -344,20 +344,20 @@ def test_deprecated_observer_methods_warn_once(name, call):
 
 def test_deprecated_telephony_does_not_also_warn_for_attach_sip_info():
     obs = _observer()
-    with pytest.warns(DeprecationWarning) as record:
+    with pytest.warns(FutureWarning) as record:
         obs.attach_sip_from_telephony({"call_id": "x"}, provider="plivo")
     assert [str(w.message).split(" ")[0] for w in record] == ["attach_sip_from_telephony"]
 
 
 def test_callable_extractor_warns():
     obs = _observer()
-    with pytest.warns(DeprecationWarning) as record:
+    with pytest.warns(FutureWarning) as record:
         obs.attach_sip_from_telephony({}, provider=lambda p: ("x", None))
     assert any("register_provider" in str(w.message) for w in record)
 
 
 def test_build_sip_forwarding_twiml_warns_once():
-    with pytest.warns(DeprecationWarning, match="forward_to_websocket"):
+    with pytest.warns(FutureWarning, match="forward_to_websocket"):
         build_sip_forwarding_twiml({"CallSid": "CA1"}, ws_url="wss://h")
     with warnings.catch_warnings():
         warnings.simplefilter("error")
@@ -472,3 +472,11 @@ def test_attach_sip_explicit_headers_beat_info():
     info = SipInfo(sip_headers={"X-Trace": "from-info", "X-Other": "o"}, provider="twilio")
     obs.attach_sip(info, sip_headers={"x-trace": "explicit"})
     assert obs._config.sip_headers == {"x-trace": "explicit", "X-Other": "o"}
+
+
+def test_deprecation_warning_is_visible_by_default():
+    with warnings.catch_warnings(record=True) as record:
+        warnings.resetwarnings()  # Python's default filters ignore DeprecationWarning
+        warnings.simplefilter("default")
+        _deprecation.warn_deprecated("old_name", "new_name")
+    assert [type(w.message) for w in record] == [FutureWarning]
