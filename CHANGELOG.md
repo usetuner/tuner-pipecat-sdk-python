@@ -6,7 +6,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
-## [0.2.10] 2026-10-19
+## [0.2.9] 2026-10-19
 
 ### Added
 - Unified telephony API: `extract_sip(payload, provider=) -> SipInfo`, `forward_to_websocket(info, ws_url=) -> Forward`, `Observer.attach_sip(info, sip_call_id=, sip_headers=, recipient=)`, `register_provider(provider)`. Built-in providers: twilio, telnyx, plivo, exotel, jambonz, daily.

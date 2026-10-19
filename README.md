@@ -301,7 +301,9 @@ await telnyx_post(f"/v2/calls/{call_control_id}/actions/answer", {})
 await telnyx_post(f"/v2/calls/{call_control_id}/actions/streaming_start", fwd.stream)
 ```
 
-Telnyx sends them back on the websocket `start` frame as `start.custom_parameters`:
+Telnyx sends them back on the websocket `start` frame as `start.custom_parameters`.
+Pass that raw frame: Pipecat's `parse_telephony_websocket` drops `custom_parameters`
+from its Telnyx `call_data`:
 
 ```python
 observer.attach_sip(extract_sip(start_message, provider="telnyx"))

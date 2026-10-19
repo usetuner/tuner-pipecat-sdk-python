@@ -1,13 +1,12 @@
 """Twilio webhook + Media Streams WebSocket server for the Nova Clinic bot.
 
 Owns everything Twilio-specific:
-* ``POST /twiml`` (and ``POST /``) — returns TwiML that forwards SIP-layer
-  fields (``SipCallId``, ``Caller``, every ``SipHeader_*``) to the WebSocket
-  as ``<Parameter>`` tags. We use the SDK's ``build_sip_forwarding_twiml``
-  helper so the XML stays correct and escaped.
-* ``WebSocket /ws`` — parses the Twilio handshake into a
-  ``TwilioCallContext``, builds the ``TwilioFrameSerializer`` +
-  ``FastAPIWebsocketTransport``, then hands the typed context off to
+* ``POST /twiml`` (and ``POST /``) — reads the SIP data with ``extract_sip``
+  and returns ``forward_to_websocket(...).twiml``, which puts ``SipCallId``
+  and Tuner's ``X-Correlation-Id`` on the stream as ``<Parameter>`` tags.
+* ``WebSocket /ws`` — reads them back from the ``start`` message with
+  ``extract_sip``, builds the ``TwilioFrameSerializer`` +
+  ``FastAPIWebsocketTransport``, then hands the ``SipInfo`` to
   ``bot.run_bot``.
 
 Run::
@@ -16,8 +15,8 @@ Run::
     ./.venv/bin/python twilio_server.py
     # or: uvicorn twilio_server:app --host 0.0.0.0 --port 7860
 
-Point Twilio's Voice URL at ``https://<your-host>/twiml`` (or ``/`` —
-both are served).
+Point the Voice URL of the Twilio SIP Domain that Tuner dials at
+``https://<your-host>/twiml`` (or ``/`` — both are served).
 """
 
 from __future__ import annotations
@@ -37,10 +36,7 @@ from pipecat.transports.websocket.fastapi import (
     FastAPIWebsocketTransport,
 )
 
-from tuner_pipecat_sdk.providers.twilio import (
-    TwilioCallContext,
-    build_sip_forwarding_twiml,
-)
+from tuner_pipecat_sdk import extract_sip, forward_to_websocket
 
 app = FastAPI()
 
@@ -54,20 +50,22 @@ async def twiml(request: Request) -> Response:
     host = request.headers.get("x-forwarded-host") or request.headers.get("host", "")
     ws_url = os.getenv("PUBLIC_WS_URL") or f"wss://{host}/ws"
 
-    xml = build_sip_forwarding_twiml(form, ws_url=ws_url)
+    info = extract_sip(dict(form), provider="twilio")
+    fwd = forward_to_websocket(info, ws_url=ws_url)
 
     logger.info(
-        "[twilio][twiml] CallSid={!r}  has_SipCallId={}  ws_url={}",
-        form.get("CallSid"),
-        bool(form.get("SipCallId")),
+        "[twilio][twiml] CallSid={!r}  has_SipCallId={}  has_correlation_id={}  ws_url={}",
+        info.carrier_call_id,
+        not info.is_fallback,
+        bool(info.correlation_id),
         ws_url,
     )
-    if not form.get("SipCallId"):
+    if info.is_fallback:
         logger.warning(
             "[twilio][twiml] no SipCallId on form — call may not be "
             "SIP-originated. Bot will only see CallSid."
         )
-    return Response(content=xml, media_type="application/xml")
+    return Response(content=fwd.twiml, media_type="application/xml")
 
 
 @app.websocket("/ws")
@@ -77,13 +75,13 @@ async def ws(websocket: WebSocket) -> None:
     logger.info("[twilio][ws] websocket accepted")
 
     _, sip_call_data = await parse_telephony_websocket(websocket)
-    ctx = TwilioCallContext.from_call_data(sip_call_data)
+    sip_info = extract_sip(sip_call_data, provider="twilio")
     logger.info(
-        "[twilio][ws] resolved context  call_sid={!r}  sip_call_id={!r}  "
+        "[twilio][ws] resolved SIP data  call_sid={!r}  sip_call_id={!r}  "
         "header_keys={}",
-        ctx.call_sid,
-        ctx.sip_call_id,
-        list(ctx.raw_headers.keys()),
+        sip_info.carrier_call_id,
+        sip_info.sip_call_id,
+        list(sip_info.sip_headers.keys()),
     )
 
     params = FastAPIWebsocketParams(
@@ -99,7 +97,7 @@ async def ws(websocket: WebSocket) -> None:
 
     runner_args = WebSocketRunnerArguments(websocket=websocket)
     runner_args.handle_sigint = False
-    await bot_module.run_bot(transport, runner_args, sip_context=ctx)
+    await bot_module.run_bot(transport, runner_args, sip_info=sip_info)
 
 
 @app.get("/")
