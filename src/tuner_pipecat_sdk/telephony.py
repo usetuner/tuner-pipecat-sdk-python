@@ -20,6 +20,8 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 from xml.sax.saxutils import escape
 
+from loguru import logger
+
 from ._providers import (
     _extract_exotel,
     _extract_jambonz,
@@ -96,7 +98,8 @@ class TwilioProvider:
     def extract(self, payload: Any) -> SipInfo:
         from .providers.twilio import TwilioCallContext
 
-        if not isinstance(payload, Mapping):
+        payload = _as_mapping(payload, self.name)
+        if payload is None:
             return SipInfo(provider=self.name)
         start = payload.get("start")
         if isinstance(start, Mapping):
@@ -167,7 +170,8 @@ class TelnyxProvider:
     name = "telnyx"
 
     def extract(self, payload: Any) -> SipInfo:
-        if not isinstance(payload, Mapping):
+        payload = _as_mapping(payload, self.name)
+        if payload is None:
             return SipInfo(provider=self.name)
         start = payload.get("start")
         if isinstance(start, Mapping):
@@ -226,7 +230,8 @@ class _ExtractOnly:
         self._extractor = extractor
 
     def extract(self, payload: Any) -> SipInfo:
-        if not isinstance(payload, Mapping):
+        payload = _as_mapping(payload, self.name)
+        if payload is None:
             return SipInfo(provider=self.name)
         sip_call_id, headers = self._extractor(dict(payload))
         return SipInfo(sip_call_id=sip_call_id, sip_headers=headers or {}, provider=self.name)
@@ -309,6 +314,24 @@ def _telnyx_call_control_id(payload: Mapping[str, Any]) -> str | None:
     source = inner if isinstance(inner, Mapping) else payload
     cid = source.get("call_control_id") or payload.get("call_id")
     return str(cid) if cid else None
+
+
+def _as_mapping(payload: Any, provider: str) -> Mapping[str, Any] | None:
+    """A Mapping, or a pydantic model such as Pipecat's ``CallData`` as its wire dict."""
+    if isinstance(payload, Mapping):
+        return payload
+    dump = getattr(payload, "model_dump", None)
+    if callable(dump):
+        try:
+            data = dump(by_alias=True)
+        except Exception:
+            data = None
+        if isinstance(data, Mapping):
+            return data
+    logger.warning(
+        "[tuner] extract_sip({}): unreadable payload type {}", provider, type(payload).__name__
+    )
+    return None
 
 
 def _attr(value: str) -> str:

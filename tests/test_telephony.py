@@ -434,3 +434,32 @@ def test_custom_provider_end_to_end():
     obs.attach_sip(extract_sip({"start": {"params": fwd.parameters}}, provider="acme2"))
     assert obs._config.sip_call_id == "sip@host"
     assert obs._config.sip_headers == {"X-Correlation-Id": TOKEN}
+
+
+def test_extract_accepts_pipecat_call_data_model():
+    # Same shape as pipecat.runner.types.CallData (importing it needs fastapi).
+    from pydantic import BaseModel, ConfigDict, Field
+
+    class CallData(BaseModel):
+        model_config = ConfigDict(populate_by_name=True, extra="allow")
+        stream_id: str | None = None
+        call_id: str | None = None
+        to_number: str | None = Field(default=None, alias="to")
+        body: dict = Field(default_factory=dict)
+
+    data = CallData(call_id="CA1", stream_id="MZ1", body={"SipCallId": "abc@host"})
+    info = extract_sip(data, provider="twilio")
+    assert info.sip_call_id == "abc@host"
+    assert info.carrier_call_id == "CA1"
+
+
+def test_extract_warns_on_unreadable_payload():
+    from loguru import logger
+
+    seen: list[str] = []
+    sink = logger.add(seen.append, level="WARNING")
+    try:
+        assert extract_sip(object(), provider="telnyx") == SipInfo(provider="telnyx")
+    finally:
+        logger.remove(sink)
+    assert any("unreadable payload" in m for m in seen)
