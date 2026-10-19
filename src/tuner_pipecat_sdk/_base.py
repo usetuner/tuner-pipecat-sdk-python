@@ -269,16 +269,20 @@ class _BaseObserver(BaseObserver):
         """Attach SIP linking data to this call. Safe to call more than once.
 
         ``info`` comes from :func:`tuner_pipecat_sdk.extract_sip`. Headers merge
-        (first non-empty value per name wins, case-insensitive). A carrier ID only
+        (explicit ``sip_headers`` beat ``info``'s; across calls the first non-empty
+        value per name wins, case-insensitive). A carrier ID only
         fills an empty ``sip_call_id``; a real SIP Call-ID replaces it but never
         another real one. An explicit ``sip_call_id`` always wins. ``recipient``
         (or ``info.recipient``) is what an outbound call dialed.
         """
+        # Explicit sip_headers win over info's within this call.
+        headers = _merge_headers(sip_headers, info.sip_headers) if info is not None else sip_headers
         if info is not None:
             self._attach_resolved_sip(
-                info.sip_call_id, info.sip_headers or None, is_fallback=info.is_fallback
+                info.sip_call_id, headers or None, is_fallback=info.is_fallback
             )
-        self._set_sip(sip_call_id=sip_call_id or None, sip_headers=sip_headers)
+            headers = None
+        self._set_sip(sip_call_id=sip_call_id or None, sip_headers=headers)
         recipient = recipient or (info.recipient if info is not None else None)
         if recipient:
             self._config.recipient = recipient
@@ -369,9 +373,7 @@ class _BaseObserver(BaseObserver):
         Accepts either a ``DialinSettings`` instance or the equivalent dict
         (e.g. ``runner_args.body["dialin_settings"]``).
         """
-        warn_deprecated(
-            "attach_sip_from_dialin", 'attach_sip(extract_sip(..., provider="daily"))'
-        )
+        warn_deprecated("attach_sip_from_dialin", 'attach_sip(extract_sip(..., provider="daily"))')
         call_id = _get(dialin_settings, "call_id")
         headers = _get(dialin_settings, "sip_headers")
         self._set_sip(sip_call_id=call_id, sip_headers=headers)

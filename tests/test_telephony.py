@@ -463,3 +463,12 @@ def test_extract_warns_on_unreadable_payload():
     finally:
         logger.remove(sink)
     assert any("unreadable payload" in m for m in seen)
+
+
+def test_attach_sip_explicit_headers_beat_info():
+    from tuner_pipecat_sdk.observer import Observer
+
+    obs = Observer(api_key="k", workspace_id=1, agent_id="a", call_id="c")
+    info = SipInfo(sip_headers={"X-Trace": "from-info", "X-Other": "o"}, provider="twilio")
+    obs.attach_sip(info, sip_headers={"x-trace": "explicit"})
+    assert obs._config.sip_headers == {"x-trace": "explicit", "X-Other": "o"}
