@@ -64,6 +64,7 @@ from pipecat.transports.websocket.fastapi import (
     FastAPIWebsocketTransport,
 )
 
+from tuner_pipecat_sdk import SipInfo
 from tuner_pipecat_sdk.providers.jambonz import (
     JambonzCallContext,
     JambonzPendingStore,
@@ -267,7 +268,8 @@ async def ws(websocket: WebSocket) -> None:
 
     runner_args = WebSocketRunnerArguments(websocket=websocket)
     runner_args.handle_sigint = False
-    await bot_module.run_bot(transport, runner_args, sip_context=ctx)
+    sip_info = SipInfo(sip_call_id=ctx.sip_call_id, sip_headers=dict(ctx.raw_headers))
+    await bot_module.run_bot(transport, runner_args, sip_info=sip_info)
 
 
 @app.get("/")

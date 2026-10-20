@@ -249,231 +249,140 @@ Observer(
 
 ## SIP / Telephony Calls
 
-The observer can capture the SIP Call-ID and SIP headers and forward them to
-Tuner. The SDK call is **one line per provider** — your server passes its
-raw payload straight through and the SDK handles all SIP-field extraction
-internally.
+Tuner links a simulation call to your agent's call through the SIP data on the
+inbound INVITE: the `X-Correlation-Id` header and the SIP Call-ID. Your call
+webhook sees them, but the media websocket does not, so the SDK gives you three
+steps, the same for every carrier:
 
-The SDK call:
+| Step | API |
+|---|---|
+| Read | `extract_sip(payload, *, provider) -> SipInfo(sip_call_id, sip_headers, carrier_call_id)` |
+| Forward | `forward_to_websocket(info, *, ws_url) -> Forward` (`.twiml` for Twilio, `.stream` for Telnyx) |
+| Attach | `observer.attach_sip(info=None, *, sip_call_id=None, sip_headers=None, recipient=None)` |
+| Add a carrier | `register_provider(provider)` |
 
-```python
-# Any built-in provider — pass the raw payload your server already has:
-observer.attach_sip_from_telephony(payload, provider="twilio")
-observer.attach_sip_from_telephony(payload, provider="telnyx")
-observer.attach_sip_from_telephony(payload, provider="plivo")
-observer.attach_sip_from_telephony(payload, provider="exotel")
-observer.attach_sip_from_telephony(payload, provider="jambonz")
+Built-in providers: `"twilio"`, `"telnyx"`, `"plivo"`, `"exotel"`, `"jambonz"`,
+`"daily"`. Forwarding is built in for Twilio and Telnyx.
 
-# Unlisted provider — pass your own extractor:
-def my_extractor(payload):
-    return payload["my_id"], payload.get("my_headers")
-observer.attach_sip_from_telephony(payload, provider=my_extractor)
-
-# Daily PSTN/SIP dial-in:
-observer.attach_sip_from_dialin(runner_args.body["dialin_settings"])
-
-# Anything else (you already have the values):
-observer.attach_sip_info(sip_call_id="...", sip_headers={...})
-```
-
-`provider=` is **required** for `attach_sip_from_telephony`. Built-in
-strings: `"twilio"`, `"telnyx"`, `"plivo"`, `"exotel"`, `"jambonz"`. An
-unknown string raises `ValueError` — pass a callable instead for any
-provider not in the list.
-
-### What the SDK does automatically
-
-The built-in extractors look for a SIP-layer Call-ID in the
-provider-specific location, then fall back to the provider's native call
-id when no SIP-layer key was forwarded:
-
-| Provider | Expected `payload`                       | SIP-layer source                          | Native fallback           |
-|----------|------------------------------------------|-------------------------------------------|---------------------------|
-| Twilio   | `parse_telephony_websocket` output       | `body[SipCallId]` (case-insensitive)      | `call_id` (CallSid)       |
-| Telnyx   | Call Control event **or** WS `call_data` | `data.payload.sip_call_id` / `sip_headers` list / `customParameters` | `call_control_id`         |
-| Plivo    | `parse_telephony_websocket` output       | `customParameters` / `extra_headers`      | `call_id`                 |
-| Exotel   | `parse_telephony_websocket` output       | `custom_parameters`                       | `call_id`                 |
-| Jambonz  | call-hook webhook JSON body              | `sip.headers[X-CID]` → `Call-ID` → `SipCallId` → `sip.call_id` | `call_sid` |
-
-Headers in the same location populate `sip_headers` automatically;
-override with the `sip_headers=` kwarg when you want to send something
-different.
-
-For the SIP-layer Call-ID to actually appear, **your trunk/webhook must
-forward it**. The per-provider configuration is below.
-
-### Twilio Media Streams (most common case)
-
-Twilio's HTTP voice webhook receives SIP context (`SipCallId`, `Caller`,
-every `SipHeader_*`) but the Media Streams WebSocket drops those fields
-by default. The SDK ships two helpers so your integration stays short and
-correct:
-
-* `build_sip_forwarding_twiml(form, ws_url=...)` — returns the TwiML
-  response that forwards every SIP-relevant field as a `<Parameter>`
-  tag. Handles XML escaping and `SipHeader_*` auto-forwarding.
-* `TwilioCallContext` — typed dataclass with `.sip_call_id`,
-  `.from_number`, `.to_number`, `.stream_sid`, `.raw_headers`. Built via
-  `TwilioCallContext.from_call_data(call_data)` where `call_data` is the
-  output of Pipecat's `parse_telephony_websocket`.
-
-Server wiring (in your application):
+### Twilio Media Streams
 
 ```python
-from tuner_pipecat_sdk.providers.twilio import (
-    TwilioCallContext,
-    build_sip_forwarding_twiml,
-)
+from tuner_pipecat_sdk import extract_sip, forward_to_websocket
 
 @app.post("/twiml")
 async def twiml(request):
-    form = await request.form()
-    xml = build_sip_forwarding_twiml(form, ws_url="wss://your-host/ws")
-    return Response(content=xml, media_type="application/xml")
-
-@app.websocket("/ws")
-async def ws(websocket):
-    _, call_data = await parse_telephony_websocket(websocket)
-    ctx = TwilioCallContext.from_call_data(call_data)
-    await run_bot(transport, sip_context=ctx)
+    info = extract_sip(await request.form(), provider="twilio")
+    fwd = forward_to_websocket(info, ws_url="wss://your-host/ws")
+    return Response(content=fwd.twiml, media_type="application/xml")
 ```
 
-Bot — single line:
+`fwd.twiml` is `<Connect><Stream url>` with one `<Parameter>` per SIP field:
+`SipCallId`, `CallSid` and every `SipHeader_*`. In the websocket handler, read
+them from the `start` frame (`start.customParameters`):
 
 ```python
-observer.attach_sip_from_context(ctx)
+start = ...  # the websocket "start" message, or parse_telephony_websocket's call_data
+observer.attach_sip(extract_sip(start, provider="twilio"))
 ```
 
-Point Twilio's Voice URL at `https://your-host/twiml`. See
-`examples/nova_clinic_pipecat/twilio_server.py` for the full pattern.
+> Pipecat's built-in dev runner returns TwiML with no `<Parameter>` tags, so
+> the SIP data never reaches the bot. Serve `fwd.twiml` from your own webhook.
 
-> **Why this matters:** Pipecat's built-in dev runner ships a hardcoded
-> TwiML response with no `<Parameter>` tags, so the SIP Call-ID never
-> reaches the bot — Tuner sees only the Twilio `CallSid` and falls back
-> to it. You must run your own webhook server using
-> `build_sip_forwarding_twiml` (or equivalent) to get the real SIP id.
+### Telnyx Call Control
 
-### Telnyx, Plivo, Exotel
-
-Bot side stays one line:
+Answer the call, then start the stream with `fwd.stream` as the
+`streaming_start` body. It carries `X-Correlation-Id` and `SipCallId` as
+`custom_parameters`:
 
 ```python
-observer.attach_sip_from_telephony(payload, provider="telnyx")  # or "plivo" / "exotel"
+info = extract_sip(webhook_json, provider="telnyx")      # call.initiated
+fwd = forward_to_websocket(info, ws_url="wss://your-host/ws")
+await telnyx_post(f"/v2/calls/{call_control_id}/actions/answer", {})
+await telnyx_post(f"/v2/calls/{call_control_id}/actions/streaming_start", fwd.stream)
 ```
 
-To capture the actual SIP Call-ID, configure your trunk/XML to forward it
-as a customParameter:
-
-* **Telnyx** — add `<CustomParameter name="SipCallId" value="{{sip_call_id}}"/>`
-  to your `<Stream>` element. With **Call Control** (JSON webhook + answer
-  command), cache the inbound event payload and pass it through verbatim
-  — the SDK reads `sip_headers` / `custom_headers` lists directly.
-* **Plivo** — add `extraHeaders="SipCallId={{sip_call_id}}"` to `<Stream>`.
-* **Exotel** — add `custom_parameters: SipCallId=<%CallSid%>` in the App
-  Bazaar Voicebot applet.
-
-Fallback when nothing is forwarded:
-
-| Provider | Fallback id     | Native key on `call_data` |
-|----------|-----------------|---------------------------|
-| Telnyx   | call_control_id | `call_control_id`         |
-| Plivo    | callId          | `call_id`                 |
-| Exotel   | call_sid        | `call_id`                 |
-
-### Jambonz
-
-Jambonz delivers SIP info on the **call-hook webhook** (the JSON `POST` to
-your application URL), not the WebSocket. The SDK ships two helpers so
-your integration is short and correct:
-
-* `JambonzCallContext` — typed dataclass with `.sip_call_id`,
-  `.from_number`, `.to_number`, `.direction`, `.raw_headers`. Built via
-  `JambonzCallContext.from_webhook(payload)`. SIP Call-ID resolution
-  priority: `X-CID` → `Call-ID` → `SipCallId` → `sip.call_id` → `call_sid`.
-* `JambonzPendingStore` — bridges webhook → WebSocket with a 30s TTL
-  (configurable) and `asyncio.Event` await semantics, so the WS handler
-  never races the webhook.
-
-Server wiring (in your application):
+Telnyx sends them back on the websocket `start` frame as `start.custom_parameters`.
+Pass that raw frame: Pipecat's `parse_telephony_websocket` drops `custom_parameters`
+from its Telnyx `call_data`:
 
 ```python
-from tuner_pipecat_sdk.providers.jambonz import (
-    JambonzCallContext,
-    JambonzPendingStore,
-)
-
-pending = JambonzPendingStore()
-
-@app.post("/")
-async def call_hook(request):
-    data = await request.json()
-    pending.park(JambonzCallContext.from_webhook(data))
-    return _jambonz_verbs(...)
-
-@app.websocket("/ws")
-async def ws(websocket):
-    ...  # read first frame to learn call_sid
-    ctx = await pending.wait_and_pop(call_sid) or JambonzCallContext.fallback(call_sid)
-    await run_bot(transport, sip_context=ctx)
+observer.attach_sip(extract_sip(start_message, provider="telnyx"))
 ```
 
-Bot — single line:
+`fwd.stream` defaults to inbound-track, bidirectional RTP PCMU; override any
+field with `{**fwd.stream, "stream_track": "both_tracks"}`. `answer` itself
+rejects `custom_parameters` (422, code 10000), so it takes two commands.
+
+TeXML works too: put `<Parameter name="X-Correlation-Id" value="..."/>` in `<Stream>`.
+
+### Plivo, Exotel, Jambonz, Daily
 
 ```python
-observer.attach_sip_from_context(ctx)
+observer.attach_sip(extract_sip(call_data, provider="plivo"))     # or "exotel"
+observer.attach_sip(extract_sip(call_hook_json, provider="jambonz"))
+observer.attach_sip(extract_sip(runner_args.body["dialin_settings"], provider="daily"))
 ```
 
-`attach_sip_from_context` is duck-typed: any object exposing
-`sip_call_id` and `raw_headers` attributes works, so you can pass your
-own context type if you've wrapped Jambonz's payload further.
+For Plivo add `extraHeaders="SipCallId={{sip_call_id}}"` to `<Stream>`; for
+Exotel add `custom_parameters: SipCallId=<%CallSid%>` in the Voicebot applet.
+Jambonz delivers SIP data on the call-hook webhook, not the websocket;
+`JambonzPendingStore` bridges the two (see
+`examples/nova_clinic_pipecat/jambonz_server.py`).
 
-See `examples/nova_clinic_pipecat/jambonz_server.py` for the full
-pattern.
-
-SIP Call-ID resolution priority: `X-CID` → `Call-ID` → `SipCallId` →
-`sip.call_id` → `call_sid`. The `X-CID` header is the canonical
-cross-system id for chains like LiveKit SIP → Jambonz, where Jambonz
-regenerates the SIP `Call-ID` on each hop. See
-`examples/nova_clinic_pipecat/jambonz_server.py` for a full pattern.
-
-### Daily PSTN/SIP dial-in
-
-Daily delivers SIP info in the dial-in webhook payload — no XML required.
-Pass it straight to the SDK:
+### Custom SIP trunk / your own values
 
 ```python
-observer.attach_sip_from_dialin(runner_args.body["dialin_settings"])
+observer.attach_sip(sip_call_id=my_call.call_id, sip_headers=my_call.headers)
 ```
 
-`DialinSettings.call_id` and `DialinSettings.sip_headers` reach Tuner
-as-is.
-
-### Custom SIP trunk / direct termination
-
-If you terminate SIP yourself (Asterisk, FreeSWITCH, Kamailio, …), pass
-the values straight in:
+### Add a carrier
 
 ```python
-observer.attach_sip_info(
-    sip_call_id=my_sip_session.call_id,
-    sip_headers=my_sip_session.headers,
-)
+from tuner_pipecat_sdk import Forward, SipInfo, register_provider
+
+class AcmeProvider:
+    name = "acme"
+
+    def extract(self, payload) -> SipInfo:
+        return SipInfo(sip_call_id=payload["sip_call_id"], sip_headers=payload["headers"])
+
+    # Optional: lets forward_to_websocket(info, ws_url=..., provider="acme") work.
+    def forward_to_websocket(self, info: SipInfo, ws_url: str) -> Forward: ...
+
+register_provider(AcmeProvider())
 ```
+
+### Merge rules
+
+`attach_sip` is safe to call more than once. `sip_headers` merge: the first
+non-empty value for a header name wins (case-insensitive). A carrier ID
+(`CallSid`, `call_control_id`) only fills `sip_call_id` when it is empty; a real
+SIP Call-ID replaces it but never another real one. An explicit `sip_call_id=`
+always wins. Twilio `SipHeader_X-Foo` is also reported as `X-Foo`. A correlation
+header that is not 32 hex or 26 base32 is dropped; see
+`valid_correlation_id`.
+
+### Deprecated
+
+These still work and emit a `FutureWarning` once:
+
+| Deprecated | Use |
+|---|---|
+| `observer.attach_sip_from_telephony(payload, provider=...)` | `observer.attach_sip(extract_sip(payload, provider=...))` |
+| `attach_sip_from_telephony(payload, provider=<callable>)` | `register_provider(...)` |
+| `observer.attach_sip_from_context(ctx)` | `observer.attach_sip(extract_sip(payload, provider=...))` |
+| `observer.attach_sip_from_dialin(settings)` | `observer.attach_sip(extract_sip(settings, provider="daily"))` |
+| `observer.attach_sip_info(sip_call_id=, sip_headers=)` | `observer.attach_sip(sip_call_id=, sip_headers=)` |
+| `providers.twilio.build_sip_forwarding_twiml(form, ws_url=)` | `forward_to_websocket(extract_sip(form, provider="twilio"), ws_url=).twiml` |
 
 ### Debugging checklist
 
-Both `sip_call_id` and `sip_headers` are optional in the final payload —
-they are omitted entirely when unset, so non-SIP web calls remain
-backward-compatible. If you expect SIP fields but see them missing:
-
 | Symptom in the final payload | Likely cause | Fix |
 |------------------------------|--------------|-----|
-| `sip_call_id` is the Twilio `CA…` CallSid | TwiML did not include `<Parameter name="SipCallId" .../>` | Update your webhook TwiML (Twilio section above) |
-| `sip_call_id` is `null` for a Twilio call | `attach_sip_from_telephony(..., provider="twilio")` never ran | Call it after `parse_telephony_websocket` returns |
-| `sip_call_id` is the Jambonz `call_sid` | No `X-CID` / `Call-ID` header in the webhook | Configure your upstream trunk to add it, or use a custom callable extractor |
-| `sip_call_id` is `null` for Daily PSTN | `attach_sip_from_dialin()` not wired | Call it from `runner_args.body["dialin_settings"]` |
-| `sip_headers` is `null` but `sip_call_id` is set | Headers were not in customParameters | Pass them explicitly via `attach_sip_info(sip_headers=...)` |
-| `ValueError: unknown provider …` | Misspelled built-in name | Use `"twilio"`/`"telnyx"`/`"plivo"`/`"exotel"`/`"jambonz"` or pass a callable |
+| `sip_call_id` is the Twilio `CA…` CallSid | TwiML had no `SipCallId` `<Parameter>` | Return `forward_to_websocket(...).twiml` |
+| No `X-Correlation-Id` on a Telnyx call | Stream started without `custom_parameters` | Send `fwd.stream` as the `streaming_start` body |
+| `sip_call_id` is `null` | `attach_sip` never ran | Call it with the websocket `start` frame |
+| `ValueError: Unknown provider …` | Misspelled name | Use a built-in name or `register_provider` |
 
 ## Disconnection Reason
 

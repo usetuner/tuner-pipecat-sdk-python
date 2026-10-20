@@ -5,9 +5,30 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from .config import TunerConfig
+from .correlation import CORRELATION_HEADER, valid_correlation_id
 from .models import CallUsage
+from .telephony import (
+    Forward,
+    Provider,
+    SipInfo,
+    extract_sip,
+    forward_to_websocket,
+    register_provider,
+)
 
-__all__ = ["Observer", "TunerConfig", "CallUsage"]
+__all__ = [
+    "Observer",
+    "TunerConfig",
+    "CallUsage",
+    "CORRELATION_HEADER",
+    "valid_correlation_id",
+    "SipInfo",
+    "Forward",
+    "Provider",
+    "extract_sip",
+    "forward_to_websocket",
+    "register_provider",
+]
 
 if TYPE_CHECKING:
     from .observer import Observer

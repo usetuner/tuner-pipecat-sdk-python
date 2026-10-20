@@ -6,6 +6,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.2.9] 2026-10-19
+
+### Added
+- Unified telephony API: `extract_sip(payload, provider=) -> SipInfo`, `forward_to_websocket(info, ws_url=) -> Forward`, `Observer.attach_sip(info, sip_call_id=, sip_headers=, recipient=)`, `register_provider(provider)`. Built-in providers: twilio, telnyx, plivo, exotel, jambonz, daily.
+- Twilio forward: `Forward.twiml` (`<Stream><Parameter>` per SIP field). Telnyx forward: `Forward.stream`, the `streaming_start` body with `X-Correlation-Id`, `SipCallId` and `Recipient` as `custom_parameters`; `extract_sip` reads them back from `start.custom_parameters`.
+- Outbound `recipient` travels as a stream parameter and is reported by `attach_sip`.
+
+### Deprecated
+- `attach_sip_from_telephony` (and callable extractors), `attach_sip_info`, `attach_sip_from_context`, `attach_sip_from_dialin`, `providers.twilio.build_sip_forwarding_twiml`. They still work and warn once.
+
+### Fixed
+- Twilio `SipHeader_*` parameters are also stored under the bare header name (e.g. `X-Correlation-Id`), so Tuner can link simulations.
+- `attach_sip_info` merges `sip_headers` instead of replacing them: first non-empty value wins, names compared case-insensitively. A sparse later event no longer wipes earlier headers.
+- Twilio `CallSid` and Telnyx `call_control_id` only fill `sip_call_id` when it is empty; a real SIP Call-ID replaces them but never another real one.
+- Full call reports (phone numbers, SIP headers) are no longer logged at INFO.
+- A malformed or oversized `X-Correlation-Id` is dropped instead of reported (`valid_correlation_id`, same rules as tuner-livekit-sdk).
+
+---
+
 ## [0.2.8] 2026-08-19
 
 ### Added
