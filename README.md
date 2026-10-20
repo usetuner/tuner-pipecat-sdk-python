@@ -359,7 +359,7 @@ non-empty value for a header name wins (case-insensitive). A carrier ID
 (`CallSid`, `call_control_id`) only fills `sip_call_id` when it is empty; a real
 SIP Call-ID replaces it but never another real one. An explicit `sip_call_id=`
 always wins. Twilio `SipHeader_X-Foo` is also reported as `X-Foo`. A correlation
-header that is not a 1-128 character token (`[A-Za-z0-9._-]`) is dropped; see
+header that is not 32 hex or 26 base32 is dropped; see
 `valid_correlation_id`.
 
 ### Deprecated

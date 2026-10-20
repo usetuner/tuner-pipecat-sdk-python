@@ -2500,7 +2500,7 @@ wheels = [
 
 [[package]]
 name = "tuner-pipecat-sdk"
-version = "0.2.10"
+version = "0.2.9"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
