@@ -578,3 +578,26 @@ def test_static_transition_between_llm_turns_is_kept(replay, tuner_config):
         "What's the first item?",
     ]
 
+
+def test_voiced_uninterrupted_reply_without_commit_is_kept_in_order(replay, tuner_config):
+    # The read-back is fully voiced, the user confirms after it ends, and the next LLM response
+    # (a tool call) starts before the read-back's commit arrives. It must not be dropped, and
+    # it stays ahead of the confirmation it prompted.
+    readback = "One large margherita for pickup at six. Is that right?"
+    rows = (
+        replay()
+        .generate(readback, 100, 600)
+        .bot_start(700)
+        .bot_stop(5000)
+        .user_start(5200)
+        .transcription("yes", 5300)
+        .user_stop(5500)
+        .llm_start(5700)
+        .tool_call("add_item", "call_1", {"item": "margherita"}, 5800)
+        .tool_result("add_item", "call_1", {"ok": True}, 6000)
+        .bot_says("Margherita has been added.", 6200, 7000)
+        .rows(tuner_config)
+    )
+    assert _roles(rows) == ["agent", "user", "agent_function", "agent_result", "agent"]
+    assert _texts(rows, "agent") == [readback, "Margherita has been added."]
+    assert rows[0].metadata["interrupted"] is False
