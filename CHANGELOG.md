@@ -6,6 +6,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [Unreleased]
+
+### Fixed
+- Static speech (`TTSSpeakFrame(append_to_context=False)`, e.g. a greeting or a step line) is kept as an agent row. It never reaches the LLM context, so it was dropped when the next LLM response started.
+
+---
+
 ## [0.2.9] 2026-10-19
 
 ### Added

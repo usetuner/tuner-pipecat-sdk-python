@@ -375,14 +375,36 @@ class CallAccumulator:
 
         The previous open turn, if it never received a commit (LLMContextAssistantTimestampFrame),
         is abandoned here: pipecat discards an assistant response that was interrupted before it
-        committed, so we mirror that by simply not appending it.
+        committed, so we mirror that by simply not appending it. Static speech that was voiced is
+        kept instead (see ``_keep_voiced_turn``).
         """
+        if self._open_agent_turn is not None:
+            self._keep_voiced_turn(self._open_agent_turn)
         if self._llm_response_buffer:
             self._finalize_llm_response(0)
         self._llm_response_buffer = []
         self._open_agent_turn = LiveTurn(
             kind="agent", order=0, generated_ms=self._rel_ms(timestamp_ns)
         )
+
+    def _keep_voiced_turn(self, turn: LiveTurn) -> None:
+        """Keep static speech the caller actually heard.
+
+        Static speech (a TTSSpeakFrame with append_to_context=False, e.g. a greeting or a
+        transition line) has no LLM text and never gets a commit, so it would be abandoned when
+        the next LLM response starts. The turn goes back to where it was voiced.
+        """
+        seg = self._segment_by_id(turn.bot_segment_id)
+        if seg is None or turn.voiced_order is None or turn.text.strip():
+            return
+        index = next(
+            (i for i, t in enumerate(self.live_turns) if t.order >= turn.voiced_order),
+            len(self.live_turns),
+        )
+        self.live_turns.insert(index, turn)
+        for order, t in enumerate(self.live_turns):
+            t.order = order
+        self._turn_order = len(self.live_turns)
 
     def on_llm_text(self, text: str) -> None:
         """Accumulate a streamed LLM text chunk for the in-progress response."""
@@ -579,6 +601,7 @@ class CallAccumulator:
             self._open_agent_turn = LiveTurn(kind="agent", order=0)
         if self._open_agent_turn.bot_segment_id is None:
             self._open_agent_turn.bot_segment_id = seg.id
+            self._open_agent_turn.voiced_order = self._turn_order
 
     def on_latency_measured(self, latency_secs: float) -> None:
         self._pending_latency_ms_queue.append(max(0, int(latency_secs * 1000)))

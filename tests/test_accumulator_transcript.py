@@ -535,3 +535,46 @@ def test_eou_targets_correct_turn_across_multiple_user_turns(replay, tuner_confi
     assert users[0].metadata["eou_delay"] == 100  # 1300 − 1200, not bled from turn 2
     assert users[1].metadata["eou_delay"] == 100  # 3500 − 3400
     assert users[0].text == "first turn" and users[1].text == "second turn"
+
+
+def test_static_greeting_without_commit_is_kept(replay, tuner_config):
+    # A TTSSpeakFrame greeting (append_to_context=False) is voiced but never committed to the
+    # LLM context, so no LLMContextAssistantTimestampFrame arrives. It was heard, so it stays,
+    # ahead of the user's reply.
+    rows = (
+        replay()
+        .turn_start(1, 0)
+        .tts("Hi, thanks for calling Pizza Place.", 100)
+        .bot_start(150)
+        .bot_stop(1500)
+        .user_start(2000)
+        .transcription("yes", 2200)
+        .user_stop(2400)
+        .bot_says("Great, let's start.", 2800, 4000)
+        .rows(tuner_config)
+    )
+    assert _roles(rows) == ["agent", "user", "agent"]
+    assert _texts(rows, "agent") == ["Hi, thanks for calling Pizza Place.", "Great, let's start."]
+
+
+def test_static_transition_between_llm_turns_is_kept(replay, tuner_config):
+    rows = (
+        replay()
+        .bot_says("Is this for pickup or delivery?", 100, 1000)
+        .user_start(1500)
+        .transcription("pickup", 1700)
+        .user_stop(1900)
+        .bot_says("Thanks.", 2100, 2500)
+        .tts("Perfect, let's go through your order.", 2600)
+        .bot_start(2650)
+        .bot_stop(4000)
+        .bot_says("What's the first item?", 4200, 5000)
+        .rows(tuner_config)
+    )
+    assert _texts(rows, "agent") == [
+        "Is this for pickup or delivery?",
+        "Thanks.",
+        "Perfect, let's go through your order.",
+        "What's the first item?",
+    ]
+
