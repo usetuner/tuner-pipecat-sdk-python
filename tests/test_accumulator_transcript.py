@@ -214,15 +214,15 @@ def test_speak_tool_speak_both_committed_are_timed(replay, tuner_config):
         .generate("Just to confirm.", 1500, 1700)
         .tts("Just to confirm.", 1600)
         .bot_start(1800)
+        .commit("Just to confirm.", 2150, started_ms=1750)
         .bot_stop(2200)
-        .assistant_commit(2200)
         .tool_call("check", "t1", {}, 2300)
         .tool_result("check", "t1", {"ok": True}, 2400)
         .generate("Your total is $10.", 2600, 2700)
         .tts("Your total is $10.", 2650)
         .bot_start(2800)
+        .commit("Your total is $10.", 3150, started_ms=2750)
         .bot_stop(3200)
-        .assistant_commit(3200)
         .rows(tuner_config)
     )
     agents = [r for r in rows if r.role == "agent"]
@@ -298,8 +298,8 @@ def test_interruption_flag_propagates(replay, tuner_config):
         .bot_start(1700)
         .turn_start(2, 2000)  # interrupting turn
         .user_start(2000)  # interrupts the bot
+        .commit("Here is a long answer", 2010, started_ms=1650)  # the spoken portion
         .bot_stop(2050)
-        .assistant_commit(2050)  # the spoken portion is committed
         .transcription("stop", 2100)
         .user_stop(2300)
         .turn_end(1, interrupted=True)
@@ -417,9 +417,9 @@ def test_latency_metadata_per_node(replay, tuner_config):
     assert agent.metadata["e2e_latency"] == 2100 - 1500
 
 
-def test_agent_text_is_generation_even_when_tts_voiced_less(replay, tuner_config):
-    # Decided behavior: agent text mirrors the LLM generation (pipecat UI parity), even if TTS
-    # voiced only part of it before an interruption.
+def test_agent_text_is_what_pipecat_committed_not_the_generation(replay, tuner_config):
+    # Agent text is the text Pipecat writes to the LLM context, the same text
+    # EvalConversationObserver records: what was voiced, cut where the user interrupted.
     rows = (
         replay()
         .turn_start(1, 1000)
@@ -427,13 +427,16 @@ def test_agent_text_is_generation_even_when_tts_voiced_less(replay, tuner_config
         .transcription("hi", 1100)
         .user_stop(1200)
         .generate("Full generated answer with lots of detail.", 1400, 1600)
-        .tts("Full generated", 1500)  # only part voiced
+        .tts("Full generated answer with lots of detail.", 1500)
         .bot_start(1700)
+        .user_start(1950)
+        .commit("Full generated", 1960, started_ms=1650)
         .bot_stop(2000)
         .rows(tuner_config)
     )
     agent = next(r for r in rows if r.role == "agent")
-    assert agent.text == "Full generated answer with lots of detail."
+    assert agent.text == "Full generated"
+    assert agent.metadata["interrupted"] is True
 
 
 def test_eou_silence_timeout_reaches_user_row(replay, tuner_config):
@@ -539,12 +542,11 @@ def test_eou_targets_correct_turn_across_multiple_user_turns(replay, tuner_confi
 
 def test_static_greeting_without_commit_is_kept(replay, tuner_config):
     # A TTSSpeakFrame greeting (append_to_context=False) is voiced but never committed to the
-    # LLM context, so no LLMContextAssistantTimestampFrame arrives. It was heard, so it stays,
-    # ahead of the user's reply.
+    # LLM context, so no commit arrives. It was heard, so it stays, ahead of the user's reply.
     rows = (
         replay()
         .turn_start(1, 0)
-        .tts("Hi, thanks for calling Pizza Place.", 100)
+        .tts("Hi, thanks for calling Pizza Place.", 100, in_context=False)
         .bot_start(150)
         .bot_stop(1500)
         .user_start(2000)
@@ -565,7 +567,7 @@ def test_static_transition_between_llm_turns_is_kept(replay, tuner_config):
         .transcription("pickup", 1700)
         .user_stop(1900)
         .bot_says("Thanks.", 2100, 2500)
-        .tts("Perfect, let's go through your order.", 2600)
+        .tts("Perfect, let's go through your order.", 2600, in_context=False)
         .bot_start(2650)
         .bot_stop(4000)
         .bot_says("What's the first item?", 4200, 5000)
@@ -579,20 +581,22 @@ def test_static_transition_between_llm_turns_is_kept(replay, tuner_config):
     ]
 
 
-def test_voiced_uninterrupted_reply_without_commit_is_kept_in_order(replay, tuner_config):
-    # The read-back is fully voiced, the user confirms after it ends, and the next LLM response
-    # (a tool call) starts before the read-back's commit arrives. It must not be dropped, and
-    # it stays ahead of the confirmation it prompted.
+def test_late_commit_fills_the_reply_where_it_was_voiced(replay, tuner_config):
+    # The read-back is fully voiced and the user confirms. Its commit lands only after the
+    # user's turn and the next LLM response (a tool call). The row keeps its text and stays
+    # ahead of the confirmation it prompted.
     readback = "One large margherita for pickup at six. Is that right?"
     rows = (
         replay()
         .generate(readback, 100, 600)
+        .tts(readback, 300)
         .bot_start(700)
         .bot_stop(5000)
         .user_start(5200)
         .transcription("yes", 5300)
         .user_stop(5500)
         .llm_start(5700)
+        .commit(readback, 5750, started_ms=650)
         .tool_call("add_item", "call_1", {"item": "margherita"}, 5800)
         .tool_result("add_item", "call_1", {"ok": True}, 6000)
         .bot_says("Margherita has been added.", 6200, 7000)
@@ -600,4 +604,125 @@ def test_voiced_uninterrupted_reply_without_commit_is_kept_in_order(replay, tune
     )
     assert _roles(rows) == ["agent", "user", "agent_function", "agent_result", "agent"]
     assert _texts(rows, "agent") == [readback, "Margherita has been added."]
+    assert rows[0].start_ms == 700
     assert rows[0].metadata["interrupted"] is False
+
+
+def test_commit_never_fills_an_earlier_uncommitted_voicing(replay, tuner_config):
+    # The first reply is cut off before Pipecat aggregated any of it, so it is never committed.
+    # The next commit belongs to the next voicing only: the first stays out, the second keeps
+    # its own timing.
+    rows = (
+        replay()
+        .generate("Our menu has margherita, pepperoni and", 100, 300)
+        .tts("Our menu has margherita, pepperoni and", 200)
+        .bot_start(400)
+        .user_start(450)
+        .bot_stop(500)
+        .transcription("just a margherita", 700)
+        .user_stop(900)
+        .generate("One margherita, coming up.", 1200, 1300)
+        .tts("One margherita, coming up.", 1250)
+        .bot_start(1400)
+        .commit("One margherita, coming up.", 2300, started_ms=1350)
+        .bot_stop(2400)
+        .rows(tuner_config)
+    )
+    assert _roles(rows) == ["user", "agent"]
+    assert _texts(rows, "agent") == ["One margherita, coming up."]
+    assert rows[1].start_ms == 1400
+
+
+def test_one_commit_over_two_voicings_is_one_row(replay, tuner_config):
+    # A pause mid-reply stops and restarts bot speech, but Pipecat commits the reply once.
+    rows = (
+        replay()
+        .generate("Your pizza is ready. Anything else?", 100, 300)
+        .tts("Your pizza is ready.", 200)
+        .tts("Anything else?", 250)
+        .bot_start(400)
+        .bot_stop(1500)
+        .bot_start(2000)
+        .commit("Your pizza is ready. Anything else?", 2800, started_ms=350)
+        .bot_stop(2900)
+        .rows(tuner_config)
+    )
+    assert _roles(rows) == ["agent"]
+    assert rows[0].text == "Your pizza is ready. Anything else?"
+    assert (rows[0].start_ms, rows[0].end_ms) == (400, 2900)
+
+
+def test_static_line_and_reply_in_one_voicing_are_two_rows(replay, tuner_config):
+    # A static line runs straight into the LLM reply with no pause, so both are one voicing.
+    # The commit holds only the reply; the static line keeps its own row, ahead of it.
+    rows = (
+        replay()
+        .tts("Thanks for confirming.", 100, in_context=False)
+        .generate("What's the first item?", 150, 300)
+        .tts("What's the first item?", 250)
+        .bot_start(200)
+        .commit("What's the first item?", 2200, started_ms=900)
+        .bot_stop(2500)
+        .rows(tuner_config)
+    )
+    assert _texts(rows, "agent") == ["Thanks for confirming.", "What's the first item?"]
+
+
+def test_commit_without_voicing_is_kept_at_commit_time(replay, tuner_config):
+    # Text that skips TTS still reaches the context, so it gets a row timed at its commit.
+    rows = (
+        replay()
+        .generate("Here is your order summary.", 100, 200)
+        .commit("Here is your order summary.", 300, started_ms=100)
+        .rows(tuner_config)
+    )
+    assert _texts(rows, "agent") == ["Here is your order summary."]
+    assert rows[0].start_ms == 300
+
+
+def test_textless_commit_of_older_pipecat_uses_the_voiced_text(replay, tuner_config):
+    # Pipecat < 1.4 has no LLMContextAssistantTurnFrame, only a commit marker without text.
+    rows = (
+        replay()
+        .generate("Hello there, how can I help?", 100, 200)
+        .tts("Hello there, how can I help?", 150)
+        .bot_start(300)
+        .commit(None, 1900)
+        .bot_stop(2000)
+        .rows(tuner_config)
+    )
+    assert _texts(rows, "agent") == ["Hello there, how can I help?"]
+
+
+def test_call_ending_mid_reply_keeps_what_was_voiced(replay, tuner_config):
+    # The caller hangs up while the bot speaks. Pipecat commits on the closing frame, after the
+    # observer has flushed, so the row falls back to the voiced text.
+    rows = (
+        replay()
+        .generate("Your total is ten dollars. Would you like anything else?", 100, 300)
+        .tts("Your total is ten dollars.", 200)
+        .bot_start(400)
+        .end(1500)
+        .rows(tuner_config)
+    )
+    assert _texts(rows, "agent") == ["Your total is ten dollars."]
+    assert rows[0].end_ms == 1500
+
+
+def test_late_commit_skips_static_speech_playing_now(replay, tuner_config):
+    # The reply's commit lands while a static line is already playing. The commit fills the
+    # reply only; the static line keeps its own row.
+    rows = (
+        replay()
+        .generate("Your order is placed.", 0, 50)
+        .tts("Your order is placed.", 60)
+        .bot_start(100)
+        .bot_stop(1000)
+        .tts("Thanks for calling Pizza Place.", 1050, in_context=False)
+        .bot_start(1100)
+        .commit("Your order is placed.", 1300, started_ms=50)
+        .bot_stop(2500)
+        .rows(tuner_config)
+    )
+    assert _texts(rows, "agent") == ["Your order is placed.", "Thanks for calling Pizza Place."]
+    assert (rows[0].start_ms, rows[0].end_ms) == (100, 1000)

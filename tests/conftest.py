@@ -79,8 +79,9 @@ class Replay:
         """Shorthand: a full LLM response (start → text → end)."""
         return self.llm_start(start_ms).llm_text(text).llm_end(end_ms)
 
-    def tts(self, text: str, ms: int) -> "Replay":
-        self.acc.on_tts_text(text, self._ns(ms))
+    def tts(self, text: str, ms: int, in_context: bool = True) -> "Replay":
+        """A TTSTextFrame. in_context=False is static speech (append_to_context=False)."""
+        self.acc.on_tts_text(text, self._ns(ms), in_context=in_context)
         return self
 
     def bot_start(self, ms: int) -> "Replay":
@@ -91,10 +92,11 @@ class Replay:
         self.acc.on_bot_stopped(self._ns(ms))
         return self
 
-    def assistant_commit(self, ms: int) -> "Replay":
-        """The LLMContextAssistantTimestampFrame — pipecat's assistant-message commit marker.
-        The in-progress agent turn is appended to the transcript here (and only here)."""
-        self.acc.on_assistant_commit(self._ns(ms))
+    def commit(self, text: str | None, ms: int, started_ms: int | None = None) -> "Replay":
+        """The LLMContextAssistantTurnFrame: the text pipecat committed to the LLM context, and
+        when that assistant turn started. text=None is the text-less commit of Pipecat < 1.4."""
+        started_ns = self._ns(started_ms) if started_ms is not None else None
+        self.acc.on_assistant_turn(text, self._ns(ms), started_ns=started_ns)
         return self
 
     def bot_says(self, text: str, start_ms: int, end_ms: int) -> "Replay":
@@ -105,7 +107,7 @@ class Replay:
             .llm_end(end_ms)
             .bot_start(start_ms)
             .bot_stop(end_ms)
-            .assistant_commit(end_ms)
+            .commit(text, end_ms, started_ms=start_ms)
         )
 
     # tools

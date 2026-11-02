@@ -7,6 +7,7 @@ import os
 import time
 from collections import deque
 from collections.abc import Callable
+from datetime import datetime
 from typing import Any
 
 from loguru import logger
@@ -32,6 +33,11 @@ from pipecat.frames.frames import (
 from pipecat.observers.base_observer import BaseObserver, FramePushed
 from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
 from pipecat.processors.frame_processor import FrameDirection
+
+try:
+    from pipecat.frames.frames import LLMContextAssistantTurnFrame
+except ImportError:  # Pipecat < 1.4: commits carry no text (LLMContextAssistantTimestampFrame)
+    LLMContextAssistantTurnFrame = None  # type: ignore[assignment,misc]
 
 from ._deprecation import warn_deprecated
 from ._providers import CARRIER_CALL_ID_READERS, PROVIDER_EXTRACTORS, ProviderExtractor
@@ -59,6 +65,14 @@ def resolve_agent_version(explicit: int | None) -> int | None:
             except ValueError:
                 pass
     return None
+
+
+def _iso_to_ns(value: Any) -> int | None:
+    """Parse a Pipecat ISO-8601 timestamp into wall-clock ns, or None if it is not one."""
+    try:
+        return int(datetime.fromisoformat(value).timestamp() * 1000) * 1_000_000
+    except (TypeError, ValueError):
+        return None
 
 
 def _get(obj: Any, key: str) -> Any:
@@ -557,8 +571,11 @@ class _BaseObserver(BaseObserver):
 
         elif isinstance(frame, TTSTextFrame):
             # Voiced TTS sentence, recorded on a timeline and assigned to a bot segment by
-            # window at bot-stop (TTSTextFrames arrive before BotStartedSpeakingFrame).
-            self._acc.on_tts_text(frame.text, timestamp_ns)
+            # window at bot-stop (TTSTextFrames arrive before BotStartedSpeakingFrame). Static
+            # speech (e.g. TTSSpeakFrame(append_to_context=False)) is marked so: it never commits.
+            self._acc.on_tts_text(
+                frame.text, timestamp_ns, in_context=getattr(frame, "append_to_context", True)
+            )
 
         elif isinstance(frame, LLMFullResponseStartFrame):
             self._acc.on_llm_response_start(timestamp_ns)
@@ -567,15 +584,26 @@ class _BaseObserver(BaseObserver):
             self._acc.on_llm_response_end(timestamp_ns)
 
         elif isinstance(frame, LLMTextFrame):
-            # Generated LLM text — accumulated into the in-progress assistant turn (committed only
-            # when its LLMContextAssistantTimestampFrame arrives).
+            # Generated LLM text — diagnostics and the call-end fallback only. Agent rows take
+            # the text Pipecat commits (below).
             self._acc.on_llm_text(frame.text)
 
+        elif LLMContextAssistantTurnFrame is not None and isinstance(
+            frame, LLMContextAssistantTurnFrame
+        ):
+            # Broadcast by the assistant aggregator when it commits a turn to the LLM context,
+            # with the committed text: what was voiced, cut where the user interrupted. The same
+            # source Pipecat's EvalConversationObserver uses. on_push_frame keeps only the
+            # downstream copy of the broadcast pair.
+            self._acc.on_assistant_turn(
+                frame.text, timestamp_ns, started_ns=_iso_to_ns(frame.timestamp)
+            )
+
         elif isinstance(frame, LLMContextAssistantTimestampFrame):
-            # Pipecat pushes this exactly when it commits an assistant message to the LLM context.
-            # It is the authoritative signal for which assistant turns are real — an interrupted
-            # response that never commits never gets this frame, so it never appears.
-            self._acc.on_assistant_commit(timestamp_ns)
+            # The commit marker without text. Only used on Pipecat < 1.4, which has no
+            # LLMContextAssistantTurnFrame; newer Pipecat sends both for the same commit.
+            if LLMContextAssistantTurnFrame is None:
+                self._acc.on_assistant_turn(None, timestamp_ns)
 
         elif isinstance(frame, VADUserStoppedSpeakingFrame):
             self._acc.on_vad_user_stopped_speaking(timestamp_ns)

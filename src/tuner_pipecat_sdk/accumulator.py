@@ -64,12 +64,13 @@ class CallAccumulator:
     _response_user_segment_id: int | None = field(default=None, repr=False)
     # Latency measurement awaiting its on_latency_breakdown payload.
     _pending_measurement: LatencyMeasurement | None = field(default=None, repr=False)
-    # Timeline of voiced TTS sentences: (text, rel_ms). TTSTextFrames arrive slightly
+    # Timeline of voiced TTS sentences: (text, rel_ms, in_context). TTSTextFrames arrive slightly
     # BEFORE BotStartedSpeakingFrame, so we can't tie them to a segment at arrival time.
     # At on_bot_stopped each bot segment claims the TTS in its [start - lead, stop] window.
     # Text generated for a response that was interrupted before it was voiced (no
     # BotStartedSpeaking) falls outside every window and is dropped — never marked spoken.
-    _tts_timeline: list[tuple[str, int]] = field(default_factory=list, repr=False)
+    # in_context is TTSTextFrame.append_to_context: False for static speech.
+    _tts_timeline: list[tuple[str, int, bool]] = field(default_factory=list, repr=False)
 
     # In-progress LLM response text, accumulated across LLMTextFrames between
     # LLMFullResponseStartFrame and LLMFullResponseEndFrame, then finalized into
@@ -132,8 +133,10 @@ class CallAccumulator:
     _turn_order: int = field(default=0, repr=False)
     # The user turn currently accruing transcriptions (one per active user segment).
     _open_user_turn: LiveTurn | None = field(default=None, repr=False)
-    # The agent turn currently accruing LLM text / awaiting voicing.
-    _open_agent_turn: LiveTurn | None = field(default=None, repr=False)
+    # The latest LLM response: when it started and its text so far. Only the fallback for a
+    # reply still playing at call end with no voiced text claimed; rows use committed text.
+    _llm_started_ms: int | None = field(default=None, repr=False)
+    _latest_llm_text: str = field(default="", repr=False)
      # Timestamp (ns) of the most recent VAD-detected speech-end within the currently open
     # user turn. Anchors the silence-timeout EOU fallback below when no turn-analyzer
     # verdict arrives before the turn commits. Reset after each turn closes.
@@ -357,11 +360,12 @@ class CallAccumulator:
         self.user_transcriptions.append((text, rel))  # kept for diagnostics
         self._ensure_open_user_turn(rel).chunks.append((text, rel))
 
-    def on_tts_text(self, text: str, timestamp_ns: int) -> None:
+    def on_tts_text(self, text: str, timestamp_ns: int, in_context: bool = True) -> None:
         """Record a voiced TTS sentence on the timeline. Assigned to a bot segment by time
-        window at on_bot_stopped (TTSTextFrames arrive before BotStartedSpeakingFrame)."""
+        window at on_bot_stopped (TTSTextFrames arrive before BotStartedSpeakingFrame).
+        ``in_context=False`` is static speech, which Pipecat keeps out of the LLM context."""
         if text and text.strip():
-            self._tts_timeline.append((text, self._rel_ms(timestamp_ns)))
+            self._tts_timeline.append((text, self._rel_ms(timestamp_ns), in_context))
 
     def _finalize_llm_response(self, timestamp_ns: int) -> None:
         """Join the buffered LLM text into one generation and record it."""
@@ -371,86 +375,147 @@ class CallAccumulator:
         self._llm_response_buffer = []
 
     def on_llm_response_start(self, timestamp_ns: int = 0) -> None:
-        """Begin a new LLM response — open a fresh (not-yet-committed) agent turn.
-
-        The previous open turn, if it never received a commit (LLMContextAssistantTimestampFrame),
-        is abandoned here: pipecat discards an assistant response that was interrupted before it
-        committed, so we mirror that by simply not appending it. A turn that was voiced and not
-        cut off is kept instead (see ``_keep_voiced_turn``).
-        """
-        if self._open_agent_turn is not None:
-            self._keep_voiced_turn(self._open_agent_turn)
+        """Begin a new LLM response. Its text feeds diagnostics and the call-end fallback only:
+        agent rows take their text from Pipecat's commit (see ``on_assistant_turn``)."""
         if self._llm_response_buffer:
             self._finalize_llm_response(0)
         self._llm_response_buffer = []
-        self._open_agent_turn = LiveTurn(
-            kind="agent", order=0, generated_ms=self._rel_ms(timestamp_ns)
-        )
-
-    def _keep_voiced_turn(self, turn: LiveTurn) -> None:
-        """Keep an uncommitted agent turn the caller actually heard.
-
-        Two kinds of voiced speech never get a commit before the next LLM response starts:
-        static speech (a TTSSpeakFrame with append_to_context=False, e.g. a greeting or a
-        transition line, which has no LLM text) and an LLM reply whose commit lags behind the
-        next response (e.g. a read-back followed by a tool call). Static speech is always kept.
-        An LLM reply is kept only if no user speech started during it, so interrupted replies
-        are still dropped like pipecat does. The turn goes back to where it was voiced.
-        """
-        seg = self._segment_by_id(turn.bot_segment_id)
-        if seg is None or turn.voiced_order is None:
-            return
-        if turn.text.strip() and self._was_cut_off(seg):
-            return
-        index = next(
-            (i for i, t in enumerate(self.live_turns) if t.order >= turn.voiced_order),
-            len(self.live_turns),
-        )
-        self.live_turns.insert(index, turn)
-        for order, t in enumerate(self.live_turns):
-            t.order = order
-        self._turn_order = len(self.live_turns)
-
-    def _was_cut_off(self, seg: SpeechSegment) -> bool:
-        """True when user speech started while this bot segment was playing. BotStoppedSpeaking
-        can arrive just before UserStartedSpeaking on a barge-in, so check user start times too."""
-        if seg.interrupted_at_ms is not None:
-            return True
-        end_ms = seg.stop_ms or None
-        user_turns = [t for t in self.live_turns if t.kind == "user"]
-        if self._open_user_turn is not None:
-            user_turns.append(self._open_user_turn)
-        return any(
-            seg.start_ms <= t.start_ms and (end_ms is None or t.start_ms <= end_ms)
-            for t in user_turns
-        )
+        self._llm_started_ms = self._rel_ms(timestamp_ns)
+        self._latest_llm_text = ""
 
     def on_llm_text(self, text: str) -> None:
         """Accumulate a streamed LLM text chunk for the in-progress response."""
         if text:
             self._llm_response_buffer.append(text)
-            if self._open_agent_turn is not None:
-                self._open_agent_turn.text += text
+            self._latest_llm_text += text
 
     def on_llm_response_end(self, timestamp_ns: int) -> None:
-        """Finalize the in-progress LLM response. The assistant aggregator builds the context
-        message from these same chunks, so this also feeds the diagnostic generations list."""
+        """Finalize the in-progress LLM response into the diagnostic generations list."""
         self._finalize_llm_response(timestamp_ns)
-        if self._open_agent_turn is not None:
-            self._open_agent_turn.generated_ms = self._rel_ms(timestamp_ns)
 
-    def on_assistant_commit(self, timestamp_ns: int) -> None:
-        """Commit the in-progress assistant turn to the transcript.
+    def on_assistant_turn(
+        self, text: str | None, timestamp_ns: int, started_ns: int | None = None
+    ) -> None:
+        """Fill the agent row for the assistant turn Pipecat just committed to the LLM context.
 
-        Driven by ``LLMContextAssistantTimestampFrame``, which pipecat pushes exactly when it
-        commits an assistant message to the LLM context. An assistant response that never reaches
-        a commit (interrupted before it was committed) is therefore never appended — matching
-        pipecat's committed transcript precisely.
+        Driven by ``LLMContextAssistantTurnFrame``, the source Pipecat's EvalConversationObserver
+        uses: the text that was voiced, cut where the user interrupted. ``started_ns`` is when
+        that assistant turn started. Pipecat commits in the order it voiced, so the commit fills
+        the waiting voicings still playing when its turn started. A voicing Pipecat never commits
+        (cut off before any of it reached the context) is never filled and is left out.
+
+        ``text=None`` is Pipecat < 1.4, which marks the commit without its text; the row then uses
+        the voiced text.
         """
-        turn = self._open_agent_turn
-        if turn is not None and (turn.text.strip() or turn.bot_segment_id is not None):
-            self._append_live(turn)
-        self._open_agent_turn = None
+        started_ms = self._rel_ms(started_ns) if started_ns else None
+        voicings = [t for t in self.live_turns if self._waits_for_commit(t, started_ms)]
+        if not voicings:
+            # Committed but never voiced (e.g. skip_tts text): keep it, timed at the commit.
+            self._new_turn(
+                "agent",
+                text=text or "",
+                text_source="commit",
+                generated_ms=self._rel_ms(timestamp_ns),
+            )
+            return
+        turn, *rest = voicings
+        turn.text = text or ""
+        turn.text_source = "commit"
+        if rest:
+            # One reply voiced over several segments (a pause mid-reply) is one row.
+            turn.last_bot_segment_id = rest[-1].bot_segment_id
+            absorbed = {id(t) for t in rest}
+            self.live_turns = [t for t in self.live_turns if id(t) not in absorbed]
+
+    def _waits_for_commit(self, turn: LiveTurn, started_ms: int | None) -> bool:
+        """True for a voicing still waiting for its commit that was playing when the committed
+        turn started. Static speech never waits: Pipecat never commits it."""
+        if turn.kind != "agent" or turn.text_source is not None:
+            return False
+        seg = self._segment_by_id(turn.bot_segment_id)
+        if seg is None or not self._voiced_context_text(seg):
+            return False
+        return started_ms is None or seg.stop_ms is None or seg.stop_ms >= started_ms
+
+    def _voiced_context_text(self, seg: SpeechSegment) -> bool:
+        """Whether this voicing spoke text Pipecat commits. A voicing with no TTS text counts,
+        since its text cannot be told apart."""
+        if seg.stop_ms is not None:
+            return seg.context_text is not None or seg.static_text is None
+        window_start = seg.start_ms - _TTS_LEAD_SLACK_MS
+        flags = [in_context for _, ms, in_context in self._tts_timeline if ms >= window_start]
+        return not flags or any(flags)
+
+    def _close_voicing(self, seg: SpeechSegment, stop_ms: int) -> None:
+        """Claim the TTS sentences voiced in this segment's window, and give any static speech
+        in it a row: it never gets a commit, so its text is what was voiced.
+
+        Drops everything up to this stop (claimed + any older un-voiced/abandoned text) from the
+        timeline and keeps later TTS.
+        """
+        window_start = seg.start_ms - _TTS_LEAD_SLACK_MS
+        claimed = [(t, c) for t, ms, c in self._tts_timeline if window_start <= ms <= stop_ms]
+        self._tts_timeline = [entry for entry in self._tts_timeline if entry[1] > stop_ms]
+        if not claimed:
+            return
+        seg.spoken_text = " ".join(t for t, _ in claimed).strip() or None
+        seg.context_text = " ".join(t for t, c in claimed if c).strip() or None
+        seg.static_text = " ".join(t for t, c in claimed if not c).strip() or None
+        if seg.static_text is None:
+            return
+        index, turn = next(
+            (
+                (i, t)
+                for i, t in enumerate(self.live_turns)
+                if t.kind == "agent" and seg.id in (t.bot_segment_id, t.last_bot_segment_id)
+            ),
+            (None, None),
+        )
+        if index is None or turn is None:
+            return
+        if seg.context_text is None and turn.text_source is None:
+            turn.text, turn.text_source = seg.static_text, "voiced"
+            return
+        # Static speech ran into committed speech with no pause: its own row, in spoken order.
+        static_first = not claimed[0][1]
+        static = LiveTurn(
+            kind="agent",
+            order=turn.order,
+            bot_segment_id=seg.id,
+            text=seg.static_text,
+            text_source="voiced",
+        )
+        self.live_turns.insert(index if static_first else index + 1, static)
+
+    def _keep_trailing_voicings(self) -> None:
+        """Keep voicings still waiting for a commit at call end, after the last commit.
+
+        Pipecat commits the reply in progress on the closing EndFrame/CancelFrame, after the
+        observer has flushed, so these fall back to the voiced text. The last one falls back to
+        the LLM text when no TTS text was claimed for it. Waiting voicings before the last commit
+        were never committed and stay out.
+        """
+        last_commit = max(
+            (i for i, t in enumerate(self.live_turns) if t.text_source == "commit"), default=-1
+        )
+        trailing = [
+            t
+            for t in self.live_turns[last_commit + 1 :]
+            if t.kind == "agent" and t.text_source is None
+        ]
+        for turn in trailing:
+            seg = self._segment_by_id(turn.bot_segment_id)
+            text = seg.context_text if seg else None
+            if (
+                not text
+                and turn is trailing[-1]
+                and seg is not None
+                and self._llm_started_ms is not None
+                and seg.start_ms >= self._llm_started_ms
+            ):
+                text = self._latest_llm_text.strip()
+            if text:
+                turn.text, turn.text_source = text, "voiced"
 
     def on_vad_user_stopped_speaking(self, timestamp_ns: int) -> None:
         """Track the latest VAD-detected speech-end within the open user turn. A turn can
@@ -555,17 +620,8 @@ class CallAccumulator:
         if bot_seg is not None:
             stop_ms = self._rel_ms(timestamp_ns)
             bot_seg.stop_ms = stop_ms
-            # Claim TTS sentences voiced in this segment's window. Drop everything up to
-            # this stop (claimed + any older un-voiced/abandoned text), keep later TTS.
-            window_start = bot_seg.start_ms - _TTS_LEAD_SLACK_MS
-            claimed = [t for t, ms in self._tts_timeline if window_start <= ms <= stop_ms]
-            if claimed:
-                bot_seg.spoken_text = " ".join(claimed).strip() or None
-            self._tts_timeline = [(t, ms) for t, ms in self._tts_timeline if ms > stop_ms]
+            self._close_voicing(bot_seg, stop_ms)
             self._current_bot_segment_id = None
-            # NOTE: do NOT clear _open_agent_turn here — the assistant message commits slightly
-            # after the bot stops (LLMContextAssistantTimestampFrame), and that commit is what
-            # appends the turn. Clearing here would drop it.
         else:
             logger.warning("[tuner] bot_stopped with no active bot segment; ignoring event")
 
@@ -612,15 +668,9 @@ class CallAccumulator:
         )
         self.latency_measurements.append(self._pending_measurement)
 
-        # Bind this voicing to the in-progress (not-yet-committed) agent turn so the committed
-        # row picks up the segment's final timing/latency. If the bot spoke with no tracked LLM
-        # response (e.g. a static/templated greeting), open a turn here; its text falls back to
-        # the voiced TTS at assembly. The turn is appended only when its commit frame arrives.
-        if self._open_agent_turn is None:
-            self._open_agent_turn = LiveTurn(kind="agent", order=0)
-        if self._open_agent_turn.bot_segment_id is None:
-            self._open_agent_turn.bot_segment_id = seg.id
-            self._open_agent_turn.voiced_order = self._turn_order
+        # Place this voicing in the transcript now, in the order the caller heard it. Its text
+        # comes later: Pipecat's commit (on_assistant_turn), or the voiced text for static speech.
+        self._new_turn("agent", bot_segment_id=seg.id)
 
     def on_latency_measured(self, latency_secs: float) -> None:
         self._pending_latency_ms_queue.append(max(0, int(latency_secs * 1000)))
@@ -756,16 +806,12 @@ class CallAccumulator:
                 self._append_live(self._open_user_turn)
             self._open_user_turn = None
 
-        # Commit the final assistant turn if the bot was still speaking when the call ended
-        # (pipecat commits it on the closing Cancel/EndFrame). A turn that produced neither text
-        # nor a bot segment is dropped.
-        turn = self._open_agent_turn
-        if turn is not None and (turn.text.strip() or turn.bot_segment_id is not None):
-            bot_seg = self._segment_by_id(turn.bot_segment_id)
-            if bot_seg is not None and not bot_seg.stop_ms and bot_seg.start_ms > 0:
-                bot_seg.stop_ms = self._rel_ms(timestamp_ns)
-            self._append_live(turn)
-        self._open_agent_turn = None
+        # The bot was still speaking when the call ended: close its voicing at the call end.
+        bot_seg = self._segment_by_id(self._current_bot_segment_id)
+        if bot_seg is not None and not bot_seg.stop_ms and bot_seg.start_ms > 0:
+            bot_seg.stop_ms = self._rel_ms(timestamp_ns)
+            self._close_voicing(bot_seg, bot_seg.stop_ms)
+        self._keep_trailing_voicings()
 
     def on_metrics_frame(self, frame: Any) -> None:
         for d in getattr(frame, "data", []):

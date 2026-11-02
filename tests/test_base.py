@@ -90,7 +90,47 @@ def test_handle_tts_text_frame_routes_to_accumulator(observer):
     frame = TTSTextFrame(text="hello there", aggregated_by="sentence")
     with patch.object(observer._acc, "on_tts_text") as mock_on_tts:
         observer._handle(frame, 500)
-        mock_on_tts.assert_called_once_with("hello there", 500)
+        mock_on_tts.assert_called_once_with("hello there", 500, in_context=True)
+
+
+def test_handle_static_tts_text_frame_is_marked_out_of_context(observer):
+    from pipecat.frames.frames import TTSTextFrame
+
+    frame = TTSTextFrame(text="one moment", aggregated_by="sentence")
+    frame.append_to_context = False
+    with patch.object(observer._acc, "on_tts_text") as mock_on_tts:
+        observer._handle(frame, 500)
+        mock_on_tts.assert_called_once_with("one moment", 500, in_context=False)
+
+
+def test_handle_assistant_turn_frame_passes_committed_text_and_start(observer):
+    from pipecat.frames.frames import LLMContextAssistantTurnFrame
+
+    frame = LLMContextAssistantTurnFrame(
+        text="Hi there.", timestamp="2026-11-02T10:00:00.250+00:00"
+    )
+    with patch.object(observer._acc, "on_assistant_turn") as mock_turn:
+        observer._handle(frame, 500)
+        mock_turn.assert_called_once_with("Hi there.", 500, started_ns=1793613600250000000)
+
+
+def test_handle_assistant_timestamp_frame_is_ignored_when_turn_frames_exist(observer):
+    from pipecat.frames.frames import LLMContextAssistantTimestampFrame
+
+    with patch.object(observer._acc, "on_assistant_turn") as mock_turn:
+        observer._handle(LLMContextAssistantTimestampFrame(timestamp="2026-11-02T10:00:00Z"), 500)
+        mock_turn.assert_not_called()
+
+
+def test_handle_assistant_timestamp_frame_commits_without_text_on_older_pipecat(observer):
+    from pipecat.frames.frames import LLMContextAssistantTimestampFrame
+
+    with (
+        patch("tuner_pipecat_sdk._base.LLMContextAssistantTurnFrame", None),
+        patch.object(observer._acc, "on_assistant_turn") as mock_turn,
+    ):
+        observer._handle(LLMContextAssistantTimestampFrame(timestamp="2026-11-02T10:00:00Z"), 500)
+        mock_turn.assert_called_once_with(None, 500)
 
 
 def test_handle_function_call_result_records_completion(observer):

@@ -123,9 +123,12 @@ def build_agent_text_segment(
     interrupted: bool,
     turn_index: int,
     fallback_ms: int = 0,
+    last_seg: SpeechSegment | None = None,
 ) -> TranscriptSegment:
-    """Build the transcript row for a spoken agent turn, timed from `bot_seg` when the turn was
-    voiced, or from `fallback_ms` (generation time) for a draft that was never spoken."""
+    """Build the transcript row for a spoken agent turn, timed from `bot_seg` (to `last_seg` when
+    the turn was voiced over several segments), or from `fallback_ms` (commit time) for text that
+    was committed but never spoken."""
+    end_seg = last_seg or bot_seg
     is_proactive = bool(
         (measurement and measurement.is_proactive) or (bot_seg and bot_seg.is_proactive)
     )
@@ -133,13 +136,13 @@ def build_agent_text_segment(
     interrupted_at_ms = (
         measurement.interrupted_at_ms
         if measurement and measurement.interrupted_at_ms is not None
-        else (bot_seg.interrupted_at_ms if bot_seg else None)
+        else (end_seg.interrupted_at_ms if end_seg else None)
     )
-    # Voiced rows take their (final, latency-adjusted) timing from the bot segment. A generated-
-    # but-never-voiced draft has no segment — time it at its generation moment so it stays in the
-    # right place in the conversation (never 00:00).
+    # Voiced rows take their (final, latency-adjusted) timing from the bot segment. Committed but
+    # never voiced text has no segment — time it at its commit so it stays in the right place in
+    # the conversation (never 00:00).
     start_ms = bot_seg.start_ms if bot_seg else fallback_ms
-    end_ms = (bot_seg.stop_ms if bot_seg and bot_seg.stop_ms is not None else None) or fallback_ms
+    end_ms = (end_seg.stop_ms if end_seg and end_seg.stop_ms is not None else None) or fallback_ms
     return TranscriptSegment(
         role="agent",
         text=text,
@@ -194,16 +197,24 @@ def build_segments_from_turns(acc: CallAccumulator) -> list[TranscriptSegment]:
             last_agent_interrupted = False
 
         elif turn.kind == "agent":
+            if turn.text_source is None:
+                continue  # voiced, but Pipecat never committed it (cut off before any text)
             bot_seg = seg_by_id.get(turn.bot_segment_id)
+            last_seg = (
+                seg_by_id.get(turn.last_bot_segment_id)
+                if turn.last_bot_segment_id is not None
+                else None
+            )
             meas = meas_by_bot_id.get(turn.bot_segment_id)
-            # Agent text mirrors pipecat's UI render: the LLM-generated text. Falls back to the
-            # voiced text for a templated/static reply with no LLM generation.
-            text = turn.text.strip() or (bot_seg.spoken_text if bot_seg else "") or ""
+            # Agent text is what Pipecat committed to the LLM context. Pipecat < 1.4 commits
+            # without text, so fall back to what this voicing put in the context.
+            text = turn.text.strip() or (bot_seg.context_text if bot_seg else "") or ""
             if not text:
-                continue  # a response that only made a tool call → no agent text row
+                continue
             interrupted = bool(
                 (meas and meas.interrupted_at_ms is not None)
                 or (bot_seg and bot_seg.interrupted_at_ms is not None)
+                or (last_seg and last_seg.interrupted_at_ms is not None)
             )
             out.append(
                 build_agent_text_segment(
@@ -213,6 +224,7 @@ def build_segments_from_turns(acc: CallAccumulator) -> list[TranscriptSegment]:
                     interrupted=interrupted,
                     turn_index=turn_index,
                     fallback_ms=turn.generated_ms or 0,
+                    last_seg=last_seg,
                 )
             )
             last_agent_interrupted = interrupted

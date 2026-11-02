@@ -30,6 +30,10 @@ class SpeechSegment(BaseModel):
     stop_ms: int | None = None
     stt_ms: int | None = None
     spoken_text: str | None = None  # bot segments only — text actually voiced via TTS
+    # Bot segments only — spoken_text split by TTSTextFrame.append_to_context: the part Pipecat
+    # commits to the LLM context, and static speech (e.g. a TTSSpeakFrame greeting) it never does.
+    context_text: str | None = None
+    static_text: str | None = None
     # User segments only — one [start, stop] per VAD utterance. A coalesced turn (several
     # utterances before any bot reply) holds several windows, giving per-utterance timing
     # the single start/stop can't. Used by the enricher to align and gap-split user rows.
@@ -65,7 +69,10 @@ class LiveTurn:
     mirror of pipecat's own conversation construction (usePipecatConversation). The transcript is
     *not* reconstructed from the final LLM context; each turn is materialized when its frames
     arrive. Timing is read from the linked SpeechSegment/LatencyMeasurement at assembly (where it
-    is final, after latency adjustments); only an unvoiced draft falls back to ``generated_ms``.
+    is final, after latency adjustments); only an unvoiced commit falls back to ``generated_ms``.
+
+    An agent turn is placed when the bot starts speaking, so it sits where the caller heard it,
+    and gets its text later: from Pipecat's commit, or from the voiced text for static speech.
 
     kind: "user" | "agent" | "agent_function" | "agent_result".
     """
@@ -76,8 +83,12 @@ class LiveTurn:
     # exactly the transcriptions between two UserStoppedSpeaking boundaries — the same unit
     # pipecat's aggregator commits as one user message — so there is no silence-gap split/merge.
     chunks: list[tuple[str, int]] = field(default_factory=list)
-    # agent: joined LLM-generated text for this response.
+    # agent: the text Pipecat committed to the LLM context (LLMContextAssistantTurnFrame), or the
+    # voiced text for static speech.
     text: str = ""
+    # agent: where the text came from: "commit", "voiced", or None while the voicing still waits
+    # for its commit. A voicing Pipecat never commits stays None and is left out.
+    text_source: str | None = None
     # user row timing, captured live from the frames (not derived from segments).
     start_ms: int = 0
     end_ms: int | None = None
@@ -88,10 +99,9 @@ class LiveTurn:
     # Links into the latency/speech substrate (never matched by text).
     user_segment_id: int | None = None
     bot_segment_id: int | None = None
-    # agent: the transcript position when voicing started, used to place a voiced turn that
-    # never received a commit (see CallAccumulator._keep_voiced_turn).
-    voiced_order: int | None = None
-    # agent fallback timing when the turn was generated but never voiced (no bot segment).
+    # agent: the last bot segment of a commit voiced over several segments (a pause mid-reply).
+    last_bot_segment_id: int | None = None
+    # agent fallback timing when the turn was committed but never voiced (no bot segment).
     generated_ms: int | None = None
     # tool rows:
     tool_call_id: str | None = None
