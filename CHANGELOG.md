@@ -12,6 +12,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Static speech (`TTSSpeakFrame(append_to_context=False)`, e.g. a greeting or a step line) is kept as an agent row. It never reaches the LLM context, so it was dropped when the next LLM response started.
 - A fully voiced LLM reply whose context commit arrives after the next response starts (e.g. a read-back followed by a tool call) is kept, in the order it was spoken. A reply the user talked over is still dropped.
 
+These two fixes are temporary. A follow-up PR will build agent rows from the turns Pipecat commits to the LLM context, the source Pipecat's `EvalConversationObserver` uses (`LLMContextAssistantTurnFrame`), and keep the current capture only for timing and static speech. Tracked in #25.
+
 ---
 
 ## [0.2.9] 2026-10-19
