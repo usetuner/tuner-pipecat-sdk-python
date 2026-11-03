@@ -373,9 +373,14 @@ class CallAccumulator:
         rel = self._rel_ms(timestamp_ns)
         self.user_transcriptions.append((text, rel))  # kept for diagnostics
         if self._open_user_turn is None and self._last_user_turn is not None:
-            # STT can finalize the end of an utterance just after its turn closed. The caller
-            # hasn't spoken since and the bot hasn't replied, so it was said in that turn.
-            self._last_user_turn.chunks.append((text, rel))
+            # STT can finalize an utterance after its turn closed. The caller hasn't spoken
+            # since and the bot hasn't replied, so it was said in that turn.
+            turn = self._last_user_turn
+            if not turn.chunks:
+                # None of the turn's transcript had arrived when it closed, so it wasn't kept.
+                # It is now, with the times it was spoken.
+                self._append_live(turn)
+            turn.chunks.append((text, rel))
             return
         self._ensure_open_user_turn(rel).chunks.append((text, rel))
 
@@ -602,10 +607,11 @@ class CallAccumulator:
                 seg.windows.append([seg.start_ms, stopped_ms])
 
         if self._open_user_turn is not None:
+            self._open_user_turn.end_ms = stopped_ms
             if self._open_user_turn.chunks:
-                self._open_user_turn.end_ms = stopped_ms
                 self._append_live(self._open_user_turn)
-                self._last_user_turn = self._open_user_turn
+            # Kept even without a transcript yet: a late one still belongs to this turn.
+            self._last_user_turn = self._open_user_turn
             self._open_user_turn = None
 
     def on_function_call_result(self, frame: Any, timestamp_ns: int) -> None:

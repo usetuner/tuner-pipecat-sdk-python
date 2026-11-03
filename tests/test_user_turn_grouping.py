@@ -26,6 +26,26 @@ def test_a_late_transcript_joins_the_turn_it_was_said_in(replay, tuner_config):
     ]
 
 
+def test_a_turn_that_closed_before_its_transcript_keeps_its_times(replay, tuner_config):
+    """The whole transcript arrived after the turn closed (a slow STT response)."""
+    rows = (
+        replay()
+        .turn_start(1, 1000)
+        .user_start(1000)
+        .user_stop(1800)
+        .transcription("Sixty tablets every ninety days.", 14800)
+        .bot_says("Thanks. Is that right?", 16000, 17000)
+        .rows(tuner_config)
+    )
+    user = next(row for row in rows if row.role == "user")
+    assert (user.text, user.start_ms, user.end_ms) == (
+        "Sixty tablets every ninety days.",
+        1000,
+        1800,
+    )
+    assert [row.role for row in rows if row.role in ("user", "agent")] == ["user", "agent"]
+
+
 def test_a_transcript_after_the_bot_started_starts_a_new_turn(replay, tuner_config):
     rows = (
         replay()
