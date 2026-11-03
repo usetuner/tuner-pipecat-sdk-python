@@ -133,6 +133,9 @@ class CallAccumulator:
     _turn_order: int = field(default=0, repr=False)
     # The user turn currently accruing transcriptions (one per active user segment).
     _open_user_turn: LiveTurn | None = field(default=None, repr=False)
+    # The user turn committed last, until the bot starts speaking. A final transcript that lands
+    # after its turn closed, before the bot replies, belongs to it.
+    _last_user_turn: LiveTurn | None = field(default=None, repr=False)
     # The agent turn currently accruing LLM text / awaiting voicing.
     _open_agent_turn: LiveTurn | None = field(default=None, repr=False)
      # Timestamp (ns) of the most recent VAD-detected speech-end within the currently open
@@ -369,6 +372,11 @@ class CallAccumulator:
             return
         rel = self._rel_ms(timestamp_ns)
         self.user_transcriptions.append((text, rel))  # kept for diagnostics
+        if self._open_user_turn is None and self._last_user_turn is not None:
+            # STT can finalize the end of an utterance just after its turn closed. The caller
+            # hasn't spoken since and the bot hasn't replied, so it was said in that turn.
+            self._last_user_turn.chunks.append((text, rel))
+            return
         self._ensure_open_user_turn(rel).chunks.append((text, rel))
 
     def on_tts_text(self, text: str, timestamp_ns: int) -> None:
@@ -597,6 +605,7 @@ class CallAccumulator:
             if self._open_user_turn.chunks:
                 self._open_user_turn.end_ms = stopped_ms
                 self._append_live(self._open_user_turn)
+                self._last_user_turn = self._open_user_turn
             self._open_user_turn = None
 
     def on_function_call_result(self, frame: Any, timestamp_ns: int) -> None:
@@ -694,6 +703,14 @@ class CallAccumulator:
         re-pointing ``_response_user_segment_id``.
         """
         started_ms = self._rel_ms(timestamp_ns)
+        # The caller's turn ends where the bot's reply starts: what they said so far comes before
+        # the reply, and anything they say after it starts a new turn. Done first, so the user
+        # row is placed ahead of this voicing.
+        self._last_user_turn = None
+        if self._open_user_turn is not None and self._open_user_turn.chunks:
+            self._open_user_turn.end_ms = self._open_user_turn.chunks[-1][1]
+            self._append_live(self._open_user_turn)
+            self._open_user_turn = None
         is_proactive = self._response_user_segment_id is None  # bot speaks before any user turn
         response_key = -1 if is_proactive else self._response_user_segment_id
 
