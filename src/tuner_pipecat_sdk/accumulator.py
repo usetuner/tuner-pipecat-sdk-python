@@ -513,8 +513,9 @@ class CallAccumulator:
         )
 
     def on_llm_first_token(self, kind: str, observed_at_s: float, seconds: float) -> None:
-        """Record one LLM inference's time to first token, as ServiceMetricsObserver reports it."""
-        if self.call_start_abs_ns == 0:
+        """Record one LLM inference's time to first token, as ServiceMetricsObserver reports it.
+        A zero measurement, which pipecat can report before any inference ran, is skipped."""
+        if self.call_start_abs_ns == 0 or seconds <= 0:
             return
         observed_ms = round((observed_at_s - self.call_start_abs_ns / 1_000_000_000) * 1000)
         self.llm_first_token.append((observed_ms, round(seconds * 1000), kind))

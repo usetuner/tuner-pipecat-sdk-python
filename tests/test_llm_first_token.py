@@ -51,6 +51,17 @@ def test_without_service_metrics_llm_ttft_is_the_processing_time(replay, tuner_c
     assert _reply(r, tuner_config).metadata["llm_node_ttft"] == 2500
 
 
+def test_a_zero_measurement_is_not_a_first_token(replay, tuner_config):
+    """A static greeting has no inference; a zero TTFB reported before it must not become 0."""
+    r = replay()
+    r.acc.service_metrics = True
+    _first_token(r, "ttfb", 100, 0.0)
+    r.bot_says("welcome", 500, 900)
+    r.latency(0.05, "TTSService")
+    greeting = next(row for row in r.rows(tuner_config) if row.role == "agent")
+    assert "llm_node_ttft" not in greeting.metadata
+
+
 def test_an_inference_before_the_previous_reply_is_not_used(replay, tuner_config):
     r = replay()
     r.acc.service_metrics = True
