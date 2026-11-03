@@ -44,6 +44,11 @@ try:  # pipecat >= 1.9
 except ImportError:  # pragma: no cover - older pipecat reads the tool-call frames directly
     FunctionCallObserver = None  # type: ignore[assignment,misc,unused-ignore]
 
+try:  # pipecat >= 1.9
+    from pipecat.observers.service_metrics_observer import ServiceMetricsObserver
+except ImportError:  # pragma: no cover - older pipecat keeps the processing-time fallback
+    ServiceMetricsObserver = None  # type: ignore[assignment,misc,unused-ignore]
+
 from ._deprecation import warn_deprecated
 from ._providers import CARRIER_CALL_ID_READERS, PROVIDER_EXTRACTORS, ProviderExtractor
 from .accumulator import CallAccumulator
@@ -258,6 +263,20 @@ class _BaseObserver(BaseObserver):
                 # LangChain integrations record their tool calls themselves (see _handle).
                 if not self._langchain.active:
                     self._acc.on_function_call_event(event)
+
+        # Pipecat's ServiceMetricsObserver reports each service measurement as its own record.
+        # The LLM's time to first token (or first answer token) becomes llm_node_ttft.
+        self._service_metrics_observer = (
+            ServiceMetricsObserver() if ServiceMetricsObserver is not None else None
+        )
+        if self._service_metrics_observer is not None:
+            self._acc.service_metrics = True
+
+            @self._service_metrics_observer.event_handler("on_service_latency")
+            async def _on_service_latency(_observer: Any, record: Any) -> None:
+                kind = str(record.kind)
+                if kind == "ttfat" or (kind == "ttfb" and "llm" in record.processor.lower()):
+                    self._acc.on_llm_first_token(kind, record.timestamp, record.seconds)
 
         self._setup_trace_forwarding()
 
@@ -608,7 +627,11 @@ class _BaseObserver(BaseObserver):
         """The pipecat observers this observer feeds, as pipecat would feed them."""
         return [
             observer
-            for observer in (self._speaking_observer, self._function_call_observer)
+            for observer in (
+                self._speaking_observer,
+                self._function_call_observer,
+                self._service_metrics_observer,
+            )
             if observer is not None
         ]
 

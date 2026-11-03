@@ -146,6 +146,12 @@ class CallAccumulator:
     # True while SpeakingObserver feeds user_speech (pipecat >= 1.9). Agent rows then keep the
     # start seen at BotStartedSpeakingFrame, and latency runs from the end of the caller's speech.
     speech_timing: bool = False
+    # The LLM's time to its first token for each inference, as pipecat's ServiceMetricsObserver
+    # reports it: (observed_ms, ttft_ms, kind), kind "ttfat" (first answer token, after any
+    # thinking) or "ttfb". Matched to the reply that follows it, by time.
+    llm_first_token: list[tuple[int, int, str]] = field(default_factory=list)
+    # True while ServiceMetricsObserver feeds llm_first_token (pipecat >= 1.9).
+    service_metrics: bool = False
 
     # misc
     done: bool = False
@@ -492,7 +498,12 @@ class CallAccumulator:
         speech that ended after the previous bot segment started. That is the moment pipecat's
         UserBotLatencyObserver measures from: it keeps the latest VAD stop and consumes it each
         time the bot starts speaking."""
-        since_ms = max(
+        since_ms = self._previous_bot_start_ms(bot_seg)
+        ends = [e for _, e in self.user_speech if since_ms < e <= bot_seg.start_ms]
+        return max(ends) if ends else None
+
+    def _previous_bot_start_ms(self, bot_seg: SpeechSegment) -> int:
+        return max(
             (
                 s.start_ms
                 for s in self.speech_segments
@@ -500,8 +511,22 @@ class CallAccumulator:
             ),
             default=0,
         )
-        ends = [e for _, e in self.user_speech if since_ms < e <= bot_seg.start_ms]
-        return max(ends) if ends else None
+
+    def on_llm_first_token(self, kind: str, observed_at_s: float, seconds: float) -> None:
+        """Record one LLM inference's time to first token, as ServiceMetricsObserver reports it."""
+        if self.call_start_abs_ns == 0:
+            return
+        observed_ms = round((observed_at_s - self.call_start_abs_ns / 1_000_000_000) * 1000)
+        self.llm_first_token.append((observed_ms, round(seconds * 1000), kind))
+
+    def llm_first_token_before(self, bot_seg: SpeechSegment) -> int | None:
+        """Time to first token of the last inference before this bot segment started, since
+        the previous one: the inference whose answer it speaks. The first answer token wins
+        over the first byte where pipecat reports it, so a model's thinking isn't counted."""
+        since_ms = self._previous_bot_start_ms(bot_seg)
+        inside = [r for r in self.llm_first_token if since_ms < r[0] <= bot_seg.start_ms]
+        answer = [r for r in inside if r[2] == "ttfat"]
+        return (answer or inside)[-1][1] if inside else None
 
 
     def set_turn_eou(self, strategy_name: str, stop_timestamp_ns: int) -> None:
@@ -787,15 +812,21 @@ class CallAccumulator:
         # metric, falling back to the LLM's own TTFB — some providers (e.g.
         # Google/Gemini) emit a TTFB metric but no ProcessingMetricsData, which
         # would otherwise leave LLM latency blank.
-        measurement.llm_ms = (
-            self._pending_external_llm_duration_ms
-            if self._pending_external_llm_duration_ms is not None
-            else (
-                round(self._pending_pipecat_llm_processing_s * 1000)
-                if self._pending_pipecat_llm_processing_s
-                else llm_ttfb_ms
-            )
+        # ServiceMetricsObserver's time to first token, where pipecat reports one, is what
+        # llm_node_ttft names; processing time is the whole generation.
+        first_token_ms = (
+            self.llm_first_token_before(bot_seg)
+            if self.service_metrics and bot_seg is not None
+            else None
         )
+        if self._pending_external_llm_duration_ms is not None:
+            measurement.llm_ms = self._pending_external_llm_duration_ms
+        elif first_token_ms is not None:
+            measurement.llm_ms = first_token_ms
+        elif self._pending_pipecat_llm_processing_s:
+            measurement.llm_ms = round(self._pending_pipecat_llm_processing_s * 1000)
+        else:
+            measurement.llm_ms = llm_ttfb_ms
         measurement.tts_ms = (
             round(self._pending_pipecat_tts_processing_s * 1000)
             if self._pending_pipecat_tts_processing_s
