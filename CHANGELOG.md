@@ -16,7 +16,7 @@ These two fixes are temporary. A follow-up PR will build agent rows from the tur
 
 ---
 
-## [0.3.0] 2026-09-20
+## [0.3.0] 2026-11-03
 
 ### Added
 - **Call recordings** — pass `Observer(..., recording_file_extension="wav")` to opt a call into a presigned upload target. `Observer.audio_buffer()` returns a correctly configured pipecat `AudioBufferProcessor` (or `None` when recording is off), and the target arrives on the `on_recording_upload` event when the call is submitted.
