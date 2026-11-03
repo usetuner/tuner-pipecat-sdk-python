@@ -486,6 +486,13 @@ class CallAccumulator:
             return None
         return min(s for s, _ in inside), max(e for _, e in inside)
 
+    def speech_end_before(self, bot_start_ms: int, since_ms: int) -> int | None:
+        """When the caller last stopped speaking before the bot started, counting only speech
+        that ended after since_ms (the start of the user turn being answered). This is the
+        moment pipecat's UserBotLatencyObserver measures from."""
+        ends = [e for _, e in self.user_speech if since_ms < e <= bot_start_ms]
+        return max(ends) if ends else None
+
 
     def set_turn_eou(self, strategy_name: str, stop_timestamp_ns: int) -> None:
         """Decide EOU for the just-ended user turn, driven by on_user_turn_stopped.
@@ -762,14 +769,14 @@ class CallAccumulator:
             and (user_seg.stop_ms or 0) > 0
         ):
             measurement.e2e_ms = bot_seg.start_ms - user_seg.stop_ms
-            bounds = (
-                self.speech_bounds(user_seg.start_ms, user_seg.stop_ms)
+            speech_end_ms = (
+                self.speech_end_before(bot_seg.start_ms, since_ms=user_seg.start_ms)
                 if self.speech_timing
                 else None
             )
-            if bounds is not None:
+            if speech_end_ms is not None:
                 # What the caller waited: from the end of their speech to the bot's first audio.
-                measurement.e2e_ms = bot_seg.start_ms - bounds[1]
+                measurement.e2e_ms = bot_seg.start_ms - speech_end_ms
 
         self._pending_pipecat_llm_processing_s = 0.0
         self._pending_pipecat_tts_processing_s = 0.0

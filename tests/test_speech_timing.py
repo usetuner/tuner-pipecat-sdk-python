@@ -67,6 +67,36 @@ def test_without_speech_timing_the_queued_latency_moves_the_bot_start(replay, tu
     assert agent.metadata["e2e_latency"] == 1000
 
 
+def test_latency_counts_speech_after_the_turn_closed(replay, tuner_config):
+    """The caller kept talking after the turn closed, with nothing transcribed: they were still
+    speaking, so the wait starts when they stopped, as pipecat measures it."""
+    r = _call(replay)
+    r.turn_start(1, 1200).user_start(1200)
+    _speech(r, 1000, 1400)
+    r.transcription("hello", 1450).user_stop(1500)
+    _speech(r, 1600, 1800)
+    r.generate("hi", 2000, 2200).tts("hi", 2300).bot_start(2400)
+    r.latency(0.05, "TTSService", user_start_ms=1000).bot_stop(3000).turn_end(1)
+    rows = r.rows(tuner_config)
+    agent = next(row for row in rows if row.role == "agent")
+    assert _users(rows) == [(1000, 1400)]
+    assert agent.metadata["e2e_latency"] == 2400 - 1800
+
+
+def test_latency_ignores_speech_from_an_earlier_turn(replay, tuner_config):
+    r = _call(replay)
+    r.turn_start(1, 1200).user_start(1200)
+    _speech(r, 1000, 1400)
+    r.transcription("hello", 1450).user_stop(1900)
+    r.bot_says("hi", 2400, 3000)
+    r.turn_start(2, 4000).user_start(4000)  # no stretch reported for this turn
+    r.transcription("bye", 4100).user_stop(4600)
+    r.generate("goodbye", 4700, 4900).tts("goodbye", 5000).bot_start(5100)
+    r.latency(0.05, "TTSService", user_start_ms=4000).bot_stop(5600).turn_end(2)
+    agents = [row for row in r.rows(tuner_config) if row.role == "agent"]
+    assert agents[-1].metadata["e2e_latency"] == 5100 - 4600  # frame times, not turn 1's speech
+
+
 def test_a_turn_without_a_stretch_keeps_its_times_and_moves_nothing_else(replay, tuner_config):
     r = _call(replay)
     r.turn_start(1, 1200).user_start(1200).transcription("yes", 1300).user_stop(1700)
