@@ -39,6 +39,11 @@ except ImportError:  # pragma: no cover - older pipecat keeps the frame-arrival 
     SpeakingObserver = None  # type: ignore[assignment,misc,unused-ignore]
     SpeechEventKind = None  # type: ignore[assignment,misc,unused-ignore]
 
+try:  # pipecat >= 1.9
+    from pipecat.observers.function_call_observer import FunctionCallObserver
+except ImportError:  # pragma: no cover - older pipecat reads the tool-call frames directly
+    FunctionCallObserver = None  # type: ignore[assignment,misc,unused-ignore]
+
 from ._deprecation import warn_deprecated
 from ._providers import CARRIER_CALL_ID_READERS, PROVIDER_EXTRACTORS, ProviderExtractor
 from .accumulator import CallAccumulator
@@ -239,6 +244,20 @@ class _BaseObserver(BaseObserver):
             async def _on_speech_event(_observer: Any, event: Any) -> None:
                 if event.kind == SpeechEventKind.USER_SPEECH_STOPPED and event.started_at:
                     self._acc.on_user_speech(event.started_at, event.timestamp)
+
+        # Pipecat's FunctionCallObserver reports each tool call as it goes in progress and once
+        # as it settles: completed, failed, timed out or cancelled. Progress updates from a
+        # call that doesn't block are not results. Fed the same way as SpeakingObserver.
+        self._function_call_observer = (
+            FunctionCallObserver(include_results=True) if FunctionCallObserver is not None else None
+        )
+        if self._function_call_observer is not None:
+
+            @self._function_call_observer.event_handler("on_function_call_event")
+            async def _on_function_call_event(_observer: Any, event: Any) -> None:
+                # LangChain integrations record their tool calls themselves (see _handle).
+                if not self._langchain.active:
+                    self._acc.on_function_call_event(event)
 
         self._setup_trace_forwarding()
 
@@ -566,20 +585,37 @@ class _BaseObserver(BaseObserver):
         # relative to call_start_abs_ns, not the pipeline clock.
         if data.direction != FrameDirection.DOWNSTREAM:
             return
-        if data.frame.id in self._processed_frames:
-            return
-        self._processed_frames.add(data.frame.id)
-        self._frame_history.append(data.frame.id)
-        if len(self._processed_frames) > len(self._frame_history):
-            self._processed_frames = set(self._frame_history)
-        if self._speaking_observer is not None:
-            await self._speaking_observer.on_push_frame(data)
+        first_push = getattr(data, "first_push", None)
+        if first_push is not None:
+            # Pipecat >= 1.12 marks a frame's first push, the moment its own observers are told
+            # about it. A frame waiting in a processor's queue can come back after any number
+            # of other frames, so a window of recent ids can't tell it has been seen.
+            if not first_push:
+                return
+        else:
+            if data.frame.id in self._processed_frames:
+                return
+            self._processed_frames.add(data.frame.id)
+            self._frame_history.append(data.frame.id)
+            if len(self._processed_frames) > len(self._frame_history):
+                self._processed_frames = set(self._frame_history)
+        for observer in self._pipecat_observers:
+            await observer.on_push_frame(data)
         self._handle(data.frame, time.time_ns())
+
+    @property
+    def _pipecat_observers(self) -> list[BaseObserver]:
+        """The pipecat observers this observer feeds, as pipecat would feed them."""
+        return [
+            observer
+            for observer in (self._speaking_observer, self._function_call_observer)
+            if observer is not None
+        ]
 
     async def cleanup(self) -> None:
         await super().cleanup()
-        if self._speaking_observer is not None:
-            await self._speaking_observer.cleanup()
+        for observer in self._pipecat_observers:
+            await observer.cleanup()
 
     # Frame type-name substrings logged when debug=True. Covers the transcript-relevant frames
     # (speech boundaries, STT/LLM/TTS/aggregated text, the assistant-commit timestamp frame, tool
@@ -633,11 +669,11 @@ class _BaseObserver(BaseObserver):
             # call, that native service's tool calls would also be silently skipped
             # here. Not a supported configuration today (Observer expects at most one
             # tool-calling surface per call), but worth knowing if that ever changes.
-            if not self._langchain.active:
+            if not self._langchain.active and self._function_call_observer is None:
                 self._acc.on_function_call_in_progress(frame, timestamp_ns)
 
         elif isinstance(frame, FunctionCallResultFrame):
-            if not self._langchain.active:
+            if not self._langchain.active and self._function_call_observer is None:
                 self._acc.on_function_call_result(frame, timestamp_ns)
 
         elif isinstance(frame, MetricsFrame):

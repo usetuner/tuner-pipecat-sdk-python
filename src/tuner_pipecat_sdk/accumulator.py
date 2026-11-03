@@ -3,6 +3,7 @@
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any
 
 from loguru import logger
@@ -574,6 +575,37 @@ class CallAccumulator:
             result=getattr(frame, "result", None),
             occurrence_ms=self._rel_ms(timestamp_ns),
         )
+
+    # How a tool call that didn't return is recorded on its result row.
+    _UNSETTLED_RESULTS = {
+        "function_call_timed_out": {"timed_out": True},
+        "function_call_cancelled": {"cancelled": True},
+    }
+
+    def on_function_call_event(self, event: Any) -> None:
+        """One moment of a tool call, as pipecat's FunctionCallObserver reports it: a call row
+        when it goes in progress, and one result row when it settles. Timed at the moment
+        itself, which the event carries."""
+        kind = str(event.kind)
+        timestamp_ns = round(event.timestamp * 1_000_000_000)
+        call = SimpleNamespace(
+            function_name=event.function_name,
+            tool_call_id=event.tool_call_id,
+            arguments=event.arguments,
+            result=None,
+        )
+        if kind == "function_call_in_progress":
+            self.on_function_call_in_progress(call, timestamp_ns)
+            return
+        if kind == "function_call_completed":
+            call.result = event.result
+        elif kind == "function_call_failed":
+            call.result = {"error": event.error}
+        elif kind in self._UNSETTLED_RESULTS:
+            call.result = dict(self._UNSETTLED_RESULTS[kind])
+        else:
+            return  # started: the call row comes when it goes in progress
+        self.on_function_call_result(call, timestamp_ns)
 
     def on_bot_stopped(self, timestamp_ns: int) -> None:
         """Record the end of a bot speech segment.
