@@ -46,6 +46,22 @@ def test_a_turn_that_closed_before_its_transcript_keeps_its_times(replay, tuner_
     assert [row.role for row in rows if row.role in ("user", "agent")] == ["user", "agent"]
 
 
+def test_an_stt_metric_after_the_turn_closed_is_still_that_turns(replay, tuner_config):
+    rows = (
+        replay()
+        .turn_start(1, 1000)
+        .user_start(1000)
+        .transcription("Eh", 1200)
+        .user_stop(1900)
+        .transcription("That's all of them.", 2000)
+        .stt_ttfb(1.027)  # reported with the late transcript
+        .bot_says("Any as-needed medications?", 3000, 4000)
+        .rows(tuner_config)
+    )
+    user = next(row for row in rows if row.role == "user")
+    assert user.metadata["stt_node_ttfb"] == 1027
+
+
 def test_a_transcript_after_the_bot_started_starts_a_new_turn(replay, tuner_config):
     rows = (
         replay()

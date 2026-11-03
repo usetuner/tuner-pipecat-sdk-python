@@ -24,6 +24,10 @@ from .tool_timing_registry import ToolTimingRegistry
 # TTS lead, far below the multi-second gap to an interrupted-before-voiced response.
 _TTS_LEAD_SLACK_MS = 2000
 
+# UserStartedSpeakingFrame trails the speech it reports by the VAD's start_secs (0.2 s by
+# default). Speech that ended this long before a turn's start frame is still that turn's.
+_SPEECH_LEAD_MS = 500
+
 
 @dataclass
 class CallAccumulator(LegacyTiming):
@@ -498,8 +502,14 @@ class CallAccumulator(LegacyTiming):
 
     def speech_bounds(self, start_ms: int, end_ms: int) -> tuple[int, int] | None:
         """The caller's real speech within a user turn seen from start_ms to end_ms: the first
-        start and last end of the stretches overlapping it. None when no stretch overlaps."""
-        inside = [(s, e) for s, e in self.user_speech if s < end_ms and e > start_ms]
+        start and last end of the stretches overlapping it. None when no stretch overlaps.
+
+        start_ms is when UserStartedSpeakingFrame arrived, which trails the speech by the VAD's
+        start_secs. A stretch shorter than that ("Eh") ends before it, so stretches ending up
+        to _SPEECH_LEAD_MS earlier still count."""
+        inside = [
+            (s, e) for s, e in self.user_speech if s < end_ms and e > start_ms - _SPEECH_LEAD_MS
+        ]
         if not inside:
             return None
         return min(s for s, _ in inside), max(e for _, e in inside)
@@ -922,12 +932,11 @@ class CallAccumulator(LegacyTiming):
                     if seg is not None and val > 0 and seg.stt_ms is None:
                         seg.stt_ms = round(val * 1000)
                     # Also stamp the in-progress user turn (the first STT TTFB of the turn wins).
-                    if (
-                        self._open_user_turn is not None
-                        and val > 0
-                        and (self._open_user_turn.stt_ms is None)
-                    ):
-                        self._open_user_turn.stt_ms = round(val * 1000)
+                    # Like a late transcript, the metric can land just after its turn closed,
+                    # before the bot replies; it is still that turn's.
+                    turn = self._open_user_turn or self._last_user_turn
+                    if turn is not None and val > 0 and turn.stt_ms is None:
+                        turn.stt_ms = round(val * 1000)
 
             elif cls_name == "TurnMetricsData":
                 # Only an is_complete=True verdict is a real end-of-turn decision — the framework

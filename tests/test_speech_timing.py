@@ -44,6 +44,17 @@ def test_user_row_spans_the_callers_real_speech(replay, tuner_config):
     assert _users(r.rows(tuner_config)) == [(1000, 1400)]
 
 
+def test_a_stretch_shorter_than_the_vad_start_delay_is_kept(replay, tuner_config):
+    """'Eh' (0.18 s) ends before UserStartedSpeakingFrame arrives, 0.2 s after it began."""
+    r = _call(replay)
+    r.turn_start(1, 192643).user_start(192643)
+    _speech(r, 192442, 192621)
+    _speech(r, 193274, 193701)
+    r.transcription("Eh", 193816).user_stop(194634).transcription("That's all of them.", 194728)
+    r.bot_says("Any as-needed medications?", 196803, 199000)
+    assert _users(r.rows(tuner_config)) == [(192442, 193701)]
+
+
 def _reply_after_speech(replay, tuner_config, *, speech_timing):
     r = _call(replay, speech_timing=speech_timing)
     r.turn_start(1, 1200).user_start(1200)
