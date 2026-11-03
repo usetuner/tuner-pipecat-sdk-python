@@ -487,11 +487,20 @@ class CallAccumulator:
             return None
         return min(s for s, _ in inside), max(e for _, e in inside)
 
-    def speech_end_before(self, bot_start_ms: int, since_ms: int) -> int | None:
-        """When the caller last stopped speaking before the bot started, counting only speech
-        that ended after since_ms (the start of the user turn being answered). This is the
-        moment pipecat's UserBotLatencyObserver measures from."""
-        ends = [e for _, e in self.user_speech if since_ms < e <= bot_start_ms]
+    def speech_end_before(self, bot_seg: SpeechSegment) -> int | None:
+        """When the caller last stopped speaking before this bot segment started, counting only
+        speech that ended after the previous bot segment started. That is the moment pipecat's
+        UserBotLatencyObserver measures from: it keeps the latest VAD stop and consumes it each
+        time the bot starts speaking."""
+        since_ms = max(
+            (
+                s.start_ms
+                for s in self.speech_segments
+                if s.speaker == "bot" and s.id != bot_seg.id and s.start_ms < bot_seg.start_ms
+            ),
+            default=0,
+        )
+        ends = [e for _, e in self.user_speech if since_ms < e <= bot_seg.start_ms]
         return max(ends) if ends else None
 
 
@@ -801,11 +810,7 @@ class CallAccumulator:
             and (user_seg.stop_ms or 0) > 0
         ):
             measurement.e2e_ms = bot_seg.start_ms - user_seg.stop_ms
-            speech_end_ms = (
-                self.speech_end_before(bot_seg.start_ms, since_ms=user_seg.start_ms)
-                if self.speech_timing
-                else None
-            )
+            speech_end_ms = self.speech_end_before(bot_seg) if self.speech_timing else None
             if speech_end_ms is not None:
                 # What the caller waited: from the end of their speech to the bot's first audio.
                 measurement.e2e_ms = bot_seg.start_ms - speech_end_ms

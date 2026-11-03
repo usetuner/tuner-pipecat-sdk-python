@@ -83,6 +83,19 @@ def test_latency_counts_speech_after_the_turn_closed(replay, tuner_config):
     assert agent.metadata["e2e_latency"] == 2400 - 1800
 
 
+def test_latency_uses_the_speech_end_pipecat_sends_as_the_turn_start(replay, tuner_config):
+    """Pipecat 1.12's breakdown carries user_turn_start_time set to the user's stop time, and
+    the accumulator writes it onto the user segment's start. Latency must still find the stop."""
+    r = _call(replay)
+    r.turn_start(1, 1200).user_start(1200)
+    _speech(r, 1000, 1400)
+    r.transcription("hello", 1450).user_stop(1900)
+    r.generate("hi", 2000, 2200).tts("hi", 2300).bot_start(2400)
+    r.latency(0.05, "TTSService", user_start_ms=1400).bot_stop(3000).turn_end(1)
+    agent = next(row for row in r.rows(tuner_config) if row.role == "agent")
+    assert agent.metadata["e2e_latency"] == 2400 - 1400
+
+
 def test_latency_ignores_speech_from_an_earlier_turn(replay, tuner_config):
     r = _call(replay)
     r.turn_start(1, 1200).user_start(1200)
