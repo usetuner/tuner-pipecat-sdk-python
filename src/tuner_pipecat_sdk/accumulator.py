@@ -1,6 +1,5 @@
 """Collector concern: ingest Pipecat events and maintain call runtime state."""
 
-from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from types import SimpleNamespace
@@ -8,6 +7,7 @@ from typing import Any
 
 from loguru import logger
 
+from ._pipecat_compat import LegacyTiming
 from .models import (
     CallPayload,
     CallUsage,
@@ -26,8 +26,9 @@ _TTS_LEAD_SLACK_MS = 2000
 
 
 @dataclass
-class CallAccumulator:
-    """Collects runtime events and produces a final call payload."""
+class CallAccumulator(LegacyTiming):
+    """Collects runtime events and produces a final call payload. Timing used only without
+    pipecat's newer observers comes from LegacyTiming (_pipecat_compat)."""
 
     # call-level timing
     call_start_abs_ns: int = 0
@@ -76,9 +77,6 @@ class CallAccumulator:
     # LLMFullResponseStartFrame and LLMFullResponseEndFrame, then finalized into
     # assistant_generations at the End frame.
     _llm_response_buffer: list[str] = field(default_factory=list, repr=False)
-
-    # Ordered pairing for latency observer callbacks (on_latency_measured then breakdown).
-    _pending_latency_ms_queue: deque[int] = field(default_factory=deque, repr=False)
 
     # tool call timing keyed by tool_call_id
     registry: ToolTimingRegistry = field(default_factory=ToolTimingRegistry)
@@ -746,9 +744,6 @@ class CallAccumulator:
             self._open_agent_turn.bot_segment_id = seg.id
             self._open_agent_turn.voiced_order = self._turn_order
 
-    def on_latency_measured(self, latency_secs: float) -> None:
-        self._pending_latency_ms_queue.append(max(0, int(latency_secs * 1000)))
-
     def on_latency_breakdown(self, breakdown: Any) -> None:
         measurement = self._pending_measurement
         if measurement is None:
@@ -786,19 +781,9 @@ class CallAccumulator:
             # computed_started_ms == 0: user spoke within the first milliseconds of the call.
             # Frame events already captured the correct timing via on_turn_started — skip.
 
-        if self._pending_latency_ms_queue:
-            latency_ms = self._pending_latency_ms_queue.popleft()
-            # With speech timing, the bot start stays as observed and e2e is measured from the
-            # caller's speech below, so the queued latency is not used to move the row.
-            if (
-                not self.speech_timing
-                and is_real_user_turn
-                and bot_seg is not None
-                and user_seg is not None
-                and not bot_seg.interrupted_at_ms
-                and (user_seg.stop_ms or 0) > 0
-            ):
-                bot_seg.start_ms = user_seg.stop_ms + latency_ms
+        self._apply_queued_latency(
+            bot_seg, user_seg, is_real_user_turn=is_real_user_turn, speech_timing=self.speech_timing
+        )
 
         # Per-processor TTFB from the breakdown (each entry carries its processor name) so each
         # node's latency is attributed to the right node. NOTE: "GoogleSTTService".lower()
@@ -829,15 +814,11 @@ class CallAccumulator:
         # LLM latency. Prefer an externally-sourced call duration when this turn went
         # through observer.wrap_graph()/wrap_chain() — pipecat's LangchainProcessor
         # is a bare FrameProcessor, not an LLMService, so it never emits the
-        # MetricsFrame data the other two sources below depend on; this is the only
+        # MetricsFrame data the other sources depend on; this is the only
         # number that ever exists for those turns. Note this is total on_llm_start->
-        # on_llm_end duration, not strictly time-to-first-token like the pipecat-
-        # sourced fallbacks below aim for. Otherwise prefer the processing-time
-        # metric, falling back to the LLM's own TTFB — some providers (e.g.
-        # Google/Gemini) emit a TTFB metric but no ProcessingMetricsData, which
-        # would otherwise leave LLM latency blank.
-        # ServiceMetricsObserver's time to first token, where pipecat reports one, is what
-        # llm_node_ttft names; processing time is the whole generation.
+        # on_llm_end duration, not strictly time-to-first-token. Otherwise use
+        # ServiceMetricsObserver's time to first token, which is what llm_node_ttft names,
+        # and without it (pipecat < 1.9) the processing time of the turn's inferences.
         first_token_ms = (
             self.llm_first_token_before(bot_seg)
             if self.service_metrics and bot_seg is not None
@@ -847,10 +828,10 @@ class CallAccumulator:
             measurement.llm_ms = self._pending_external_llm_duration_ms
         elif first_token_ms is not None:
             measurement.llm_ms = first_token_ms
-        elif self._pending_pipecat_llm_processing_s:
-            measurement.llm_ms = round(self._pending_pipecat_llm_processing_s * 1000)
         else:
-            measurement.llm_ms = llm_ttfb_ms
+            measurement.llm_ms = self._processing_llm_ms(
+                self._pending_pipecat_llm_processing_s, llm_ttfb_ms
+            )
         measurement.tts_ms = (
             round(self._pending_pipecat_tts_processing_s * 1000)
             if self._pending_pipecat_tts_processing_s
@@ -864,11 +845,12 @@ class CallAccumulator:
             and bot_seg.start_ms > 0
             and (user_seg.stop_ms or 0) > 0
         ):
-            measurement.e2e_ms = bot_seg.start_ms - user_seg.stop_ms
+            # What the caller waited: from the end of their speech to the bot's first audio.
+            # Without a speech stretch (pipecat < 1.9), the end is UserStoppedSpeakingFrame.
             speech_end_ms = self.speech_end_before(bot_seg) if self.speech_timing else None
-            if speech_end_ms is not None:
-                # What the caller waited: from the end of their speech to the bot's first audio.
-                measurement.e2e_ms = bot_seg.start_ms - speech_end_ms
+            measurement.e2e_ms = bot_seg.start_ms - (
+                speech_end_ms if speech_end_ms is not None else user_seg.stop_ms
+            )
 
         self._pending_pipecat_llm_processing_s = 0.0
         self._pending_pipecat_tts_processing_s = 0.0

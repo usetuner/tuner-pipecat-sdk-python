@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import os
 import time
-from collections import deque
 from collections.abc import Callable
 from typing import Any
 
@@ -33,23 +32,14 @@ from pipecat.observers.base_observer import BaseObserver, FramePushed
 from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
 from pipecat.processors.frame_processor import FrameDirection
 
-try:  # pipecat >= 1.9
-    from pipecat.observers.speaking_observer import SpeakingObserver, SpeechEventKind
-except ImportError:  # pragma: no cover - older pipecat keeps the frame-arrival timing
-    SpeakingObserver = None  # type: ignore[assignment,misc,unused-ignore]
-    SpeechEventKind = None  # type: ignore[assignment,misc,unused-ignore]
-
-try:  # pipecat >= 1.9
-    from pipecat.observers.function_call_observer import FunctionCallObserver
-except ImportError:  # pragma: no cover - older pipecat reads the tool-call frames directly
-    FunctionCallObserver = None  # type: ignore[assignment,misc,unused-ignore]
-
-try:  # pipecat >= 1.9
-    from pipecat.observers.service_metrics_observer import ServiceMetricsObserver
-except ImportError:  # pragma: no cover - older pipecat keeps the processing-time fallback
-    ServiceMetricsObserver = None  # type: ignore[assignment,misc,unused-ignore]
-
 from ._deprecation import warn_deprecated
+from ._pipecat_compat import (
+    FrameDedupe,
+    FunctionCallObserver,
+    ServiceMetricsObserver,
+    SpeakingObserver,
+    SpeechEventKind,
+)
 from ._providers import CARRIER_CALL_ID_READERS, PROVIDER_EXTRACTORS, ProviderExtractor
 from .accumulator import CallAccumulator
 from .client import post_call
@@ -208,11 +198,8 @@ class _BaseObserver(BaseObserver):
         self._sip_internal = False
         self._langchain: LangchainIntegration = LangchainIntegration(self._acc)
         # As a pipeline-level observer, on_push_frame fires once PER processor hop, so the
-        # same frame is seen many times. Dedup by frame id (bounded deque + set, mirroring
-        # pipecat's UserBotLatencyObserver). All hops of a frame occur back-to-back in one
-        # downstream traversal, so a modest window is sufficient.
-        self._processed_frames: set[int] = set()
-        self._frame_history: deque[int] = deque(maxlen=256)
+        # same frame is seen many times; FrameDedupe keeps the first (see _pipecat_compat).
+        self._dedupe = FrameDedupe()
         self._disconnection_reason_resolver = disconnection_reason_resolver
         self._cost_calculator = cost_calculator
 
@@ -602,22 +589,8 @@ class _BaseObserver(BaseObserver):
         # Only the downstream pass matters, and each frame must be handled once (it fires
         # once per hop). Stamp with wall-clock time — the accumulator works in time.time_ns()
         # relative to call_start_abs_ns, not the pipeline clock.
-        if data.direction != FrameDirection.DOWNSTREAM:
+        if data.direction != FrameDirection.DOWNSTREAM or not self._dedupe.first_time(data):
             return
-        first_push = getattr(data, "first_push", None)
-        if first_push is not None:
-            # Pipecat >= 1.12 marks a frame's first push, the moment its own observers are told
-            # about it. A frame waiting in a processor's queue can come back after any number
-            # of other frames, so a window of recent ids can't tell it has been seen.
-            if not first_push:
-                return
-        else:
-            if data.frame.id in self._processed_frames:
-                return
-            self._processed_frames.add(data.frame.id)
-            self._frame_history.append(data.frame.id)
-            if len(self._processed_frames) > len(self._frame_history):
-                self._processed_frames = set(self._frame_history)
         for observer in self._pipecat_observers:
             await observer.on_push_frame(data)
         self._handle(data.frame, time.time_ns())
@@ -692,6 +665,8 @@ class _BaseObserver(BaseObserver):
             # call, that native service's tool calls would also be silently skipped
             # here. Not a supported configuration today (Observer expects at most one
             # tool-calling surface per call), but worth knowing if that ever changes.
+            # With FunctionCallObserver, tool rows come from its events instead; these two
+            # branches are for pipecat < 1.9.
             if not self._langchain.active and self._function_call_observer is None:
                 self._acc.on_function_call_in_progress(frame, timestamp_ns)
 
