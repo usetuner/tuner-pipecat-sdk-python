@@ -33,6 +33,12 @@ from pipecat.observers.base_observer import BaseObserver, FramePushed
 from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
 from pipecat.processors.frame_processor import FrameDirection
 
+try:  # pipecat >= 1.9
+    from pipecat.observers.speaking_observer import SpeakingObserver, SpeechEventKind
+except ImportError:  # pragma: no cover - older pipecat keeps the frame-arrival timing
+    SpeakingObserver = None  # type: ignore[assignment,misc,unused-ignore]
+    SpeechEventKind = None  # type: ignore[assignment,misc,unused-ignore]
+
 from ._deprecation import warn_deprecated
 from ._providers import CARRIER_CALL_ID_READERS, PROVIDER_EXTRACTORS, ProviderExtractor
 from .accumulator import CallAccumulator
@@ -221,6 +227,18 @@ class _BaseObserver(BaseObserver):
         @self._latency_observer.event_handler("on_latency_breakdown")
         async def _on_latency_breakdown(_observer: Any, breakdown: Any) -> None:
             self._acc.on_latency_breakdown(breakdown)
+
+        # Pipecat's SpeakingObserver times the caller's speech from when it really began and
+        # ended. It is fed the frames this observer handles (see on_push_frame), so integrations
+        # register nothing extra, and it reports each stretch as it ends.
+        self._speaking_observer = SpeakingObserver() if SpeakingObserver is not None else None
+        if self._speaking_observer is not None:
+            self._acc.speech_timing = True
+
+            @self._speaking_observer.event_handler("on_speech_event")
+            async def _on_speech_event(_observer: Any, event: Any) -> None:
+                if event.kind == SpeechEventKind.USER_SPEECH_STOPPED and event.started_at:
+                    self._acc.on_user_speech(event.started_at, event.timestamp)
 
         self._setup_trace_forwarding()
 
@@ -554,7 +572,14 @@ class _BaseObserver(BaseObserver):
         self._frame_history.append(data.frame.id)
         if len(self._processed_frames) > len(self._frame_history):
             self._processed_frames = set(self._frame_history)
+        if self._speaking_observer is not None:
+            await self._speaking_observer.on_push_frame(data)
         self._handle(data.frame, time.time_ns())
+
+    async def cleanup(self) -> None:
+        await super().cleanup()
+        if self._speaking_observer is not None:
+            await self._speaking_observer.cleanup()
 
     # Frame type-name substrings logged when debug=True. Covers the transcript-relevant frames
     # (speech boundaries, STT/LLM/TTS/aggregated text, the assistant-commit timestamp frame, tool

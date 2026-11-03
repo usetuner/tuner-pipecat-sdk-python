@@ -138,6 +138,13 @@ class CallAccumulator:
     # user turn. Anchors the silence-timeout EOU fallback below when no turn-analyzer
     # verdict arrives before the turn commits. Reset after each turn closes.
     _last_vad_stop_ns: int | None = field(default=None, repr=False)
+    # The caller's speech as pipecat's SpeakingObserver times it, as (start_ms, end_ms): when it
+    # really began and ended, with the VAD's confirmation delay taken off. Matched to user turns
+    # by time overlap when rows are built, never by order, so a missed stretch moves nothing else.
+    user_speech: list[tuple[int, int]] = field(default_factory=list)
+    # True while SpeakingObserver feeds user_speech (pipecat >= 1.9). Agent rows then keep the
+    # start seen at BotStartedSpeakingFrame, and latency runs from the end of the caller's speech.
+    speech_timing: bool = False
 
     # misc
     done: bool = False
@@ -459,6 +466,26 @@ class CallAccumulator:
         recent one seen; set_turn_eou decides whether it's needed."""
         self._last_vad_stop_ns = timestamp_ns
 
+    def on_user_speech(self, started_at_s: float, stopped_at_s: float) -> None:
+        """Record one stretch of the caller's speech, in unix seconds, as SpeakingObserver
+        reports it when the stretch ends."""
+        if self.call_start_abs_ns == 0:
+            return
+        call_start_s = self.call_start_abs_ns / 1_000_000_000
+        # Rounded, not truncated: float seconds would otherwise lose a millisecond.
+        start_ms = max(0, round((started_at_s - call_start_s) * 1000))
+        end_ms = max(0, round((stopped_at_s - call_start_s) * 1000))
+        if end_ms > start_ms:
+            self.user_speech.append((start_ms, end_ms))
+
+    def speech_bounds(self, start_ms: int, end_ms: int) -> tuple[int, int] | None:
+        """The caller's real speech within a user turn seen from start_ms to end_ms: the first
+        start and last end of the stretches overlapping it. None when no stretch overlaps."""
+        inside = [(s, e) for s, e in self.user_speech if s < end_ms and e > start_ms]
+        if not inside:
+            return None
+        return min(s for s, _ in inside), max(e for _, e in inside)
+
 
     def set_turn_eou(self, strategy_name: str, stop_timestamp_ns: int) -> None:
         """Decide EOU for the just-ended user turn, driven by on_user_turn_stopped.
@@ -664,8 +691,11 @@ class CallAccumulator:
 
         if self._pending_latency_ms_queue:
             latency_ms = self._pending_latency_ms_queue.popleft()
+            # With speech timing, the bot start stays as observed and e2e is measured from the
+            # caller's speech below, so the queued latency is not used to move the row.
             if (
-                is_real_user_turn
+                not self.speech_timing
+                and is_real_user_turn
                 and bot_seg is not None
                 and user_seg is not None
                 and not bot_seg.interrupted_at_ms
@@ -732,6 +762,14 @@ class CallAccumulator:
             and (user_seg.stop_ms or 0) > 0
         ):
             measurement.e2e_ms = bot_seg.start_ms - user_seg.stop_ms
+            bounds = (
+                self.speech_bounds(user_seg.start_ms, user_seg.stop_ms)
+                if self.speech_timing
+                else None
+            )
+            if bounds is not None:
+                # What the caller waited: from the end of their speech to the bot's first audio.
+                measurement.e2e_ms = bot_seg.start_ms - bounds[1]
 
         self._pending_pipecat_llm_processing_s = 0.0
         self._pending_pipecat_tts_processing_s = 0.0
