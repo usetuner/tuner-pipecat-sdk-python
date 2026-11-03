@@ -6,6 +6,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [Unreleased]
+
+### Fixed
+- Static speech (`TTSSpeakFrame(append_to_context=False)`, e.g. a greeting or a step line) is kept as an agent row. It never reaches the LLM context, so it was dropped when the next LLM response started.
+- A fully voiced LLM reply whose context commit arrives after the next response starts (e.g. a read-back followed by a tool call) is kept, in the order it was spoken. A reply the user talked over is still dropped.
+
+These two fixes are temporary. A follow-up PR will build agent rows from the turns Pipecat commits to the LLM context, the source Pipecat's `EvalConversationObserver` uses (`LLMContextAssistantTurnFrame`), and keep the current capture only for timing and static speech. Tracked in #25.
+
+---
+
 ## [0.3.0] 2026-09-20
 
 ### Added
@@ -19,6 +29,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Notes
 - **The SDK never uploads a recording.** It issues the target and hands it over; when, whether and how to upload is the agent owner's decision. Uploading here would put a multi-megabyte POST on the call's teardown path inside a task nobody awaits, where a process exiting would truncate it.
 - The presigned target expires. Anything that queues it for later must upload inside that window — the expiry is embedded in the base64 `fields["policy"]` and is not surfaced as its own field.
+
+---
+
+## [0.2.9] 2026-10-19
+
+### Added
+- Unified telephony API: `extract_sip(payload, provider=) -> SipInfo`, `forward_to_websocket(info, ws_url=) -> Forward`, `Observer.attach_sip(info, sip_call_id=, sip_headers=, recipient=)`, `register_provider(provider)`. Built-in providers: twilio, telnyx, plivo, exotel, jambonz, daily.
+- Twilio forward: `Forward.twiml` (`<Stream><Parameter>` per SIP field). Telnyx forward: `Forward.stream`, the `streaming_start` body with `X-Correlation-Id`, `SipCallId` and `Recipient` as `custom_parameters`; `extract_sip` reads them back from `start.custom_parameters`.
+- Outbound `recipient` travels as a stream parameter and is reported by `attach_sip`.
+
+### Deprecated
+- `attach_sip_from_telephony` (and callable extractors), `attach_sip_info`, `attach_sip_from_context`, `attach_sip_from_dialin`, `providers.twilio.build_sip_forwarding_twiml`. They still work and warn once.
+
+### Fixed
+- Twilio `SipHeader_*` parameters are also stored under the bare header name (e.g. `X-Correlation-Id`), so Tuner can link simulations.
+- `attach_sip_info` merges `sip_headers` instead of replacing them: first non-empty value wins, names compared case-insensitively. A sparse later event no longer wipes earlier headers.
+- Twilio `CallSid` and Telnyx `call_control_id` only fill `sip_call_id` when it is empty; a real SIP Call-ID replaces them but never another real one.
+- Full call reports (phone numbers, SIP headers) are no longer logged at INFO.
+- A malformed or oversized `X-Correlation-Id` is dropped instead of reported (`valid_correlation_id`, same rules as tuner-livekit-sdk).
 
 ---
 

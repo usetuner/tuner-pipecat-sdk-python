@@ -63,6 +63,8 @@ _DEFAULT_FORWARDED_FIELDS: tuple[str, ...] = (
     "Direction",
 )
 
+_SIP_HEADER_PREFIX = "SipHeader_"
+
 # Case-insensitive aliases the SIP-layer Call-ID is commonly forwarded under
 # inside the WS ``customParameters`` (Twilio's ``body``).
 _SIP_CALL_ID_ALIASES: tuple[str, ...] = (
@@ -120,6 +122,11 @@ class TwilioCallContext:
             if v is None:
                 continue
             headers[str(k)] = str(v)
+        # Twilio prefixes INVITE headers with ``SipHeader_``; also keep the
+        # bare name so Tuner can match e.g. ``X-Correlation-Id``.
+        for k, v in list(headers.items()):
+            if k.startswith(_SIP_HEADER_PREFIX) and len(k) > len(_SIP_HEADER_PREFIX):
+                headers.setdefault(k[len(_SIP_HEADER_PREFIX) :], v)
 
         lowered = {k.lower(): v for k, v in headers.items()}
         sip_call_id: str | None = None
@@ -167,7 +174,10 @@ def build_sip_forwarding_twiml(
     extra_params: Mapping[str, str] | None = None,
     pause_seconds: int = 40,
 ) -> str:
-    """Build a TwiML response that forwards SIP fields to your WebSocket.
+    """Deprecated: use ``forward_to_websocket(extract_sip(form, provider="twilio"),
+    ws_url=...).twiml``.
+
+    Build a TwiML response that forwards SIP fields to your WebSocket.
 
     Twilio's HTTP voice webhook receives SIP context on the form body, but
     the Media Streams WebSocket drops those fields by default. This
@@ -190,6 +200,9 @@ def build_sip_forwarding_twiml(
     The returned string is well-formed XML; pass it as
     ``Response(content=xml, media_type="application/xml")``.
     """
+    from .._deprecation import warn_deprecated
+
+    warn_deprecated("build_sip_forwarding_twiml", "forward_to_websocket(...).twiml")
     forwarded: dict[str, str] = {}
     for field_name in forwarded_fields:
         v = form.get(field_name)
@@ -197,7 +210,7 @@ def build_sip_forwarding_twiml(
             forwarded[field_name] = str(v)
     for key, value in form.items():
         key_str = str(key)
-        if key_str.startswith("SipHeader_") and value:
+        if key_str.startswith(_SIP_HEADER_PREFIX) and value:
             forwarded[key_str] = str(value)
     if extra_params:
         for k, v in extra_params.items():

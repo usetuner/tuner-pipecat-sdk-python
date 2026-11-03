@@ -375,13 +375,54 @@ class CallAccumulator:
 
         The previous open turn, if it never received a commit (LLMContextAssistantTimestampFrame),
         is abandoned here: pipecat discards an assistant response that was interrupted before it
-        committed, so we mirror that by simply not appending it.
+        committed, so we mirror that by simply not appending it. A turn that was voiced and not
+        cut off is kept instead (see ``_keep_voiced_turn``).
         """
+        if self._open_agent_turn is not None:
+            self._keep_voiced_turn(self._open_agent_turn)
         if self._llm_response_buffer:
             self._finalize_llm_response(0)
         self._llm_response_buffer = []
         self._open_agent_turn = LiveTurn(
             kind="agent", order=0, generated_ms=self._rel_ms(timestamp_ns)
+        )
+
+    def _keep_voiced_turn(self, turn: LiveTurn) -> None:
+        """Keep an uncommitted agent turn the caller actually heard.
+
+        Two kinds of voiced speech never get a commit before the next LLM response starts:
+        static speech (a TTSSpeakFrame with append_to_context=False, e.g. a greeting or a
+        transition line, which has no LLM text) and an LLM reply whose commit lags behind the
+        next response (e.g. a read-back followed by a tool call). Static speech is always kept.
+        An LLM reply is kept only if no user speech started during it, so interrupted replies
+        are still dropped like pipecat does. The turn goes back to where it was voiced.
+        """
+        seg = self._segment_by_id(turn.bot_segment_id)
+        if seg is None or turn.voiced_order is None:
+            return
+        if turn.text.strip() and self._was_cut_off(seg):
+            return
+        index = next(
+            (i for i, t in enumerate(self.live_turns) if t.order >= turn.voiced_order),
+            len(self.live_turns),
+        )
+        self.live_turns.insert(index, turn)
+        for order, t in enumerate(self.live_turns):
+            t.order = order
+        self._turn_order = len(self.live_turns)
+
+    def _was_cut_off(self, seg: SpeechSegment) -> bool:
+        """True when user speech started while this bot segment was playing. BotStoppedSpeaking
+        can arrive just before UserStartedSpeaking on a barge-in, so check user start times too."""
+        if seg.interrupted_at_ms is not None:
+            return True
+        end_ms = seg.stop_ms or None
+        user_turns = [t for t in self.live_turns if t.kind == "user"]
+        if self._open_user_turn is not None:
+            user_turns.append(self._open_user_turn)
+        return any(
+            seg.start_ms <= t.start_ms and (end_ms is None or t.start_ms <= end_ms)
+            for t in user_turns
         )
 
     def on_llm_text(self, text: str) -> None:
@@ -579,6 +620,7 @@ class CallAccumulator:
             self._open_agent_turn = LiveTurn(kind="agent", order=0)
         if self._open_agent_turn.bot_segment_id is None:
             self._open_agent_turn.bot_segment_id = seg.id
+            self._open_agent_turn.voiced_order = self._turn_order
 
     def on_latency_measured(self, latency_secs: float) -> None:
         self._pending_latency_ms_queue.append(max(0, int(latency_secs * 1000)))

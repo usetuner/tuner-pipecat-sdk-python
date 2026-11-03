@@ -7,12 +7,13 @@ call.
 Flow
 ----
 1. Caller dials the SIP URI → Telnyx fires ``call.initiated`` (JSON).
-2. We extract SIP info from the payload, cache it by ``call_control_id``,
-   then POST ``actions/answer`` with ``stream_url`` to instruct Telnyx to
-   both answer the call **and** start Media Streams.
+2. We read Tuner's ``X-Correlation-Id`` with ``extract_sip``, POST
+   ``actions/answer``, then POST ``actions/streaming_start`` with
+   ``forward_to_websocket(...).stream``. That body carries the header as
+   ``custom_parameters`` (``answer`` rejects them, so it takes two calls).
 3. Telnyx opens a WebSocket to ``/ws``.
-4. ``/ws`` parses the handshake, recovers the cached SIP info, builds the
-   transport, and hands off to ``bot.run_bot``.
+4. ``/ws`` reads the header back from the ``start`` message with
+   ``extract_sip``, builds the transport, and hands off to ``bot.run_bot``.
 
 Required env::
 
@@ -31,6 +32,7 @@ Connection to that application.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from typing import Any
@@ -41,21 +43,17 @@ from fastapi import BackgroundTasks, FastAPI, Request, WebSocket
 from fastapi.responses import Response
 from loguru import logger
 from pipecat.runner.types import WebSocketRunnerArguments
-from pipecat.runner.utils import parse_telephony_websocket
 from pipecat.serializers.telnyx import TelnyxFrameSerializer
 from pipecat.transports.websocket.fastapi import (
     FastAPIWebsocketParams,
     FastAPIWebsocketTransport,
 )
 
+from tuner_pipecat_sdk import extract_sip, forward_to_websocket
+
 app = FastAPI()
 
 TELNYX_API_BASE = "https://api.telnyx.com/v2"
-
-
-# Bridge the Call Control event webhook to the Media Streams WebSocket.
-# Telnyx delivers SIP info on the webhook; the bot lives in the WS handler.
-_PENDING: dict[str, dict[str, Any]] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -93,6 +91,12 @@ async def _telnyx_action(
         )
     else:
         logger.info("[telnyx][api] {} → {}", action, r.status_code)
+
+
+async def _answer_and_stream(call_control_id: str, stream: dict[str, Any]) -> None:
+    """Answer, then start the stream with Tuner's data as custom_parameters."""
+    await _telnyx_action(call_control_id, "answer", {})
+    await _telnyx_action(call_control_id, "streaming_start", stream)
 
 
 # ---------------------------------------------------------------------------
@@ -153,32 +157,19 @@ async def webhook(request: Request, background_tasks: BackgroundTasks) -> Respon
         )
         return Response(status_code=200)
 
-    # Cache the raw Call Control event so the WS handler can read SIP info
-    # from it. The full event (with ``data.payload`` wrapper) is what the
-    # bot receives.
-    if call_control_id:
-        _PENDING[call_control_id] = data
-
-    logger.info(
-        "[telnyx][webhook] cached call_control_id={!r}  from={!r}  to={!r}",
-        call_control_id,
-        payload.get("from"),
-        payload.get("to"),
-    )
-
-    # Fire the answer API call in the background so we return 200 NOW.
     host = request.headers.get("x-forwarded-host") or request.headers.get("host", "")
     ws_url = os.getenv("PUBLIC_WS_URL") or f"wss://{host}/ws"
-    background_tasks.add_task(
-        _telnyx_action,
+    info = extract_sip(data, provider="telnyx")
+    fwd = forward_to_websocket(info, ws_url=ws_url)
+
+    logger.info(
+        "[telnyx][webhook] call_control_id={!r}  has_correlation_id={}",
         call_control_id,
-        "answer",
-        {
-            "stream_url": ws_url,
-            "stream_track": "both_tracks",
-            "stream_bidirectional_mode": "rtp",
-        },
+        bool(info.correlation_id),
     )
+
+    # Answer and start the stream in the background so we return 200 NOW.
+    background_tasks.add_task(_answer_and_stream, call_control_id, fwd.stream)
 
     return Response(status_code=200)
 
@@ -189,20 +180,21 @@ async def ws(websocket: WebSocket) -> None:
     await websocket.accept()
     logger.info("[telnyx][ws] websocket accepted")
 
-    _, sip_call_data = await parse_telephony_websocket(websocket)
-    call_control_id = sip_call_data.get("call_control_id") or ""
-
-    # Hand the bot either the cached Call Control event (richer — has SIP
-    # headers) or the WS call_data (leaner — falls back to call_control_id).
-    sip_payload = _PENDING.pop(call_control_id, sip_call_data)
+    # Read the "start" frame ourselves: Pipecat's parse_telephony_websocket
+    # drops Telnyx's custom_parameters, which carry Tuner's X-Correlation-Id.
+    start: dict[str, Any] = {}
+    while start.get("event") != "start":
+        start = json.loads(await websocket.receive_text())
+    sip_info = extract_sip(start, provider="telnyx")
+    start_data = start.get("start") or {}
 
     params = FastAPIWebsocketParams(
         audio_in_enabled=True,
         audio_out_enabled=True,
         serializer=TelnyxFrameSerializer(
-            stream_id=sip_call_data["stream_id"],
-            call_control_id=sip_call_data["call_control_id"],
-            outbound_encoding=sip_call_data["outbound_encoding"],
+            stream_id=start.get("stream_id"),
+            call_control_id=start_data.get("call_control_id"),
+            outbound_encoding=(start_data.get("media_format") or {}).get("encoding", "PCMU"),
             inbound_encoding="PCMU",
             api_key=os.getenv("TELNYX_API_KEY") or None,
             params=TelnyxFrameSerializer.InputParams(auto_hang_up=False),
@@ -215,8 +207,7 @@ async def ws(websocket: WebSocket) -> None:
     await bot_module.run_bot(
         transport,
         runner_args,
-        sip_call_data=sip_payload,
-        sip_provider="telnyx",
+        sip_info=sip_info,
     )
 
 

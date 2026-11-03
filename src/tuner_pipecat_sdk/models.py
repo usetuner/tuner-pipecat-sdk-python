@@ -88,6 +88,9 @@ class LiveTurn:
     # Links into the latency/speech substrate (never matched by text).
     user_segment_id: int | None = None
     bot_segment_id: int | None = None
+    # agent: the transcript position when voicing started, used to place a voiced turn that
+    # never received a commit (see CallAccumulator._keep_voiced_turn).
+    voiced_order: int | None = None
     # agent fallback timing when the turn was generated but never voiced (no bot segment).
     generated_ms: int | None = None
     # tool rows:
