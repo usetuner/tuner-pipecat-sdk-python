@@ -550,7 +550,6 @@ class CallAccumulator(LegacyTiming):
         answer = [r for r in inside if r[2] == "ttfat"]
         return (answer or inside)[-1][1] if inside else None
 
-
     def set_turn_eou(self, strategy_name: str, stop_timestamp_ns: int) -> None:
         """Decide EOU for the just-ended user turn, driven by on_user_turn_stopped.
 
