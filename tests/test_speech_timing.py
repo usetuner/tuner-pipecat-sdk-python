@@ -55,6 +55,52 @@ def test_a_stretch_shorter_than_the_vad_start_delay_is_kept(replay, tuner_config
     assert _users(r.rows(tuner_config)) == [(192442, 193701)]
 
 
+def test_a_stretch_across_two_turns_leaves_both_on_their_frame_times(replay, tuner_config):
+    """The STT split one stretch of speech into two turns (server-side endpointing). The
+    stretch can't tell where one turn ended, so neither row takes it."""
+    r = _call(replay)
+    r.turn_start(1, 1000).user_start(1000).transcription("part one", 1400).user_stop(1500)
+    r.user_start(1800).transcription("part two", 2200).user_stop(2300)
+    _speech(r, 900, 3000)
+    assert _users(r.rows(tuner_config)) == [(1000, 1500), (1800, 2300)]
+
+
+def test_a_stretch_is_used_by_one_row_only(replay, tuner_config):
+    """The first turn's stretch ends inside the next turn's lead window."""
+    r = _call(replay)
+    r.turn_start(1, 1200).user_start(1200)
+    _speech(r, 1000, 5000)
+    r.transcription("a long first answer", 5100).user_stop(5300)
+    r.user_start(5400)
+    _speech(r, 5200, 6000)
+    r.transcription("second", 6100).user_stop(6300)
+    assert _users(r.rows(tuner_config)) == [(1000, 5000), (5200, 6000)]
+
+
+def test_speech_that_starts_before_a_turn_closes_is_the_next_turns(replay, tuner_config):
+    """From a live call: the caller started '1958.' 182 ms before 'March fourteen' closed."""
+    r = _call(replay)
+    r.turn_start(1, 35643).user_start(35643)
+    _speech(r, 35443, 36822)
+    r.transcription("March fourteen", 38254).user_stop(38261)
+    r.user_start(38280)
+    _speech(r, 38079, 39410)
+    r.transcription("1958.", 40411).user_stop(40412)
+    assert _users(r.rows(tuner_config)) == [(35443, 36822), (38079, 39410)]
+
+
+def test_speech_that_ended_long_before_a_turn_started_is_not_its(replay, tuner_config):
+    """The caller talked over the bot without starting a turn, and stopped just before the
+    turn that followed."""
+    r = _call(replay)
+    r.bot_says("let me check that for you", 500, 2500)
+    _speech(r, 1000, 2900)
+    r.turn_start(1, 3200).user_start(3200)
+    _speech(r, 3000, 3600)
+    r.transcription("ok", 3650).user_stop(4100)
+    assert _users(r.rows(tuner_config)) == [(3000, 3600)]
+
+
 def _reply_after_speech(replay, tuner_config, *, speech_timing):
     r = _call(replay, speech_timing=speech_timing)
     r.turn_start(1, 1200).user_start(1200)

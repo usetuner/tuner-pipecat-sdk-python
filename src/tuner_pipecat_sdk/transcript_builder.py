@@ -168,6 +168,7 @@ def build_segments_from_turns(acc: CallAccumulator) -> list[TranscriptSegment]:
     out: list[TranscriptSegment] = []
     turn_index = 0
     last_agent_interrupted = False
+    last_user_end_ms = 0
 
     for turn in acc.live_turns:
         if turn.kind == "user":
@@ -179,9 +180,14 @@ def build_segments_from_turns(acc: CallAccumulator) -> list[TranscriptSegment]:
             start_ms = turn.start_ms or (turn.chunks[0][1] if turn.chunks else 0)
             end_ms = turn.end_ms if turn.end_ms is not None else 0
             # With speech timing, the row spans the caller's real speech in this turn.
-            bounds = acc.speech_bounds(start_ms, end_ms) if acc.speech_timing else None
+            bounds = (
+                acc.speech_bounds(start_ms, end_ms, after_ms=last_user_end_ms)
+                if acc.speech_timing
+                else None
+            )
             if bounds is not None:
                 start_ms, end_ms = bounds
+            last_user_end_ms = end_ms
             out.append(
                 build_user_segment(
                     text,

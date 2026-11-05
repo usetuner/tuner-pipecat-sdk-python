@@ -500,15 +500,25 @@ class CallAccumulator(LegacyTiming):
         if end_ms > start_ms:
             self.user_speech.append((start_ms, end_ms))
 
-    def speech_bounds(self, start_ms: int, end_ms: int) -> tuple[int, int] | None:
+    def speech_bounds(
+        self, start_ms: int, end_ms: int, after_ms: int = 0
+    ) -> tuple[int, int] | None:
         """The caller's real speech within a user turn seen from start_ms to end_ms: the first
-        start and last end of the stretches overlapping it. None when no stretch overlaps.
+        start and last end of the stretches that belong to it. None when none does.
+
+        A stretch belongs to the turn when it ended by end_ms, since UserStoppedSpeakingFrame
+        trails the speech it closes; one still going then is the next turn's. It must start at
+        or after after_ms, the previous user row's end, so no two rows share a stretch.
 
         start_ms is when UserStartedSpeakingFrame arrived, which trails the speech by the VAD's
-        start_secs. A stretch shorter than that ("Eh") ends before it, so stretches ending up
-        to _SPEECH_LEAD_MS earlier still count."""
+        start_secs. A stretch shorter than that ("Eh") ends before it, so one that started up to
+        _SPEECH_LEAD_MS earlier still counts. One that ended before start_ms but started earlier
+        than that was other speech."""
+        lead_ms = start_ms - _SPEECH_LEAD_MS
         inside = [
-            (s, e) for s, e in self.user_speech if s < end_ms and e > start_ms - _SPEECH_LEAD_MS
+            (s, e)
+            for s, e in self.user_speech
+            if after_ms <= s and e <= end_ms and (e > start_ms or s >= lead_ms)
         ]
         if not inside:
             return None
