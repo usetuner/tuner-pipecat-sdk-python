@@ -6,7 +6,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
-## [Unreleased]
+## [0.3.1] 2026-11-05
 
 ### Changed
 - With Pipecat ≥ 1.9 the observer feeds three of Pipecat's own observers the frames it already sees: `SpeakingObserver`, `FunctionCallObserver` and `ServiceMetricsObserver`. Integrations register nothing extra. Older Pipecat keeps the previous behaviour.
