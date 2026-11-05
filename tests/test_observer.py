@@ -127,6 +127,7 @@ def test_tool_call_frames_skipped_when_lg_accumulator_attached(observer):
 
 
 def test_tool_call_frames_captured_natively_when_no_lg_accumulator(observer):
+    observer._function_call_observer = None  # the frame path, used before pipecat 1.9
     now_ns = time.time_ns()
 
     observer._handle(

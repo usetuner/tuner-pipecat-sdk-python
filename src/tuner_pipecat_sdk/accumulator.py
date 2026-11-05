@@ -1,12 +1,14 @@
 """Collector concern: ingest Pipecat events and maintain call runtime state."""
 
-from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any
 
 from loguru import logger
 
+from ._pipecat_compat import LegacyTiming
+from .caller_speech import CallerSpeech
 from .models import (
     CallPayload,
     CallUsage,
@@ -25,8 +27,9 @@ _TTS_LEAD_SLACK_MS = 2000
 
 
 @dataclass
-class CallAccumulator:
-    """Collects runtime events and produces a final call payload."""
+class CallAccumulator(LegacyTiming):
+    """Collects runtime events and produces a final call payload. Timing used only without
+    pipecat's newer observers comes from LegacyTiming (_pipecat_compat)."""
 
     # call-level timing
     call_start_abs_ns: int = 0
@@ -75,9 +78,6 @@ class CallAccumulator:
     # LLMFullResponseStartFrame and LLMFullResponseEndFrame, then finalized into
     # assistant_generations at the End frame.
     _llm_response_buffer: list[str] = field(default_factory=list, repr=False)
-
-    # Ordered pairing for latency observer callbacks (on_latency_measured then breakdown).
-    _pending_latency_ms_queue: deque[int] = field(default_factory=deque, repr=False)
 
     # tool call timing keyed by tool_call_id
     registry: ToolTimingRegistry = field(default_factory=ToolTimingRegistry)
@@ -132,12 +132,26 @@ class CallAccumulator:
     _turn_order: int = field(default=0, repr=False)
     # The user turn currently accruing transcriptions (one per active user segment).
     _open_user_turn: LiveTurn | None = field(default=None, repr=False)
+    # The user turn committed last, until the bot starts speaking. A final transcript that lands
+    # after its turn closed, before the bot replies, belongs to it.
+    _last_user_turn: LiveTurn | None = field(default=None, repr=False)
     # The agent turn currently accruing LLM text / awaiting voicing.
     _open_agent_turn: LiveTurn | None = field(default=None, repr=False)
      # Timestamp (ns) of the most recent VAD-detected speech-end within the currently open
     # user turn. Anchors the silence-timeout EOU fallback below when no turn-analyzer
     # verdict arrives before the turn commits. Reset after each turn closes.
     _last_vad_stop_ns: int | None = field(default=None, repr=False)
+    # The caller's speech as pipecat's SpeakingObserver times it (caller_speech.py).
+    caller_speech: CallerSpeech = field(default_factory=CallerSpeech)
+    # True while SpeakingObserver feeds caller_speech (pipecat >= 1.9). Agent rows then keep the
+    # start seen at BotStartedSpeakingFrame, and latency runs from the end of the caller's speech.
+    speech_timing: bool = False
+    # The LLM's time to its first token for each inference, as pipecat's ServiceMetricsObserver
+    # reports it: (observed_ms, ttft_ms, kind), kind "ttfat" (first answer token, after any
+    # thinking) or "ttfb". Matched to the reply that follows it, by time.
+    llm_first_token: list[tuple[int, int, str]] = field(default_factory=list)
+    # True while ServiceMetricsObserver feeds llm_first_token (pipecat >= 1.9).
+    service_metrics: bool = False
 
     # misc
     done: bool = False
@@ -355,6 +369,16 @@ class CallAccumulator:
             return
         rel = self._rel_ms(timestamp_ns)
         self.user_transcriptions.append((text, rel))  # kept for diagnostics
+        if self._open_user_turn is None and self._last_user_turn is not None:
+            # STT can finalize an utterance after its turn closed. The caller hasn't spoken
+            # since and the bot hasn't replied, so it was said in that turn.
+            turn = self._last_user_turn
+            if not turn.chunks:
+                # None of the turn's transcript had arrived when it closed, so it wasn't kept.
+                # It is now, with the times it was spoken.
+                self._append_live(turn)
+            turn.chunks.append((text, rel))
+            return
         self._ensure_open_user_turn(rel).chunks.append((text, rel))
 
     def on_tts_text(self, text: str, timestamp_ns: int) -> None:
@@ -459,6 +483,53 @@ class CallAccumulator:
         recent one seen; set_turn_eou decides whether it's needed."""
         self._last_vad_stop_ns = timestamp_ns
 
+    def on_user_speech(self, started_at_s: float, stopped_at_s: float) -> None:
+        """Record one stretch of the caller's speech, in unix seconds, as SpeakingObserver
+        reports it when the stretch ends."""
+        if self.call_start_abs_ns == 0:
+            return
+        call_start_s = self.call_start_abs_ns / 1_000_000_000
+        # Rounded, not truncated: float seconds would otherwise lose a millisecond.
+        self.caller_speech.add(
+            max(0, round((started_at_s - call_start_s) * 1000)),
+            max(0, round((stopped_at_s - call_start_s) * 1000)),
+        )
+
+    def speech_end_before(self, bot_seg: SpeechSegment) -> int | None:
+        """When the caller last stopped speaking before this bot segment started, counting only
+        speech that ended after the previous bot segment started. That is the moment pipecat's
+        UserBotLatencyObserver measures from: it keeps the latest VAD stop and consumes it each
+        time the bot starts speaking."""
+        return self.caller_speech.last_end_between(
+            self._previous_bot_start_ms(bot_seg), bot_seg.start_ms
+        )
+
+    def _previous_bot_start_ms(self, bot_seg: SpeechSegment) -> int:
+        return max(
+            (
+                s.start_ms
+                for s in self.speech_segments
+                if s.speaker == "bot" and s.id != bot_seg.id and s.start_ms < bot_seg.start_ms
+            ),
+            default=0,
+        )
+
+    def on_llm_first_token(self, kind: str, observed_at_s: float, seconds: float) -> None:
+        """Record one LLM inference's time to first token, as ServiceMetricsObserver reports it.
+        A zero measurement, which pipecat can report before any inference ran, is skipped."""
+        if self.call_start_abs_ns == 0 or seconds <= 0:
+            return
+        observed_ms = round((observed_at_s - self.call_start_abs_ns / 1_000_000_000) * 1000)
+        self.llm_first_token.append((observed_ms, round(seconds * 1000), kind))
+
+    def llm_first_token_before(self, bot_seg: SpeechSegment) -> int | None:
+        """Time to first token of the last inference before this bot segment started, since
+        the previous one: the inference whose answer it speaks. The first answer token wins
+        over the first byte where pipecat reports it, so a model's thinking isn't counted."""
+        since_ms = self._previous_bot_start_ms(bot_seg)
+        inside = [r for r in self.llm_first_token if since_ms < r[0] <= bot_seg.start_ms]
+        answer = [r for r in inside if r[2] == "ttfat"]
+        return (answer or inside)[-1][1] if inside else None
 
     def set_turn_eou(self, strategy_name: str, stop_timestamp_ns: int) -> None:
         """Decide EOU for the just-ended user turn, driven by on_user_turn_stopped.
@@ -524,9 +595,11 @@ class CallAccumulator:
                 seg.windows.append([seg.start_ms, stopped_ms])
 
         if self._open_user_turn is not None:
+            self._open_user_turn.end_ms = stopped_ms
             if self._open_user_turn.chunks:
-                self._open_user_turn.end_ms = stopped_ms
                 self._append_live(self._open_user_turn)
+            # Kept even without a transcript yet: a late one still belongs to this turn.
+            self._last_user_turn = self._open_user_turn
             self._open_user_turn = None
 
     def on_function_call_result(self, frame: Any, timestamp_ns: int) -> None:
@@ -540,6 +613,37 @@ class CallAccumulator:
             result=getattr(frame, "result", None),
             occurrence_ms=self._rel_ms(timestamp_ns),
         )
+
+    # How a tool call that didn't return is recorded on its result row.
+    _UNSETTLED_RESULTS = {
+        "function_call_timed_out": {"timed_out": True},
+        "function_call_cancelled": {"cancelled": True},
+    }
+
+    def on_function_call_event(self, event: Any) -> None:
+        """One moment of a tool call, as pipecat's FunctionCallObserver reports it: a call row
+        when it goes in progress, and one result row when it settles. Timed at the moment
+        itself, which the event carries."""
+        kind = str(event.kind)
+        timestamp_ns = round(event.timestamp * 1_000_000_000)
+        call = SimpleNamespace(
+            function_name=event.function_name,
+            tool_call_id=event.tool_call_id,
+            arguments=event.arguments,
+            result=None,
+        )
+        if kind == "function_call_in_progress":
+            self.on_function_call_in_progress(call, timestamp_ns)
+            return
+        if kind == "function_call_completed":
+            call.result = event.result
+        elif kind == "function_call_failed":
+            call.result = {"error": event.error}
+        elif kind in self._UNSETTLED_RESULTS:
+            call.result = dict(self._UNSETTLED_RESULTS[kind])
+        else:
+            return  # started: the call row comes when it goes in progress
+        self.on_function_call_result(call, timestamp_ns)
 
     def on_bot_stopped(self, timestamp_ns: int) -> None:
         """Record the end of a bot speech segment.
@@ -593,6 +697,14 @@ class CallAccumulator:
         re-pointing ``_response_user_segment_id``.
         """
         started_ms = self._rel_ms(timestamp_ns)
+        # The caller's turn ends where the bot's reply starts: what they said so far comes before
+        # the reply, and anything they say after it starts a new turn. Done first, so the user
+        # row is placed ahead of this voicing.
+        self._last_user_turn = None
+        if self._open_user_turn is not None and self._open_user_turn.chunks:
+            self._open_user_turn.end_ms = self._open_user_turn.chunks[-1][1]
+            self._append_live(self._open_user_turn)
+            self._open_user_turn = None
         is_proactive = self._response_user_segment_id is None  # bot speaks before any user turn
         response_key = -1 if is_proactive else self._response_user_segment_id
 
@@ -621,9 +733,6 @@ class CallAccumulator:
         if self._open_agent_turn.bot_segment_id is None:
             self._open_agent_turn.bot_segment_id = seg.id
             self._open_agent_turn.voiced_order = self._turn_order
-
-    def on_latency_measured(self, latency_secs: float) -> None:
-        self._pending_latency_ms_queue.append(max(0, int(latency_secs * 1000)))
 
     def on_latency_breakdown(self, breakdown: Any) -> None:
         measurement = self._pending_measurement
@@ -662,16 +771,9 @@ class CallAccumulator:
             # computed_started_ms == 0: user spoke within the first milliseconds of the call.
             # Frame events already captured the correct timing via on_turn_started — skip.
 
-        if self._pending_latency_ms_queue:
-            latency_ms = self._pending_latency_ms_queue.popleft()
-            if (
-                is_real_user_turn
-                and bot_seg is not None
-                and user_seg is not None
-                and not bot_seg.interrupted_at_ms
-                and (user_seg.stop_ms or 0) > 0
-            ):
-                bot_seg.start_ms = user_seg.stop_ms + latency_ms
+        self._apply_queued_latency(
+            bot_seg, user_seg, is_real_user_turn=is_real_user_turn, speech_timing=self.speech_timing
+        )
 
         # Per-processor TTFB from the breakdown (each entry carries its processor name) so each
         # node's latency is attributed to the right node. NOTE: "GoogleSTTService".lower()
@@ -702,22 +804,24 @@ class CallAccumulator:
         # LLM latency. Prefer an externally-sourced call duration when this turn went
         # through observer.wrap_graph()/wrap_chain() — pipecat's LangchainProcessor
         # is a bare FrameProcessor, not an LLMService, so it never emits the
-        # MetricsFrame data the other two sources below depend on; this is the only
+        # MetricsFrame data the other sources depend on; this is the only
         # number that ever exists for those turns. Note this is total on_llm_start->
-        # on_llm_end duration, not strictly time-to-first-token like the pipecat-
-        # sourced fallbacks below aim for. Otherwise prefer the processing-time
-        # metric, falling back to the LLM's own TTFB — some providers (e.g.
-        # Google/Gemini) emit a TTFB metric but no ProcessingMetricsData, which
-        # would otherwise leave LLM latency blank.
-        measurement.llm_ms = (
-            self._pending_external_llm_duration_ms
-            if self._pending_external_llm_duration_ms is not None
-            else (
-                round(self._pending_pipecat_llm_processing_s * 1000)
-                if self._pending_pipecat_llm_processing_s
-                else llm_ttfb_ms
-            )
+        # on_llm_end duration, not strictly time-to-first-token. Otherwise use
+        # ServiceMetricsObserver's time to first token, which is what llm_node_ttft names,
+        # and without it (pipecat < 1.9) the processing time of the turn's inferences.
+        first_token_ms = (
+            self.llm_first_token_before(bot_seg)
+            if self.service_metrics and bot_seg is not None
+            else None
         )
+        if self._pending_external_llm_duration_ms is not None:
+            measurement.llm_ms = self._pending_external_llm_duration_ms
+        elif first_token_ms is not None:
+            measurement.llm_ms = first_token_ms
+        else:
+            measurement.llm_ms = self._processing_llm_ms(
+                self._pending_pipecat_llm_processing_s, llm_ttfb_ms
+            )
         measurement.tts_ms = (
             round(self._pending_pipecat_tts_processing_s * 1000)
             if self._pending_pipecat_tts_processing_s
@@ -731,7 +835,12 @@ class CallAccumulator:
             and bot_seg.start_ms > 0
             and (user_seg.stop_ms or 0) > 0
         ):
-            measurement.e2e_ms = bot_seg.start_ms - user_seg.stop_ms
+            # What the caller waited: from the end of their speech to the bot's first audio.
+            # Without a speech stretch (pipecat < 1.9), the end is UserStoppedSpeakingFrame.
+            speech_end_ms = self.speech_end_before(bot_seg) if self.speech_timing else None
+            measurement.e2e_ms = bot_seg.start_ms - (
+                speech_end_ms if speech_end_ms is not None else user_seg.stop_ms
+            )
 
         self._pending_pipecat_llm_processing_s = 0.0
         self._pending_pipecat_tts_processing_s = 0.0
@@ -803,12 +912,11 @@ class CallAccumulator:
                     if seg is not None and val > 0 and seg.stt_ms is None:
                         seg.stt_ms = round(val * 1000)
                     # Also stamp the in-progress user turn (the first STT TTFB of the turn wins).
-                    if (
-                        self._open_user_turn is not None
-                        and val > 0
-                        and (self._open_user_turn.stt_ms is None)
-                    ):
-                        self._open_user_turn.stt_ms = round(val * 1000)
+                    # Like a late transcript, the metric can land just after its turn closed,
+                    # before the bot replies; it is still that turn's.
+                    turn = self._open_user_turn or self._last_user_turn
+                    if turn is not None and val > 0 and turn.stt_ms is None:
+                        turn.stt_ms = round(val * 1000)
 
             elif cls_name == "TurnMetricsData":
                 # Only an is_complete=True verdict is a real end-of-turn decision — the framework
