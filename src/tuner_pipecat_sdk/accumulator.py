@@ -8,6 +8,7 @@ from typing import Any
 from loguru import logger
 
 from ._pipecat_compat import LegacyTiming
+from .caller_speech import CallerSpeech
 from .models import (
     CallPayload,
     CallUsage,
@@ -23,10 +24,6 @@ from .tool_timing_registry import ToolTimingRegistry
 # voiced TTS sentences from up to this many ms before its start. Wide enough to cover the
 # TTS lead, far below the multi-second gap to an interrupted-before-voiced response.
 _TTS_LEAD_SLACK_MS = 2000
-
-# UserStartedSpeakingFrame trails the speech it reports by the VAD's start_secs (0.2 s by
-# default). Speech that ended this long before a turn's start frame is still that turn's.
-_SPEECH_LEAD_MS = 500
 
 
 @dataclass
@@ -144,11 +141,9 @@ class CallAccumulator(LegacyTiming):
     # user turn. Anchors the silence-timeout EOU fallback below when no turn-analyzer
     # verdict arrives before the turn commits. Reset after each turn closes.
     _last_vad_stop_ns: int | None = field(default=None, repr=False)
-    # The caller's speech as pipecat's SpeakingObserver times it, as (start_ms, end_ms): when it
-    # really began and ended, with the VAD's confirmation delay taken off. Matched to user turns
-    # by time overlap when rows are built, never by order, so a missed stretch moves nothing else.
-    user_speech: list[tuple[int, int]] = field(default_factory=list)
-    # True while SpeakingObserver feeds user_speech (pipecat >= 1.9). Agent rows then keep the
+    # The caller's speech as pipecat's SpeakingObserver times it (caller_speech.py).
+    caller_speech: CallerSpeech = field(default_factory=CallerSpeech)
+    # True while SpeakingObserver feeds caller_speech (pipecat >= 1.9). Agent rows then keep the
     # start seen at BotStartedSpeakingFrame, and latency runs from the end of the caller's speech.
     speech_timing: bool = False
     # The LLM's time to its first token for each inference, as pipecat's ServiceMetricsObserver
@@ -495,43 +490,19 @@ class CallAccumulator(LegacyTiming):
             return
         call_start_s = self.call_start_abs_ns / 1_000_000_000
         # Rounded, not truncated: float seconds would otherwise lose a millisecond.
-        start_ms = max(0, round((started_at_s - call_start_s) * 1000))
-        end_ms = max(0, round((stopped_at_s - call_start_s) * 1000))
-        if end_ms > start_ms:
-            self.user_speech.append((start_ms, end_ms))
-
-    def speech_bounds(
-        self, start_ms: int, end_ms: int, after_ms: int = 0
-    ) -> tuple[int, int] | None:
-        """The caller's real speech within a user turn seen from start_ms to end_ms: the first
-        start and last end of the stretches that belong to it. None when none does.
-
-        A stretch belongs to the turn when it ended by end_ms, since UserStoppedSpeakingFrame
-        trails the speech it closes; one still going then is the next turn's. It must start at
-        or after after_ms, the previous user row's end, so no two rows share a stretch.
-
-        start_ms is when UserStartedSpeakingFrame arrived, which trails the speech by the VAD's
-        start_secs. A stretch shorter than that ("Eh") ends before it, so one that started up to
-        _SPEECH_LEAD_MS earlier still counts. One that ended before start_ms but started earlier
-        than that was other speech."""
-        lead_ms = start_ms - _SPEECH_LEAD_MS
-        inside = [
-            (s, e)
-            for s, e in self.user_speech
-            if after_ms <= s and e <= end_ms and (e > start_ms or s >= lead_ms)
-        ]
-        if not inside:
-            return None
-        return min(s for s, _ in inside), max(e for _, e in inside)
+        self.caller_speech.add(
+            max(0, round((started_at_s - call_start_s) * 1000)),
+            max(0, round((stopped_at_s - call_start_s) * 1000)),
+        )
 
     def speech_end_before(self, bot_seg: SpeechSegment) -> int | None:
         """When the caller last stopped speaking before this bot segment started, counting only
         speech that ended after the previous bot segment started. That is the moment pipecat's
         UserBotLatencyObserver measures from: it keeps the latest VAD stop and consumes it each
         time the bot starts speaking."""
-        since_ms = self._previous_bot_start_ms(bot_seg)
-        ends = [e for _, e in self.user_speech if since_ms < e <= bot_seg.start_ms]
-        return max(ends) if ends else None
+        return self.caller_speech.last_end_between(
+            self._previous_bot_start_ms(bot_seg), bot_seg.start_ms
+        )
 
     def _previous_bot_start_ms(self, bot_seg: SpeechSegment) -> int:
         return max(

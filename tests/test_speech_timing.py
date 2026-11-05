@@ -8,7 +8,7 @@ import asyncio
 
 import pytest
 
-from tuner_pipecat_sdk.accumulator import CallAccumulator
+from tuner_pipecat_sdk.caller_speech import CallerSpeech
 
 
 def _call(replay, *, speech_timing=True):
@@ -29,10 +29,9 @@ def _users(rows):
 
 
 def test_speech_bounds_joins_the_stretches_overlapping_a_turn():
-    acc = CallAccumulator()
-    acc.user_speech = [(400, 900), (1200, 1700), (5000, 5300)]
-    assert acc.speech_bounds(700, 2200) == (400, 1700)
-    assert acc.speech_bounds(2500, 4000) is None
+    speech = CallerSpeech([(400, 900), (1200, 1700), (5000, 5300)])
+    assert speech.bounds(700, 2200) == (400, 1700)
+    assert speech.bounds(2500, 4000) is None
 
 
 def test_user_row_spans_the_callers_real_speech(replay, tuner_config):
@@ -223,4 +222,4 @@ async def test_observer_records_speech_from_vad_frames():
     await asyncio.sleep(0)  # SpeakingObserver runs its event handler as a task
 
     assert observer._acc.speech_timing is True
-    assert observer._acc.user_speech == [(1000, 2200)]
+    assert observer._acc.caller_speech.stretches == [(1000, 2200)]
