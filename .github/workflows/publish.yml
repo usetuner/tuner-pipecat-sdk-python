@@ -42,17 +42,11 @@ jobs:
             echo "::notice::Publishing $name $version."
           fi
 
-  publish:
-    name: Build and publish
+  build:
+    name: Test and build
     needs: check
     if: needs.check.outputs.should-publish == 'true'
     runs-on: ubuntu-latest
-    environment:
-      name: pypi
-      url: https://pypi.org/p/tuner-pipecat-sdk
-    permissions:
-      id-token: write   # PyPI trusted publishing (OIDC) - no API token needed
-      contents: write   # push the release tag
     steps:
       - uses: actions/checkout@v4
 
@@ -77,8 +71,51 @@ jobs:
       - name: Validate metadata
         run: uvx twine check dist/*
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  # Holds the OIDC token, so it does nothing but download the artifact and
+  # upload it: no checkout, no dependency install, no third-party code. Code
+  # running in this job could mint a PyPI token for the project, which is why
+  # the tests and the build live in `build` above.
+  publish:
+    name: Publish to PyPI
+    needs: [check, build]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/tuner-pipecat-sdk
+    permissions:
+      id-token: write   # PyPI trusted publishing (OIDC) - no API token needed
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # Makes the job idempotent: if the upload succeeded but a later job
+          # failed, re-running the failed jobs finishes the release instead of
+          # dying on "file already exists".
+          skip-existing: true
+
+  release:
+    name: Tag and release
+    needs: [check, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # push the release tag
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
 
       - name: Tag the release
         env:
