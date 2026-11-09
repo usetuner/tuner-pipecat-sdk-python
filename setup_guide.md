@@ -32,28 +32,59 @@ uv run <script>.py
 
 Then open http://localhost:7860 where applicable.
 
-## Publish to Pypi
-1. Install tools (one-time) in a virtual env.
+## Publish to PyPI
 
+Releases are automated. `.github/workflows/publish.yml` runs on every push to
+`main` (so on every merged PR) and publishes only when the version in
+`pyproject.toml` is not yet on PyPI. Ordinary merges are a no-op; a merge that
+bumps the version runs the tests, builds, uploads, tags `vX.Y.Z` and opens a
+GitHub release.
+
+### Releasing
+
+1. In the PR, bump `version` in `pyproject.toml` and move the `Unreleased`
+   section of `CHANGELOG.md` under the new version.
+2. Merge the PR. The Publish workflow does the rest.
+
+### One-time setup
+
+PyPI trusted publishing (OIDC) — no API token is stored anywhere:
+
+1. On PyPI, sign in as a project owner and go to
+   [Your projects](https://pypi.org/manage/projects/) → *Manage* on
+   `tuner-pipecat-sdk` → *Publishing* in the sidebar.
+2. Under the *GitHub Actions* tab, fill in and press *Add*:
+
+   | Field            | Value                      |
+   | ---------------- | -------------------------- |
+   | Repository owner | `usetuner`                 |
+   | Repository name  | `tuner-pipecat-sdk-python` |
+   | Workflow name    | `publish.yml`              |
+   | Environment name | `pypi`                     |
+
+   The workflow field takes the bare filename, not the `.github/workflows/`
+   path. The environment field is optional on PyPI but must be filled here,
+   because `publish.yml` runs in the `pypi` environment.
+3. On GitHub, create the matching environment: *Settings → Environments → New
+   environment* → `pypi`, then under *Deployment branches and tags* choose
+   *Selected branches and tags* and add a rule for `main`. PyPI's publisher has
+   no branch field, so this is the only place a branch restriction can live.
+   Add required reviewers too if a release should wait for a manual approval —
+   and leave *Allow administrators to bypass configured protection rules*
+   unchecked, or the gate is advisory.
+
+Nothing is stored in GitHub secrets. If the first run fails with
+`invalid-publisher`, the cause is almost always a mismatch between these four
+values and the workflow — renaming `publish.yml` or the `pypi` environment
+means editing the publisher on PyPI too.
+
+### Manual release (fallback)
+
+```bash
 uv sync --extra dev
-.venv/bin/activate
-pip install hatch twine
-
-2. Clean old build artifacts
-
 rm -rf dist/
-
-3. Build the package (from project root)
-
-hatch build
-
-4. Validate before uploading
-
-twine check dist/*
-
-5. (Optional) Test on TestPyPI first
-
-twine upload --repository testpypi dist/*
-
-6. Upload to PyPI
-twine upload dist/*
+uv build
+uv run twine check dist/*
+uv run twine upload --repository testpypi dist/*   # optional smoke test
+uv run twine upload dist/*
+```
