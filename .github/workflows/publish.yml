@@ -8,6 +8,10 @@ on:
   push:
     branches: [main]
 
+# Read-only by default; the publish job widens this for itself.
+permissions:
+  contents: read
+
 concurrency:
   group: publish-${{ github.ref }}
   cancel-in-progress: false
