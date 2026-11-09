@@ -18,6 +18,7 @@ import json
 import uuid
 from typing import TYPE_CHECKING, Any
 
+from .caller_speech import UserRowTimes
 from .models import LatencyMeasurement, LiveTurn, SpeechSegment, ToolInfo, TranscriptSegment
 
 if TYPE_CHECKING:
@@ -168,6 +169,8 @@ def build_segments_from_turns(acc: CallAccumulator) -> list[TranscriptSegment]:
     out: list[TranscriptSegment] = []
     turn_index = 0
     last_agent_interrupted = False
+    # With speech timing, each user row spans the caller's real speech in its turn.
+    user_row_times = UserRowTimes(acc.caller_speech if acc.speech_timing else None)
 
     for turn in acc.live_turns:
         if turn.kind == "user":
@@ -176,11 +179,15 @@ def build_segments_from_turns(acc: CallAccumulator) -> list[TranscriptSegment]:
             text = " ".join(t for t, _ in turn.chunks).strip()
             if not text:
                 continue
+            start_ms, end_ms = user_row_times.for_turn(
+                turn.start_ms or (turn.chunks[0][1] if turn.chunks else 0),
+                turn.end_ms if turn.end_ms is not None else 0,
+            )
             out.append(
                 build_user_segment(
                     text,
-                    start_ms=turn.start_ms or (turn.chunks[0][1] if turn.chunks else 0),
-                    end_ms=turn.end_ms if turn.end_ms is not None else 0,
+                    start_ms=start_ms,
+                    end_ms=end_ms,
                     interrupted=last_agent_interrupted,
                     stt_ms=turn.stt_ms,
                     eou_ms=turn.eou_ms,

@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import os
 import time
-from collections import deque
 from collections.abc import Callable
 from typing import Any
 
@@ -34,6 +33,13 @@ from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
 from pipecat.processors.frame_processor import FrameDirection
 
 from ._deprecation import warn_deprecated
+from ._pipecat_compat import (
+    FrameDedupe,
+    FunctionCallObserver,
+    ServiceMetricsObserver,
+    SpeakingObserver,
+    SpeechEventKind,
+)
 from ._providers import CARRIER_CALL_ID_READERS, PROVIDER_EXTRACTORS, ProviderExtractor
 from .accumulator import CallAccumulator
 from .client import post_call
@@ -192,11 +198,8 @@ class _BaseObserver(BaseObserver):
         self._sip_internal = False
         self._langchain: LangchainIntegration = LangchainIntegration(self._acc)
         # As a pipeline-level observer, on_push_frame fires once PER processor hop, so the
-        # same frame is seen many times. Dedup by frame id (bounded deque + set, mirroring
-        # pipecat's UserBotLatencyObserver). All hops of a frame occur back-to-back in one
-        # downstream traversal, so a modest window is sufficient.
-        self._processed_frames: set[int] = set()
-        self._frame_history: deque[int] = deque(maxlen=256)
+        # same frame is seen many times; FrameDedupe keeps the first (see _pipecat_compat).
+        self._dedupe = FrameDedupe()
         self._disconnection_reason_resolver = disconnection_reason_resolver
         self._cost_calculator = cost_calculator
 
@@ -221,6 +224,46 @@ class _BaseObserver(BaseObserver):
         @self._latency_observer.event_handler("on_latency_breakdown")
         async def _on_latency_breakdown(_observer: Any, breakdown: Any) -> None:
             self._acc.on_latency_breakdown(breakdown)
+
+        # Pipecat's SpeakingObserver times the caller's speech from when it really began and
+        # ended. It is fed the frames this observer handles (see on_push_frame), so integrations
+        # register nothing extra, and it reports each stretch as it ends.
+        self._speaking_observer = SpeakingObserver() if SpeakingObserver is not None else None
+        if self._speaking_observer is not None:
+            self._acc.speech_timing = True
+
+            @self._speaking_observer.event_handler("on_speech_event")
+            async def _on_speech_event(_observer: Any, event: Any) -> None:
+                if event.kind == SpeechEventKind.USER_SPEECH_STOPPED and event.started_at:
+                    self._acc.on_user_speech(event.started_at, event.timestamp)
+
+        # Pipecat's FunctionCallObserver reports each tool call as it goes in progress and once
+        # as it settles: completed, failed, timed out or cancelled. Progress updates from a
+        # call that doesn't block are not results. Fed the same way as SpeakingObserver.
+        self._function_call_observer = (
+            FunctionCallObserver(include_results=True) if FunctionCallObserver is not None else None
+        )
+        if self._function_call_observer is not None:
+
+            @self._function_call_observer.event_handler("on_function_call_event")
+            async def _on_function_call_event(_observer: Any, event: Any) -> None:
+                # LangChain integrations record their tool calls themselves (see _handle).
+                if not self._langchain.active:
+                    self._acc.on_function_call_event(event)
+
+        # Pipecat's ServiceMetricsObserver reports each service measurement as its own record.
+        # The LLM's time to first token (or first answer token) becomes llm_node_ttft.
+        self._service_metrics_observer = (
+            ServiceMetricsObserver() if ServiceMetricsObserver is not None else None
+        )
+        if self._service_metrics_observer is not None:
+            self._acc.service_metrics = True
+
+            @self._service_metrics_observer.event_handler("on_service_latency")
+            async def _on_service_latency(_observer: Any, record: Any) -> None:
+                kind = str(record.kind)
+                if kind == "ttfat" or (kind == "ttfb" and "llm" in record.processor.lower()):
+                    self._acc.on_llm_first_token(kind, record.timestamp, record.seconds)
 
         self._setup_trace_forwarding()
 
@@ -546,15 +589,29 @@ class _BaseObserver(BaseObserver):
         # Only the downstream pass matters, and each frame must be handled once (it fires
         # once per hop). Stamp with wall-clock time — the accumulator works in time.time_ns()
         # relative to call_start_abs_ns, not the pipeline clock.
-        if data.direction != FrameDirection.DOWNSTREAM:
+        if data.direction != FrameDirection.DOWNSTREAM or not self._dedupe.first_time(data):
             return
-        if data.frame.id in self._processed_frames:
-            return
-        self._processed_frames.add(data.frame.id)
-        self._frame_history.append(data.frame.id)
-        if len(self._processed_frames) > len(self._frame_history):
-            self._processed_frames = set(self._frame_history)
+        for observer in self._pipecat_observers:
+            await observer.on_push_frame(data)
         self._handle(data.frame, time.time_ns())
+
+    @property
+    def _pipecat_observers(self) -> list[BaseObserver]:
+        """The pipecat observers this observer feeds, as pipecat would feed them."""
+        return [
+            observer
+            for observer in (
+                self._speaking_observer,
+                self._function_call_observer,
+                self._service_metrics_observer,
+            )
+            if observer is not None
+        ]
+
+    async def cleanup(self) -> None:
+        await super().cleanup()
+        for observer in self._pipecat_observers:
+            await observer.cleanup()
 
     # Frame type-name substrings logged when debug=True. Covers the transcript-relevant frames
     # (speech boundaries, STT/LLM/TTS/aggregated text, the assistant-commit timestamp frame, tool
@@ -608,11 +665,13 @@ class _BaseObserver(BaseObserver):
             # call, that native service's tool calls would also be silently skipped
             # here. Not a supported configuration today (Observer expects at most one
             # tool-calling surface per call), but worth knowing if that ever changes.
-            if not self._langchain.active:
+            # With FunctionCallObserver, tool rows come from its events instead; these two
+            # branches are for pipecat < 1.9.
+            if not self._langchain.active and self._function_call_observer is None:
                 self._acc.on_function_call_in_progress(frame, timestamp_ns)
 
         elif isinstance(frame, FunctionCallResultFrame):
-            if not self._langchain.active:
+            if not self._langchain.active and self._function_call_observer is None:
                 self._acc.on_function_call_result(frame, timestamp_ns)
 
         elif isinstance(frame, MetricsFrame):

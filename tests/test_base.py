@@ -94,6 +94,7 @@ def test_handle_tts_text_frame_routes_to_accumulator(observer):
 
 
 def test_handle_function_call_result_records_completion(observer):
+    observer._function_call_observer = None  # the frame path, used before pipecat 1.9
     observer._acc.call_start_abs_ns = 1_000_000_000
     frame = FunctionCallResultFrame(
         tool_call_id="tc-1",
@@ -109,14 +110,16 @@ def test_observer_exposes_latency_observer(observer):
     assert observer.latency_observer is not None
 
 
-def _pushed(frame, direction):
-    """Build a FramePushed event for the pipeline-level on_push_frame hook."""
+def _pushed(frame, direction, first_push=True):
+    """Build a FramePushed event for the pipeline-level on_push_frame hook. first_push is
+    passed only to pipecat versions that have it (1.12+)."""
     from unittest.mock import Mock
 
     from pipecat.observers.base_observer import FramePushed
 
+    extra = {"first_push": first_push} if "first_push" in FramePushed.__dataclass_fields__ else {}
     return FramePushed(
-        source=Mock(), destination=Mock(), frame=frame, direction=direction, timestamp=0
+        source=Mock(), destination=Mock(), frame=frame, direction=direction, timestamp=0, **extra
     )
 
 
@@ -150,8 +153,8 @@ async def test_on_push_frame_dedups_by_frame_id(observer):
 
     observer._acc.call_start_abs_ns = 1_000_000_000
     frame = TranscriptionFrame(text="only once", user_id="u1", timestamp="2026-01-01T00:00:00Z")
-    for _ in range(5):  # simulate the frame traversing five processor boundaries
-        await observer.on_push_frame(_pushed(frame, FrameDirection.DOWNSTREAM))
+    for hop in range(5):  # simulate the frame traversing five processor boundaries
+        await observer.on_push_frame(_pushed(frame, FrameDirection.DOWNSTREAM, hop == 0))
     assert len(observer._acc.user_transcriptions) == 1
     assert observer._acc.user_transcriptions[0][0] == "only once"
 
