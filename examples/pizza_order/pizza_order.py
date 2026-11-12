@@ -5,6 +5,10 @@
 
 """Pizzeria ordering bot built with Pipecat and the Tuner Observer.
 
+Also shows the call-recording hand-off: the SDK opens a presigned upload
+target for the call, and this bot captures the audio and uploads it (see
+``CallRecording`` below). Set ``TUNER_RECORD_CALLS=false`` to turn it off.
+
 Requirements:
 - DEEPGRAM_API_KEY
 - OPENAI_API_KEY
@@ -13,9 +17,11 @@ Run the example:
 uv run pizza_order.py
 """
 
+import asyncio
 import os
 import uuid
 
+import httpx
 from dotenv import load_dotenv
 from loguru import logger
 from pipecat.adapters.schemas.function_schema import FunctionSchema
@@ -47,7 +53,7 @@ from pipecat.services.deepgram.tts import DeepgramTTSService
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 
-from tuner_pipecat_sdk import CallUsage, Observer
+from tuner_pipecat_sdk import CallUsage, Observer, to_wav
 
 load_dotenv(override=True)
 
@@ -140,6 +146,116 @@ class DebugLogProcessor(FrameProcessor):
             self._bot_response_buf = []
 
         await self.push_frame(frame, direction)
+
+
+# ---------------------------------------------------------------------------
+# Call recording upload
+# ---------------------------------------------------------------------------
+
+# The flush that issues the target POSTs the call first, so allow for that
+# round trip; the audio is already in memory by then and only needs handing
+# over; the upload itself is a multi-megabyte POST.
+TARGET_WAIT_SECONDS = 20.0
+AUDIO_WAIT_SECONDS = 10.0
+UPLOAD_TIMEOUT_SECONDS = 60.0
+
+
+class CallRecording:
+    """Captures the call's audio and POSTs it to Tuner's presigned target.
+
+    The SDK never uploads a recording. Passing ``recording_file_extension`` to
+    the Observer makes the Tuner API issue a presigned S3 POST for the call and
+    hand it to ``on_recording_upload``; the upload is ours to make, so it stays
+    off the call's teardown path and can be retried, deferred or skipped.
+
+    The two halves arrive independently and in no fixed order — pipecat
+    dispatches ``on_audio_data`` as its own task when the pipeline ends, and
+    the observer emits the target from the flush task it starts on the same
+    frame — so each half only records what it has, and the upload runs after
+    the pipeline, in :meth:`wait_for_upload`.
+    """
+
+    def __init__(self) -> None:
+        self._wav: bytes | None = None
+        self._target: dict | None = None
+        self._audio_ready = asyncio.Event()
+        self._target_ready = asyncio.Event()
+
+    def attach(self, observer: Observer, audio_buffer) -> None:
+        """Register both halves of the hand-off."""
+
+        @audio_buffer.event_handler("on_audio_data")
+        async def on_audio_data(buffer, audio, sample_rate, num_channels):
+            # `audio` is raw PCM with no RIFF header. to_wav() is what makes
+            # the uploaded file playable — posting these bytes as-is to a
+            # target opened for "wav" succeeds and produces a file that no
+            # player will open.
+            self._wav = to_wav(audio, sample_rate, num_channels)
+            logger.info(
+                f"[RECORDING] captured {len(self._wav)} bytes ({sample_rate} Hz, {num_channels}ch)"
+            )
+            self._audio_ready.set()
+
+        @observer.event_handler("on_recording_upload")
+        async def on_recording_upload(observer, target):
+            # Awaited inline inside the observer's flush: take the target and
+            # return immediately, so the upload never runs inside a task
+            # nobody awaits, where the process exiting would truncate it.
+            logger.info(f"[RECORDING] upload target issued (key={target.get('key', '?')})")
+            self._target = target
+            self._target_ready.set()
+
+    async def wait_for_upload(self) -> None:
+        """Upload the recording, once both halves have arrived.
+
+        Call this after ``runner.run(task)``. That returning does not mean the
+        call has been submitted — the observer flushes in a background task,
+        and the target only exists once that POST comes back — so returning
+        from the bot any earlier would drop the recording on the floor.
+        """
+        try:
+            await asyncio.wait_for(self._target_ready.wait(), timeout=TARGET_WAIT_SECONDS)
+        except TimeoutError:
+            logger.warning("[RECORDING] no upload target arrived — nothing to upload")
+            return
+
+        try:
+            await asyncio.wait_for(self._audio_ready.wait(), timeout=AUDIO_WAIT_SECONDS)
+        except TimeoutError:
+            logger.warning("[RECORDING] the call produced no audio — skipping upload")
+            return
+
+        await self._upload(self._target, self._wav or b"")
+
+    async def _upload(self, target: dict, wav: bytes) -> None:
+        max_bytes = target.get("max_bytes")
+        if max_bytes and len(wav) > max_bytes:
+            logger.error(
+                f"[RECORDING] {len(wav)} bytes exceeds the target's "
+                f"{max_bytes}-byte limit — skipping upload"
+            )
+            return
+
+        # A presigned S3 POST: the policy fields go in the form, the file last.
+        # The target expires (the deadline is inside the base64 `policy`), so
+        # anything that queues it for later has to upload inside that window.
+        key = target.get("key") or "recording.wav"
+        files = {
+            "file": (
+                os.path.basename(key),
+                wav,
+                target.get("content_type") or "audio/wav",
+            )
+        }
+        try:
+            async with httpx.AsyncClient(timeout=UPLOAD_TIMEOUT_SECONDS) as client:
+                response = await client.post(target["url"], data=target["fields"], files=files)
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            logger.error(f"[RECORDING] upload failed: {exc}")
+            return
+
+        logger.info(f"[RECORDING] uploaded {len(wav)} bytes to {key}")
 
 
 # ---------------------------------------------------------------------------
@@ -250,6 +366,8 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     debug_logger = DebugLogProcessor()
     turn_tracker = TurnTrackingObserver()
 
+    record_calls = os.getenv("TUNER_RECORD_CALLS", "true").lower() in ("1", "true", "yes")
+
     def calculate_cost(usage: CallUsage) -> float:
         # OpenAI gpt-4o-mini pricing (per token)
         llm_cost = (usage.llm_prompt_tokens or 0) * 0.000_000_150
@@ -270,9 +388,21 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         llm_model=os.getenv("TUNER_LLM_MODEL", "gpt-4o-mini"),
         tts_model=os.getenv("TUNER_TTS_MODEL", "deepgram/aura-2-thalia-en"),
         cost_calculator=calculate_cost,
+        # Opts the call into a presigned upload target. The SDK stops there —
+        # CallRecording does the uploading.
+        recording_file_extension="wav" if record_calls else None,
         debug=True,
     )
     observer.attach_turn_tracking_observer(turn_tracker)
+
+    # None unless recording is on. The SDK owns the buffer's configuration
+    # (two channels, caller on the left, nothing emitted until the call ends),
+    # which is what lets it describe the layout to Tuner. It does not start
+    # the recorder — on_client_connected does that below.
+    audio_buffer = observer.audio_buffer()
+    recording = CallRecording() if audio_buffer else None
+    if recording:
+        recording.attach(observer, audio_buffer)
 
     pipeline = Pipeline(
         [
@@ -283,6 +413,10 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             llm,
             tts,
             transport.output(),
+            # After transport.output(): frames travel downstream past it in
+            # both directions, so one processor captures the caller's audio
+            # and the agent's.
+            *([audio_buffer] if audio_buffer else []),
             context_aggregator.assistant(),
         ]
     )
@@ -300,6 +434,11 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     async def on_client_connected(transport, client):
         logger.info("[BOT] Client connected — starting pizzeria flow")
         _order.clear()
+        if audio_buffer:
+            # Pipecat's recorder starts idle and buffers nothing until this is
+            # called. Without it the call ends with an empty buffer, so
+            # on_audio_data never fires and there is nothing to upload.
+            await audio_buffer.start_recording()
         context.add_message(
             {
                 "role": "assistant",
@@ -318,6 +457,9 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
 
     runner = PipelineRunner(handle_sigint=runner_args.handle_sigint)
     await runner.run(task)
+
+    if recording:
+        await recording.wait_for_upload()
 
 
 async def bot(runner_args: RunnerArguments):

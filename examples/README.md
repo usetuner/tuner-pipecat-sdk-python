@@ -10,7 +10,7 @@ Every example is self-contained with its own `pyproject.toml`. Run `uv sync` ins
 
 | Example | Use case | Key concepts |
 |---------|----------|-------------|
-| [`pizza_order/`](pizza_order/) | Pipecat Pizza ordering | LLM tool-calling, running price total, confirmation branch, cost reporting |
+| [`pizza_order/`](pizza_order/) | Pipecat Pizza ordering | LLM tool-calling, running price total, confirmation branch, cost reporting, call recording upload |
 | [`pizza_order_google/`](pizza_order_google/) | Pizza ordering on the Google stack | Google STT/Gemini LLM/Google TTS, cost reporting |
 | [`nova_clinic_pipecat/`](nova_clinic_pipecat/) | Medical clinic receptionist | Tool-calling, SIP/telephony transports, cost reporting |
 | [`pizza_order_langchain/`](pizza_order_langchain/) | Pipecat Pizza ordering via a LangChain agent | `Observer.wrap_chain()`, LLM tool-calling, usage/cost reporting |
