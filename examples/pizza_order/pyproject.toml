@@ -6,6 +6,8 @@ dependencies = [
     "pipecat-ai[webrtc,silero,deepgram,openai,runner]>=1.0.0",
     "tuner-pipecat-sdk",
     "python-dotenv>=1.0.1",
+    # Used directly to POST the recording to Tuner's presigned upload target.
+    "httpx>=0.27",
 ]
 
 [tool.uv.sources]
