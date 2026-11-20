@@ -1,0 +1,40 @@
+# Sends merged PRs to the docs repo, which decides whether they need docs.
+# Skips PRs opened by bots (dependabot and similar) and PRs from forks, which get no secrets.
+name: Docs dispatch
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+env:
+  DOCS_REPO: tuner-docs   # repo name only
+
+permissions: {}
+
+jobs:
+  dispatch:
+    if: >-
+      github.event.pull_request.merged == true
+      && github.event.pull_request.user.type != 'Bot'
+      && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get token for docs repo
+        id: app
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.DOCS_WRITER_APP_ID }}
+          private-key: ${{ secrets.DOCS_WRITER_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ env.DOCS_REPO }}
+
+      - name: Send to docs repo
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: |
+          gh api "repos/${{ github.repository_owner }}/$DOCS_REPO/dispatches" \
+            -f event_type=code-pr-merged \
+            -f "client_payload[repo]=${{ github.repository }}" \
+            -f "client_payload[pr]=${{ github.event.pull_request.number }}"
+          echo "Sent ${{ github.repository }}#${{ github.event.pull_request.number }} to $DOCS_REPO"
